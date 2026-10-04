@@ -43,8 +43,6 @@ use crate::framing;
 use crate::merged::{self, MergedLifecycle};
 use crate::shared_back::SharedBack;
 
-const EMPTY_MAP: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-
 fn manual_destroy_panic() {
     panic!("{MANUAL_DESTROY_PANIC_MESSAGE}");
 }
@@ -61,10 +59,19 @@ struct Rollback {
     instance: Option<(SharedInstances, String)>,
     back: Option<BackRollback>,
     merged: Option<MergedLifecycle>,
+    /// Manual-lifecycle hooks installed by this attempt (gate, destroy
+    /// contract, teardown), in subscription order. Until the factory returns
+    /// successfully every hook is provisional; rollback unsubscribes them so
+    /// a failed construction leaves zero observers on the caller-owned
+    /// manual lifecycle (P1-03).
+    manual_hooks: Option<(LifecycleRegistry, Vec<u64>)>,
+    /// Merged-destroy cascade hook installed by this attempt. Same
+    /// provisional lifetime as the manual hooks.
+    merged_cascade: Option<(LifecycleRegistry, u64)>,
     /// Fixed-child instance-cascade hook, which lives on the parent
     /// lifecycle and is therefore parent-visible. Manual-path hooks live on
     /// the caller-owned manual registry instead: they die with that registry
-    /// (manual destroy clears them) and are not rollback-tracked.
+    /// (manual destroy clears them) and are tracked in `manual_hooks`.
     fixed_hook: Option<(LifecycleRegistry, u64)>,
     defused: bool,
 }
@@ -76,6 +83,8 @@ impl Rollback {
             instance: None,
             back: None,
             merged: None,
+            manual_hooks: None,
+            merged_cascade: None,
             fixed_hook: None,
             defused: false,
         }
@@ -113,6 +122,17 @@ impl Drop for Rollback {
             // holds no registry borrow across observer delivery, and no
             // back-dispatch frame borrows a lifecycle registry.
             merged.shutdown();
+        }
+        // Provisional lifecycle hooks, if any. Unsubscribing is pure cleanup
+        // (no delivery), ordered to avoid user-visible behavior: manual
+        // hooks first, then the merged cascade, then the fixed hook.
+        if let Some((lifecycle, ids)) = self.manual_hooks.take() {
+            for id in ids {
+                let _ = lifecycle.unsubscribe(id);
+            }
+        }
+        if let Some((lifecycle, id)) = self.merged_cascade.take() {
+            let _ = lifecycle.unsubscribe(id);
         }
         if let Some((lifecycle, id)) = self.fixed_hook.take() {
             let _ = lifecycle.unsubscribe(id);
@@ -173,18 +193,37 @@ pub(crate) fn build_child<C>(
     let child_state: SharedKeeper = Rc::new(RefCell::new(StateKeeper::with_restored(seeded)));
     {
         let owned = Rc::clone(&child_state);
+        // Last-good frame cache: the most recent successfully encoded child
+        // frame, returned verbatim when a later save cannot produce a fresh
+        // one. Staleness is bounded by construction — it is always a real
+        // past save, never fabricated — and a healthy save refreshes it.
+        let last_good: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
+        let cache = Rc::clone(&last_good);
         parent_state
             .borrow_mut()
-            .register(key.as_str(), move || {
-                // Save is infallible for byte providers; a nested codec
-                // failure or borrow conflict yields an empty frame rather
-                // than aborting the parent save.
+            .register_optional(key.as_str(), move || {
+                // Preservation contract (P1-02): NEVER fabricate an empty
+                // frame on failure — that would misrepresent "production
+                // failed" as "the child successfully saved an empty map" and
+                // destructively overwrite previously restorable bytes.
+                // Essenty's optional-provider channel offers no error path,
+                // so failure degrades to the last good frame if one exists,
+                // else to absence (`None`), which preserves the as-restored
+                // bytes under this key instead of overwriting them.
+                // - Transient borrow conflict: `None`/last-good; no panic,
+                //   and the next healthy save stores fresh state.
+                // - Nested save/codec failure (only producible by a failing
+                //   user codec inside the child scope): last-good or `None`.
+                //   Codec failures are programmer errors to fix at the
+                //   provider site; they cannot surface through this channel.
                 if let Ok(keeper) = owned.try_borrow()
                     && let Ok(saved) = keeper.save()
                 {
-                    return framing::encode(&saved);
+                    let frame = framing::encode(&saved);
+                    *cache.borrow_mut() = Some(frame.clone());
+                    return Some(frame);
                 }
-                framing::encode(&EMPTY_MAP)
+                cache.borrow().clone()
             })
             .map_err(DecomposeError::StateKeeper)?;
     }
@@ -275,20 +314,24 @@ pub(crate) fn build_child<C>(
     // Start-bridge gate: fixed children are always open; manual children
     // follow the manual lifecycle's Started state (upstream gate). The gate
     // subscription reads the stored evented aggregate, never can_handle().
+    // The gate hook is provisional until factory success (P1-03).
+    let mut manual_hook_ids: Vec<u64> = Vec::new();
     if let Some(manual) = manual {
         gate.set(manual.state().is_started());
         let weak = parent_back.downgrade();
         let gate = Rc::clone(&gate);
         let child_enabled = Rc::clone(&child_enabled);
-        let _gate_sub = manual
-            .subscribe(move |state| {
-                let open = state.is_started();
-                gate.set(open);
-                if let Some(parent) = weak.upgrade() {
-                    parent.set_enabled(handle_id, open && child_enabled.get());
-                }
-            })
-            .detach();
+        manual_hook_ids.push(
+            manual
+                .subscribe(move |state| {
+                    let open = state.is_started();
+                    gate.set(open);
+                    if let Some(parent) = weak.upgrade() {
+                        parent.set_enabled(handle_id, open && child_enabled.get());
+                    }
+                })
+                .detach(),
+        );
     }
 
     // Step 7: merged lifecycle + subscriptions in dependency order.
@@ -296,22 +339,27 @@ pub(crate) fn build_child<C>(
     if let Some(manual) = manual {
         // Destroy-contract guard FIRST so reverse-delivery fires it LAST,
         // after functional cleanup has run. Never fires at subscription time
-        // here: already-destroyed input was rejected in step 1.
-        let _guard = manual.do_on_destroy(manual_destroy_panic).detach();
+        // here: already-destroyed input was rejected in step 1. Provisional
+        // until factory success (P1-03).
+        manual_hook_ids.push(manual.do_on_destroy(manual_destroy_panic).detach());
         let merged = MergedLifecycle::new(parent_lifecycle, manual);
         let parent_observer_id = merged.observer_ids().0;
         child_lifecycle = merged.lifecycle();
         // Child-scope end marks the nested keeper destroyed immediately
         // (bookkeeping; retained-value Drop follows last-Rc release).
+        // Provisional until factory success (P1-03).
         {
             let owned = Rc::clone(&child_instances);
-            let _cascade = child_lifecycle
-                .do_on_destroy(move || {
-                    if let Ok(mut scope) = owned.try_borrow_mut() {
-                        scope.destroy_all();
-                    }
-                })
-                .detach();
+            rollback.merged_cascade = Some((
+                child_lifecycle.clone(),
+                child_lifecycle
+                    .do_on_destroy(move || {
+                        if let Ok(mut scope) = owned.try_borrow_mut() {
+                            scope.destroy_all();
+                        }
+                    })
+                    .detach(),
+            ));
         }
         // Teardown hook LAST so it fires FIRST: unregister state key,
         // destroy instance entry, end child scope, stop the back bridge,
@@ -327,37 +375,49 @@ pub(crate) fn build_child<C>(
             let parents = parent_lifecycle.clone();
             let merged_registry = child_lifecycle.clone();
             let key = key_str.clone();
-            let _teardown = manual
-                .do_on_destroy(move || {
-                    if let Ok(mut keeper) = state.try_borrow_mut() {
-                        keeper.unregister(&key);
-                    }
-                    if let Ok(mut retained) = instances.try_borrow_mut() {
-                        retained.destroy(&key);
-                    }
-                    if let Ok(mut scope) = scope.try_borrow_mut() {
-                        scope.destroy_all();
-                    }
-                    bridge.unregister(handle_id);
-                    peer.remove_enabled_changed_listener(listener_id);
-                    if let Some(id) = parent_observer_id {
-                        let _ = parents.unsubscribe(id);
-                    }
-                    merged::drive(&merged_registry, LifecycleState::Destroyed);
-                })
-                .detach();
+            manual_hook_ids.push(
+                manual
+                    .do_on_destroy(move || {
+                        if let Ok(mut keeper) = state.try_borrow_mut() {
+                            keeper.unregister(&key);
+                        }
+                        if let Ok(mut retained) = instances.try_borrow_mut() {
+                            retained.destroy(&key);
+                        }
+                        if let Ok(mut scope) = scope.try_borrow_mut() {
+                            scope.destroy_all();
+                        }
+                        bridge.unregister(handle_id);
+                        peer.remove_enabled_changed_listener(listener_id);
+                        if let Some(id) = parent_observer_id {
+                            let _ = parents.unsubscribe(id);
+                        }
+                        merged::drive(&merged_registry, LifecycleState::Destroyed);
+                    })
+                    .detach(),
+            );
         }
+        rollback.manual_hooks = Some((manual.clone(), manual_hook_ids));
         rollback.merged = Some(merged);
     } else {
         child_lifecycle = parent_lifecycle.clone();
         // Fixed children persist to parent-scope end. Rust-ownership
         // adaptation (documented): a destroy hook on the shared lifecycle
-        // marks the nested keeper destroyed deterministically when the
-        // parent scope ends. Upstream achieves this through GC-owned
-        // provider destruction; the hook is the explicit equivalent.
+        // ends the nested scope deterministically when the parent scope ends.
+        // Upstream achieves this through GC-owned provider destruction; the
+        // hook is the explicit equivalent. The hook removes the parent
+        // instance entry as well as ending the nested keeper (P1-08,
+        // option B): same-key recreation after parent-scope end then yields
+        // a fresh live scope instead of the destroyed one. Config-change
+        // retention is unaffected — no lifecycle is destroyed on that path.
         let owned = Rc::clone(&child_instances);
+        let retained = Rc::clone(parent_instances);
+        let entry_key = key_str.clone();
         let hook_id = parent_lifecycle
             .do_on_destroy(move || {
+                if let Ok(mut instances) = retained.try_borrow_mut() {
+                    instances.destroy(&entry_key);
+                }
                 if let Ok(mut scope) = owned.try_borrow_mut() {
                     scope.destroy_all();
                 }
@@ -1255,5 +1315,164 @@ mod tests {
         assert_eq!(modal.state(), LifecycleState::Initialized);
         manual.create().unwrap();
         assert_eq!(modal.state(), LifecycleState::Created);
+    }
+
+    // -- P1-02: no silent empty-state substitution ---------------------------
+
+    fn empty_dcs1_frame() -> Vec<u8> {
+        crate::framing::encode(&BTreeMap::new())
+    }
+
+    #[test]
+    fn p1_02_failing_nested_save_never_emits_empty_frame() {
+        let parent = TestContext::new();
+        let child = parent.child_context("c").unwrap();
+        child
+            .state_keeper()
+            .borrow_mut()
+            .register("good", || b"v1".to_vec())
+            .unwrap();
+        let healthy = parent.save_bytes();
+        assert!(healthy.contains_key("c"));
+
+        // A nested codec failure: only producible through a failing user
+        // codec inside the child scope.
+        child
+            .state_keeper()
+            .borrow_mut()
+            .register_value("bad", || 1u32, |_| Err("boom".to_owned()))
+            .unwrap();
+        let failed = parent.save_bytes();
+        // The previous good frame is preserved verbatim — never replaced by
+        // a valid-looking empty DCS1 frame.
+        assert_eq!(failed.get("c"), healthy.get("c"));
+        assert_ne!(failed.get("c"), Some(&empty_dcs1_frame()));
+        let frame = crate::framing::decode(&failed["c"]).unwrap();
+        assert_eq!(frame["good"], b"v1");
+
+        // A scope that never saved healthily degrades to absence, not to a
+        // hollow frame.
+        let parent2 = TestContext::new();
+        let child2 = parent2.child_context("c").unwrap();
+        child2
+            .state_keeper()
+            .borrow_mut()
+            .register_value("bad", || 1u32, |_| Err("boom".to_owned()))
+            .unwrap();
+        let saved = parent2.save_bytes();
+        assert!(
+            !saved.contains_key("c"),
+            "failing provider with no last-good frame must omit the key"
+        );
+    }
+
+    #[test]
+    fn p1_02_borrow_conflict_preserves_and_recovers() {
+        let parent = TestContext::new();
+        let child = parent.child_context("c").unwrap();
+        child
+            .state_keeper()
+            .borrow_mut()
+            .register("good", || b"v1".to_vec())
+            .unwrap();
+        let healthy = parent.save_bytes();
+
+        // Hold the child keeper borrow across the parent save: the provider
+        // cannot borrow, must not panic, and must not emit an empty frame.
+        let keeper = child.state_keeper();
+        let _guard = keeper.borrow_mut();
+        let conflicted = parent.save_bytes();
+        assert_eq!(conflicted.get("c"), healthy.get("c"));
+        assert_ne!(conflicted.get("c"), Some(&empty_dcs1_frame()));
+        drop(_guard);
+
+        // Transient conflict cleared: the next save stores fresh state.
+        child
+            .state_keeper()
+            .borrow_mut()
+            .register("fresh", || b"v2".to_vec())
+            .unwrap();
+        let recovered = parent.save_bytes();
+        let frame = crate::framing::decode(&recovered["c"]).unwrap();
+        assert_eq!(frame["good"], b"v1");
+        assert_eq!(frame["fresh"], b"v2");
+    }
+
+    // -- P1-03: manual hooks roll back ---------------------------------------
+
+    #[test]
+    fn p1_03_manual_factory_panic_leaves_zero_manual_hooks() {
+        let parent = PanicContext {
+            delegate: TestContext::new(),
+        };
+        let manual = manual();
+        let baseline = manual.subscriber_count();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parent.child_context_with_lifecycle("k", &manual).unwrap();
+        }));
+        assert!(result.is_err());
+
+        // Parent resources restored …
+        assert_eq!(parent.state_keeper().borrow().provider_count(), 0);
+        assert!(!parent.instance_keeper().borrow().contains("k"));
+        assert_eq!(parent.back_handler().handler_count(), 0);
+        assert_eq!(parent.lifecycle().subscriber_count(), 0);
+        // … and no hook survives on the caller-owned manual lifecycle.
+        assert_eq!(manual.subscriber_count(), baseline);
+
+        // Destroying the never-attached manual lifecycle must NOT raise the
+        // child-manual-destroy contract panic.
+        manual.destroy().unwrap();
+        assert!(manual.state().is_destroyed());
+    }
+
+    #[test]
+    fn p1_03_manual_retry_after_failure_accumulates_no_hooks() {
+        let parent = PanicContext {
+            delegate: TestContext::new(),
+        };
+        let manual = manual();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parent.child_context_with_lifecycle("k", &manual).unwrap();
+        }));
+        assert_eq!(manual.subscriber_count(), 0);
+
+        // Retry with a healthy factory on the same manual lifecycle: succeeds
+        // with exactly one generation of hooks (gate, destroy contract,
+        // merged-manual observer, teardown) — nothing accumulated.
+        let healthy = TestContext::new();
+        let _child = healthy.child_context_with_lifecycle("k2", &manual).unwrap();
+        assert_eq!(manual.subscriber_count(), 4);
+    }
+
+    // -- P1-08: surviving external keeper edge ---------------------------------
+
+    #[test]
+    fn p1_08_fixed_cascade_removes_entry_and_recreation_is_fresh() {
+        let lifecycle = LifecycleRegistry::new();
+        lifecycle.create().unwrap();
+        // Supplied keeper: survives parent lifecycle destroy (no hook).
+        let external: SharedInstances = Rc::new(RefCell::new(InstanceKeeper::new()));
+        let parent =
+            DefaultComponentContext::with_instance_keeper(lifecycle.clone(), Rc::clone(&external));
+        let child = parent.child_context("c").unwrap();
+        assert!(external.borrow().contains("c"));
+
+        lifecycle.destroy().unwrap();
+        // Cascade ended the nested scope AND removed the entry (option B).
+        assert!(child.instance_keeper().borrow().is_destroyed());
+        assert!(!external.borrow().contains("c"));
+        // The state provider still persists for the parent lifetime.
+        assert!(parent.state_keeper().borrow().is_registered("c"));
+
+        // Same-key recreation at the keeper layer yields a fresh live scope,
+        // never the destroyed one.
+        let fresh: SharedInstances = external
+            .borrow_mut()
+            .get_or_create("c", || RefCell::new(InstanceKeeper::new()))
+            .unwrap();
+        assert!(!fresh.borrow().is_destroyed());
+        assert!(!Rc::ptr_eq(&fresh, &child.instance_keeper()));
     }
 }
