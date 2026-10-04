@@ -318,3 +318,28 @@ Normative `child_context` sequence (F-06):
   (via `create(); destroy()`, matching the upstream observable sequence — bare Essenty
   `destroy()` would skip `Created`); `AlreadyDestroyed` from race/reentrant paths is
   swallowed as idempotent success.
+
+## 13. Phase 1 implementation amendments (2026-10-04)
+
+- **Error surface as shipped (5 variants, not 6).** The `Lifecycle`
+  passthrough proposed in §4 has no producing path — no Phase-1 API yields a
+  `LifecycleError` (the merged driver swallows `AlreadyDestroyed` as
+  idempotent success by design) — and was removed as speculative per the
+  error-minimalism rule. `DecomposeError` ships `DuplicateKey`,
+  `ChildLifecycleDestroyed`, `BackDispatchInProgress`, `StateKeeper`,
+  `InstanceKeeper`, each with a producing path, a test, and documentation.
+- **Merged driver is a latest-target pump, not single `move_to`.** Executable
+  implementation evidence forced one ordering refinement inside step 7: side
+  observers record the freshly computed `min` as a pending target and a pump
+  steps the merged registry toward the *latest* target one step at a time. A
+  direct `move_to` toward a stale outer target oscillates against nested
+  convergence (a transition issued from inside a merged observer advances the
+  registry while the outer `move_to` loop still chases its captured target).
+  Observable semantics are unchanged (the full forward/reverse/destroy tables
+  hold); only the driver structure differs. Test:
+  `reentrant_transitions_from_inside_observers_converge`.
+- **Rollback also tracks the fixed-child cascade hook.** The per-fixed-child
+  destroy hook lives on the parent lifecycle (parent-visible), so the
+  rollback guard owns its id alongside state/instance/back/merged resources.
+  Manual-path hooks live on the caller-owned manual registry (cleared on
+  manual destroy, dead with the registry) and are not tracked.

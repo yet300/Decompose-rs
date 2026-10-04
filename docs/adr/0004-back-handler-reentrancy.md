@@ -82,3 +82,46 @@ outside dispatch apply synchronously and are immediately observable; same-dispat
 mutation from inside a callback MUST go through `SharedBack` methods (which queue) —
 raw nested borrowing is unsupported by API construction. Parity tests execute all nine
 F-02 cases plus the F-11 contract on fresh fixtures.
+
+## Phase 1 implementation amendments (2026-10-04)
+
+R-01 through R-03 (independent re-audit) are resolved as follows; the
+implementation (`src/shared_back.rs`) is authoritative:
+
+- **R-01 — no deferred self-`Invoke`.** Same-dispatcher reentrant
+  `back()` returns `false` immediately and queues nothing; reentrant
+  predictive calls are non-recursive no-ops (`predictive_start` → `false`,
+  progress/cancel/invoke → `Ok(false)`). There is deliberately no pending
+  `Invoke` variant: the `callback → back → drain → callback → …` infinite
+  synchronous drain loop cannot occur. Cross-dispatcher forwarding stays
+  synchronous, and any parent→child→parent ping-pong terminates because the
+  already-busy dispatcher in the cycle refuses reentry. Regression tests:
+  `r01_same_dispatcher_reentrant_back_returns_false_without_requeue`,
+  `r01_reentrant_predictive_calls_are_non_recursive_noops`,
+  `cross_dispatcher_forwarding_stays_synchronous_and_terminates`.
+- **R-02 — unwind discards the aborted dispatch.** On panic the busy flag
+  resets and the *entire* pending mutation queue is discarded (not drained
+  later); the dispatcher keeps its last completed state and stays reusable.
+  Post-panic callers re-apply intended mutations. Regression test:
+  `r02_panic_discards_queued_mutations_without_stale_replay`.
+- **R-03 — evented aggregate only.** Enabled listeners receive the newly
+  computed `enabled: bool`; bridge gate logic is
+  `parent_enabled = lifecycle_gate && NEW evented child aggregate` and must
+  never call `can_handle()` inside the listener (busy-window reads return
+  the cached pre-drain aggregate by design). Positive test:
+  `r03_bridge_uses_evented_bool_for_gate`; negative test proving the old
+  `can_handle()`-in-listener pattern stale:
+  `r03_can_handle_in_listener_pattern_is_stale_negative`.
+- **Callback peer is weak.** The `&SharedBack` handed to registered
+  callbacks is upgraded per call from a `Weak` link: a strong capture would
+  close an `Rc` cycle (dispatcher → entry → peer → dispatcher) and leak
+  every dispatcher with live callbacks. Proven by
+  `bridge_lifetime_strong_child_weak_parent_releases` (strong counts).
+- **Start/stop vocabulary mapping.** `SharedBack` exposes no public
+  `start()`/`stop()`: *start bridge* = register the parent callback and
+  enable per gate; *gate change* = `set_enabled`; *stop bridge* =
+  `unregister` the parent callback. The upstream `start`/`stop` wording
+  survives only in this mapping and in `ChildBackHandler` history.
+- **Error layering (R-04).** `DispatchInProgress` is a `SharedBack`-level
+  error, converted into `DecomposeError::BackDispatchInProgress` only at
+  `ComponentContext` construction boundaries (with full rollback).

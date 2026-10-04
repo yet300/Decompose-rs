@@ -190,3 +190,33 @@ duplicate configs by equality unless enabled), `mainThreadCheckEnabled = true`
 (violations route `NotOnMainThreadException` to `onDecomposeError`, never throw),
 `onDecomposeError = ::printError`. Deprecated `onDecomposeError` top-level and
 `DecomposeExperimentFlags` delegate to it. Linux/web thread checks are no-ops.
+
+## 10. Phase 1 implementation notes (2026-10-04)
+
+- **F-09 residue — destroyed parent vs destroyed keeper.** Child creation on
+  a destroyed parent *lifecycle* is allowed (fixed scopes share it and are
+  born destroyed; merged scopes are born destroyed with zero subscriptions),
+  but creation against an already-`destroy_all()`'d parent *keeper* fails:
+  child `get_or_create` returns `InstanceKeeperError::Destroyed`, mapped
+  through `DecomposeError::InstanceKeeper` with full rollback of the state
+  registration that preceded it. Tests: `destroyed_keeper_scope_rejects_with
+  _instance_destroyed`, `destroyed_parent_lifecycle_allows_born_destroyed_child`.
+- **F-12 residue — observer-driven creation.** Lifecycle-observer-driven
+  `child_context` is executed and succeeds without `RefCell` borrow panics
+  (`lifecycle_observer_driven_creation_succeeds`). Back-callback-driven
+  `child_context` into the *same* busy parent dispatcher is rejected with
+  `BackDispatchInProgress` and full rollback
+  (`back_callback_driven_creation_rejected_with_full_rollback`) — the two
+  paths are intentionally distinct.
+- **Start/stop mapping.** Upstream `start`/`stop` on the child back helper
+  maps to: start bridge = register the parent callback + enable per gate;
+  gate change = `set_enabled`; stop bridge = `unregister` the parent
+  callback. `SharedBack` has no public `start()`/`stop()`.
+- **R-03 bridge rule.** Gate aggregation uses the evented aggregate from the
+  child's enabled listener (`gate && new_child_enabled`), never
+  `child.can_handle()` inside the listener.
+- **Fixed-child instance cascade (Rust-ownership adaptation).** Upstream ends
+  fixed nested scopes through GC-owned provider destruction. The port
+  subscribes one destroy hook on the shared lifecycle per fixed child that
+  marks the nested keeper destroyed deterministically; the hook is
+  rollback-tracked, so failed constructions leave no parent-visible residue.
