@@ -127,6 +127,11 @@ impl Inner {
         if self.pumping.replace(true) {
             return;
         }
+        // Unwind guard (P1-01): a panicking merged observer must not freeze
+        // the pump. Normal completion disarms via `complete()`; any unwind
+        // resets `pumping` through `Drop` so later side deliveries converge.
+        // The panic itself always propagates — only pump state recovers.
+        let guard = PumpGuard::armed(&self.pumping);
         while let Some(target) = self.pending.take() {
             if self.merged.state().is_destroyed() {
                 break;
@@ -146,6 +151,7 @@ impl Inner {
             step_once_toward(&self.merged, target);
         }
         self.pumping.set(false);
+        guard.complete();
         if self.merged.state().is_destroyed() {
             self.shutdown();
         }
@@ -159,6 +165,45 @@ impl Inner {
         }
         if let Some(id) = self.second_id.take() {
             let _ = self.second.unsubscribe(id);
+        }
+    }
+}
+
+/// Unwind guard for one outermost pump run.
+///
+/// Normal completion disarms via [`complete`](PumpGuard::complete); any
+/// unwind path resets `pumping` through `Drop`. Resetting twice is harmless
+/// (plain `Cell::set(false)`), and `completed` only skips the redundant
+/// second write — there is no incorrect double-reset.
+///
+/// Stale-pending decision (P1-01): `pending` is never rolled back. A panic
+/// consumes the in-flight target, but side-state cells stay authoritative
+/// and every new side delivery recomputes `min` from scratch before pumping.
+/// A retained pending value therefore always reflects the latest
+/// side-delivery computation and cannot drive a wrong later transition.
+struct PumpGuard<'a> {
+    pumping: &'a Cell<bool>,
+    completed: bool,
+}
+
+impl<'a> PumpGuard<'a> {
+    fn armed(pumping: &'a Cell<bool>) -> Self {
+        Self {
+            pumping,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self) {
+        self.pumping.set(false);
+        self.completed = true;
+    }
+}
+
+impl Drop for PumpGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.pumping.set(false);
         }
     }
 }
@@ -517,6 +562,64 @@ mod tests {
         assert_eq!(parent.subscriber_count(), 1);
         merged.shutdown();
         merged.shutdown();
+        assert_eq!(parent.subscriber_count(), 0);
+        assert_eq!(manual.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn p1_01_observer_panic_does_not_freeze_pump() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let parent = LifecycleRegistry::new();
+        let manual = LifecycleRegistry::new();
+        let merged = MergedLifecycle::new(&parent, &manual);
+        let child = merged.lifecycle();
+
+        // One-shot panickers: forward panics on the first Created delivery,
+        // reverse panics on a Started delivery only once armed.
+        let panic_forward = Rc::new(Cell::new(true));
+        let panic_reverse = Rc::new(Cell::new(false));
+        let forward_flag = Rc::clone(&panic_forward);
+        let reverse_flag = Rc::clone(&panic_reverse);
+        let _panic_sub = child
+            .subscribe(move |state| {
+                if state == LifecycleState::Created && forward_flag.get() {
+                    forward_flag.set(false);
+                    panic!("forward boom");
+                }
+                if state == LifecycleState::Started && reverse_flag.get() {
+                    reverse_flag.set(false);
+                    panic!("reverse boom");
+                }
+            })
+            .detach();
+
+        // Forward panic: the transition driving merged to Created unwinds.
+        parent.create().unwrap();
+        let panicked = catch_unwind(AssertUnwindSafe(|| manual.create().unwrap())).is_err();
+        assert!(panicked, "forward observer panic must propagate");
+        // Essenty applies state before notifying, so the step landed.
+        assert_eq!(merged.state(), LifecycleState::Created);
+
+        // Later transitions converge despite the aborted pump.
+        parent.start().unwrap();
+        manual.start().unwrap();
+        assert_eq!(merged.state(), LifecycleState::Started);
+        parent.resume().unwrap();
+        manual.resume().unwrap();
+        assert_eq!(merged.state(), LifecycleState::Resumed);
+
+        // Reverse panic: pause drives merged back to Started and unwinds.
+        panic_reverse.set(true);
+        let panicked = catch_unwind(AssertUnwindSafe(|| parent.pause().unwrap())).is_err();
+        assert!(panicked, "reverse observer panic must propagate");
+        assert_eq!(merged.state(), LifecycleState::Started);
+
+        // Convergence continues, then terminal destroy cleans up.
+        parent.stop().unwrap();
+        assert_eq!(merged.state(), LifecycleState::Created);
+        manual.destroy().unwrap();
+        assert_eq!(merged.state(), LifecycleState::Destroyed);
         assert_eq!(parent.subscriber_count(), 0);
         assert_eq!(manual.subscriber_count(), 0);
     }
