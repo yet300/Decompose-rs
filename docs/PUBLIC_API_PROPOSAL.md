@@ -36,16 +36,23 @@ pub trait ComponentContext: Sized {
 pub type ContextFactory<C> = Rc<dyn Fn(ContextParts) -> C>;
 
 pub struct ContextParts {
-    pub lifecycle: LifecycleRegistry,      // already merged / child-scoped by the caller
-    pub state: SharedKeeper,               // Rc<RefCell<StateKeeper>> child dispatcher
-    pub instances: SharedInstances,        // Rc<RefCell<InstanceKeeper>> child scope
-    pub back: SharedBack,                  // Rc<RefCell<BackDispatcher>> child dispatcher
-    scope: ContextScope,                   // PRIVATE lifetime owner: must be forwarded
+    lifecycle: LifecycleRegistry,
+    state: SharedKeeper,
+    instances: SharedInstances,
+    back: SharedBack,
+    scope: ContextScope,
 }
 
 impl ContextParts {
-    // No public constructor. Handles are obtained via accessors; the sanctioned
-    // sink is C::from_parts(parts), which retains `scope` (ADR-0002/0003).
+    // No public constructor and no public fields. Downstream code can
+    // inspect/clone the four usable handles, but cannot construct
+    // ContextParts manually and cannot access ContextScope. The canonical
+    // construction path consumes the original ContextParts through
+    // C::from_parts(parts) or a delegating base factory.
+    pub fn lifecycle(&self) -> &LifecycleRegistry;
+    pub fn state_keeper(&self) -> SharedKeeper;
+    pub fn instance_keeper(&self) -> SharedInstances;
+    pub fn back_handler(&self) -> SharedBack;
 }
 ```
 
@@ -58,9 +65,11 @@ retained provider closures must be `'static`, the public boundary takes `&str` k
 everything captured is an owned `String` (compiler-enforced).
 
 ```rust
+let base = base_factory.clone();
+
 let factory: ContextFactory<AppContext> = Rc::new(move |parts| {
     AppContext {
-        delegate: (base_factory)(parts.clone()),
+        delegate: base(parts),
         logger: logger.clone(),
     }
 });

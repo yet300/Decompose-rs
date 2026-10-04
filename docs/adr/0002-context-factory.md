@@ -14,15 +14,19 @@ state (`ContextScope`) that keeps a child scope attached (see ADR-0003).
 ## Decision
 
 **`pub type ContextFactory<C> = Rc<dyn Fn(ContextParts) -> C>`**, where `ContextParts` is
-consumed by value and carries a **private** `scope: ContextScope` field alongside the four
-public child handles. Closures first; a factory trait only if a future generic demands
-named factory types.
+consumed by value and exposes **no public fields**: four private handle fields plus a
+private `scope: ContextScope` field. Downstream code can inspect/clone the four usable
+handles through read/clone accessors only; it cannot construct `ContextParts` manually and
+cannot access `ContextScope`. Closures first; a factory trait only if a future generic
+demands named factory types.
 
 Lifetime-safety rules (prototype-validated in `/tmp/dc-proto-b`):
 
-1. `ContextParts` has no public constructor and no public `scope` accessor; the only way to
-   obtain handles is through `&self`-style accessors on `parts`, and the only sanctioned
-   sink is `C::from_parts(parts)` / a base-context factory that retains `parts.scope`.
+1. `ContextParts` has no public constructor, no public fields, and no `scope` accessor;
+   the only way to obtain handles is through read/clone accessors
+   (`lifecycle()` / `state_keeper()` / `instance_keeper()` / `back_handler()`), and the
+   only sanctioned sink is `C::from_parts(parts)` / a base-context factory that retains
+   `parts.scope`.
 2. `DefaultComponentContext::from_parts` stores `parts.scope`; it cannot be constructed from
    bare handles without going through `ContextParts`.
 3. Canonical custom-context pattern — delegate, never destructure:

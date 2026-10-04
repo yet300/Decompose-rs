@@ -26,8 +26,12 @@ Upstream suites inventoried: `MergedLifecycleTest` (40+ cases), `DefaultChildBac
    `is_registered(key)` / `contains(key)` / `back()`-gated behavior; duplicate key errors
    with the key in the message.
 4. **Child context with supplied lifecycle**: min-table (either side `INITIALIZED` pins the
-   child; both `RESUMED` advances); manual destroy of the supplied lifecycle errors;
-   already-destroyed supplied lifecycle → detached scope (no registration, never saved).
+   child; both `RESUMED` advances); manual destroy *after successful attachment* →
+   synchronous panic (see suite 15); already-destroyed lifecycle supplied *at creation* →
+   `Err(ChildLifecycleDestroyed)` with zero child-scope registration side effects.
+   Distinction: the *public* `child_context_with_lifecycle` rejects already-destroyed
+   input with `Err` before construction, while the *internal* adapter helpers (suites 5–7)
+   may legitimately produce detached keepers/handlers when tested independently.
 5. **StateKeeper namespace**: duplicate-key `Err(DuplicateKey)`; consume-restore-save
    round-trip (parent save → child bytes → new parent → child consume); `unregister` on
    child-lifecycle destroy exactly once; destroyed-lifecycle child never saved; nested
