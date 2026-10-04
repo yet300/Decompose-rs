@@ -19,25 +19,28 @@ nothing. All teardown is lifecycle-driven. See ADR-0003.
 | `LifecycleRegistry` (parent, child, merged) | Essenty shared handle (`Clone` shares state; pass by value/`&`) | Cheap shared handles; observed from multiple scopes |
 | `MergedLifecycle` | Owned struct holding the merged `LifecycleRegistry`; its parent observers live **in the parent registries** (self-sustaining), removed by id from the teardown hook (or self-removed after driving merged to `Destroyed`) | Dropping the struct must NOT unsubscribe parents (upstream-faithful: observers outlive the view) |
 | Parent `ComponentContext` | Borrowed (`&C`) at `child_context`; engine holds `Rc<C>` where shared ownership is needed | `child_context(&self)`: keepers/dispatchers behind `Rc<RefCell<…>>`, mutated via short `borrow_mut()`; `C: Clone` never required |
-| Child `ComponentContext` | Owned value `C` containing `Rc`-shared handles + `scope: ContextScope` (private) | Move semantics; `Clone` only if the context's own design wants it |
-| `ContextScope` | Plain handle bundle, no `Drop` teardown: merged-or-shared lifecycle + child keeper/dispatcher `Rc`s + keys + parent links | Travels inside `ContextParts`; keeps handles reachable from the context side; all parent-visible teardown is hook-driven |
+| Child `ComponentContext` | Owned value `C` containing the four `Rc`-shared child handles | Move semantics; `Clone` only if the context's own design wants it. No separate scope struct (REDUNDANT — the handles are the scope; lifetime is parent-held) |
+| Back access | `SharedBack` handle only (ADR-0004); raw `RefCell<BackDispatcher>` borrowing is crate-private | Uniform busy window + FIFO queue; registration during dispatch rejected |
 | `StateKeeper` (parent side) | `Rc<RefCell<StateKeeper>>`; `consume` + `register` via short `borrow_mut()` inside `child_context(&self)` | `&mut`-at-birth rejected: `RefCell` gives the same sequencing with upstream-like `&self` ergonomics |
 | Child `StateKeeper` dispatcher | `Rc<RefCell<StateKeeper>>`; parent provider captures a **strong** `Rc` to it | Provider must save child state for the full registration lifetime with zero external refs (upstream `stateKeeper::save` is a strong bound reference); graph `parent → provider → child` has no back edge, so no cycle |
 | `InstanceKeeper` (parent side) | `Rc<RefCell<InstanceKeeper>>`; child scope retained in parent under the child key (strong by construction) | Identity across recreation; removal on child-lifecycle destroy |
-| `BackDispatcher` (parent side) | `Rc<RefCell<BackDispatcher>>`; single parent callback captures a **strong** `Rc` to the child dispatcher | Bridge must route for the full registration lifetime |
-| Factory | `ContextFactory<C> = Rc<dyn Fn(ContextParts) -> C>`; `ContextParts` consumed by value, private `scope` field forwarded via `from_parts`/delegation | Clonable, object-safe; custom contexts close over extra services; public boundary `&str` keys, owned `String` captures (`'static` providers are compiler-enforced) |
-| Child state namespace | Parent provider entry owning the strong child-save closure | Released by lifecycle-destroy `unregister`, never by context drop; fixed children persist to parent-scope end |
-| Child back bridge | Child dispatcher + parent handle id + gate cell + detached-subscription ids (teardown data, not RAII guards) | `stop()` = unregister parent callback; driven by the lifecycle hook |
+| `BackDispatcher` (parent side) | `SharedBack` handle; single parent callback captures a **strong** child `SharedBack` | Bridge must route for the full registration lifetime; all access through the busy-window API (ADR-0004) |
+| Factory | `ContextFactory<C> = Rc<dyn Fn(ContextParts) -> C>`; `ContextParts` consumed by value with no public fields; whole-parts forwarding via base-factory delegation | Clonable, object-safe; custom contexts close over extra services; public boundary `&str` keys, owned `String` captures (`'static` providers are compiler-enforced) |
+| Child state namespace | Parent provider entry owning the strong child-save closure (DCS1-framed bytes) | Released by lifecycle-destroy `unregister`, never by context drop; fixed children persist to parent-scope end |
+| Child back bridge | Child `SharedBack` + parent handle id + gate cell + detached-subscription ids (teardown data, not RAII guards) | `stop()` = unregister parent callback; driven by the lifecycle hook |
 | Subscriptions | Detached (`Subscription::detach`) + explicit removal by id in teardown hooks; destroy-contract observer is fire-and-forget | Parent registries own observer lifetime (like upstream); guards are never the lifetime mechanism |
 
-Borrow discipline (prototype-validated): never hold a `RefCell` borrow across lifecycle
-observer delivery, back dispatch, user callbacks, or factory invocation. Snapshot ids/keys
-into locals first; re-borrow inside each closure invocation.
+Borrow discipline (executed in `/tmp/dc-proto-b` and `/tmp/dc-proto-c`: nested
+three-level plus observer-driven creation complete with no borrow panics): never hold a
+`RefCell` borrow across lifecycle observer delivery, back dispatch, user callbacks, or
+factory invocation. Snapshot ids/keys into locals first; re-borrow inside each closure
+invocation. Back-handler access additionally goes exclusively through `SharedBack`
+(ADR-0004), which makes nested borrowing structurally impossible downstream.
 
 ## 3. Reference cycles and `Weak` usage
 
-Exactly one genuine cycle exists: parent-callback→child-dispatcher→enabled-listener→parent.
-It is broken by capturing a **`Weak<RefCell<BackDispatcher>>`** parent link in the child's
+Exactly one genuine cycle exists: parent-callback→child→enabled-listener→parent.
+It is broken by capturing a **`Weak<SharedBack>`** parent link in the child's
 enabled-listener (upgrade per call; no-op when gone). Everything else is acyclic by
 construction:
 
@@ -53,11 +56,14 @@ construction:
    cycle-free.
 
 Teardown (lifecycle-driven, each step idempotent): manual-child-lifecycle destroy →
-`unregister` state key → `remove` instance scope → back-bridge `stop` (+ unregister parent
-callback) → unsubscribe merged observers → merged registry destroys (cascading to child
-observers). Manual destroy of an attached lifecycle panics via the destroy-contract observer
-*before* sibling hooks run (mirrors upstream subscription order; post-panic hook state
-unspecified). Context/scope drop performs no parent-visible mutation.
+`unregister` state key → `destroy` instance scope entry → back-bridge `stop` (+ unregister
+parent callback) → unsubscribe merged observers → merged registry destroys (cascading to
+child observers). Destroy delivery in Essenty-rs runs in reverse subscription order, so the
+first-subscribed destroy-contract guard fires *last*: functional cleanup hooks run first,
+then the manual-destroy panic (F-03). A panic during observer delivery aborts the loop and
+may skip observer clearing — panic tests use fresh fixtures and assert nothing about
+post-panic cleanup. Context drop performs no parent-visible mutation. No Kotlin-Essenty
+ordering parity is claimed (unverified).
 
 ## 4. Threading model
 

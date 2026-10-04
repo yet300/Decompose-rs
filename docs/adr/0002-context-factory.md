@@ -1,6 +1,7 @@
 # ADR-0002: Context factory as `Rc<dyn Fn(ContextParts) -> C>`
 
-Date: 2026-10-04. Amended: 2026-10-04 (Phase 0.5: scope-lifetime rule added).
+Date: 2026-10-04. Amended: 2026-10-04 (Phase 0.5: scope-lifetime rule added;
+Phase 0.6: `ContextScope` removed as REDUNDANT; factory consumes whole `ContextParts`).
 Upstream: `arkivanov/Decompose@00840bc`. Status: **Accepted**.
 
 ## Context
@@ -8,27 +9,30 @@ Upstream: `arkivanov/Decompose@00840bc`. Status: **Accepted**.
 Upstream `ComponentContextFactory<out T>` is a SAM interface taking four fully-formed
 dependencies and returning a detached `T`. Rust candidates: generic `Fn` bounds, `Rc<dyn Fn>`,
 factory trait, associated factory type, constructor abstraction. Phase 0.5 additionally
-requires: a factory must not be able to *accidentally* discard the hidden scope-lifetime
-state (`ContextScope`) that keeps a child scope attached (see ADR-0003).
+required accident-proof forwarding of the prepared child scope; Phase 0.6 achieves it by
+making `ContextParts` non-constructible and non-destructurable downstream, with delegation
+(not destructuring) as the canonical factory pattern (see ADR-0003 for lifetime).
 
 ## Decision
 
 **`pub type ContextFactory<C> = Rc<dyn Fn(ContextParts) -> C>`**, where `ContextParts` is
-consumed by value and exposes **no public fields**: four private handle fields plus a
-private `scope: ContextScope` field. Downstream code can inspect/clone the four usable
-handles through read/clone accessors only; it cannot construct `ContextParts` manually and
-cannot access `ContextScope`. Closures first; a factory trait only if a future generic
-demands named factory types.
+consumed by value and exposes **no public fields**: four private handle fields
+(`lifecycle`, `state`, `instances`, `back`) with read/clone accessors only, and no public
+constructor. There is deliberately **no `ContextScope` struct** (Phase 0.6/F-01
+classification: REDUNDANT — the four handles *are* the scope; true lifetime is
+parent-held per ADR-0003, and the "scope enforcement" argument for a separate struct was
+overstated). Closures first; a factory trait only if a future generic demands named
+factory types.
 
-Lifetime-safety rules (prototype-validated in `/tmp/dc-proto-b`):
+Factory-safety rules (executed in `/tmp/dc-proto-b` and `/tmp/dc-proto-c`):
 
-1. `ContextParts` has no public constructor, no public fields, and no `scope` accessor;
-   the only way to obtain handles is through read/clone accessors
-   (`lifecycle()` / `state_keeper()` / `instance_keeper()` / `back_handler()`), and the
-   only sanctioned sink is `C::from_parts(parts)` / a base-context factory that retains
-   `parts.scope`.
-2. `DefaultComponentContext::from_parts` stores `parts.scope`; it cannot be constructed from
-   bare handles without going through `ContextParts`.
+1. `ContextParts` has no public constructor and no public fields; handles are obtained
+   through read/clone accessors
+   (`lifecycle()` / `state_keeper()` / `instance_keeper()` / `back_handler()`). The
+   sanctioned sink for the whole `parts` value is a base factory call (`base(parts)`) or a
+   concrete inherent `from_parts(parts)` — never destructuring.
+2. `DefaultComponentContext::from_parts` is an inherent (non-trait) constructor; custom
+   factories delegate to a base factory rather than rebuilding from handles.
 3. Canonical custom-context pattern — delegate, never destructure:
    ```rust
    let base = base_factory.clone();
@@ -36,9 +40,9 @@ Lifetime-safety rules (prototype-validated in `/tmp/dc-proto-b`):
        AppContext { delegate: base(parts), logger: logger.clone() }
    });
    ```
-   Because `scope` is private, the custom factory cannot strip lifetime state without
-   deliberately bypassing `from_parts`; the ergonomic path always forwards it.
-4. Deliberately wrong code (`|_parts| Custom::new(...)`) can still drop scope — accepted:
+   Since `ContextParts` cannot be constructed or destructured downstream, the ergonomic
+   path always forwards the prepared scope.
+4. Deliberately wrong code (`|_parts| Custom::new(...)`) can still ignore scope — accepted:
    the bar is *accidental* misuse, which rules 1–3 eliminate. Our own factories are covered
    by the scope-survival parity test (parent save/bridge/merged-subscription live after the
    factory returns with all temporaries dropped).
@@ -60,5 +64,5 @@ Lifetime-safety rules (prototype-validated in `/tmp/dc-proto-b`):
 
 ## Consequences
 
-`ContextParts` fields for handles are owned `Rc`-style clones; the private `scope` field
-travels by value into the constructed context. Documented on the type; enforced by tests.
+`ContextParts` is consumed by value with no public fields; handles travel as owned
+`Rc`-style clones via accessors. Documented on the type; enforced by tests.

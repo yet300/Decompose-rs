@@ -72,9 +72,13 @@ componentContextFactory(
   post-creation panic exactly, and returns a recoverable `ChildLifecycleDestroyed` error for
   already-destroyed input at creation (documented divergence: nothing has happened yet, so
   recovery is safe — see `PUBLIC_API_PROPOSAL.md` §4).
-- Panic ordering: the destroy-contract guard is subscribed *first* (line 51, before the
-  merged/keeper/handler hooks), so a manual destroy panics before sibling cleanup hooks
-  run — post-panic hook state is deliberately unspecified (programmer-error path).
+- Panic ordering (F-03 correction): the destroy-contract guard is subscribed *first*
+  (line 51, before the merged/keeper/handler hooks), but Essenty-rs delivers destroy
+  observers in *reverse* subscription order — so the guard fires *last*, after functional
+  cleanup hooks have run, and then panics. A panic during observer delivery aborts the
+  loop and may skip observer clearing; panic tests must use fresh fixtures and assert
+  nothing about post-panic cleanup. No Kotlin-Essenty delivery-order parity is claimed
+  (unverified against Essenty Kotlin sources).
 - `backHandlerPriority` overload (default `BackCallback.PRIORITY_DEFAULT = 0`) controls
   global back ordering; default ordering is reverse creation order (LIFO on ties).
 

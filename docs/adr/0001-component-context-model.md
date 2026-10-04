@@ -1,49 +1,62 @@
 # ADR-0001: ComponentContext as trait + default struct
 
 Date: 2026-10-04. Amended: 2026-10-04 (Phase 0.5: `Clone` bound removed).
+Rewritten: 2026-10-04 (Phase 0.6/F-01: `from_parts` removed from trait; fifth
+`context_factory` member added; `child_context` provided via the factory).
 Upstream: `arkivanov/Decompose@00840bc`. Status: **Accepted**.
 
 ## Context
 
-Upstream models context as `GenericComponentContext<out T>` (F-bounded, covariant) with
-`ComponentContext` as the default instantiation, so user-defined contexts with extra
-services flow through navigation untouched. Upstream contexts are NOT clonable; a new
-context means invoking the detached factory. The Rust port must preserve custom contexts
-without Kotlin inheritance, and must not impose a `Clone` constraint upstream never had:
-a custom context may legitimately hold non-`Clone` services/state.
+Upstream models context as `GenericComponentContext<out T>` with `ComponentContext` as the
+default instantiation, so user-defined contexts flow through navigation untouched. Its
+load-bearing fifth member is `componentContextFactory` — not a generic constructor. A
+first-draft Rust trait with `fn from_parts(parts: ContextParts) -> Self` was incoherent:
+`ContextParts` cannot synthesize a service-bearing custom context's extra state (e.g.
+`logger: Rc<Logger>`), so no custom type could implement it without already owning its
+services — the exact thing the factory closure exists to capture.
 
 ## Decision
 
-**Trait `ComponentContext: Sized` (no `Clone` bound) + concrete `DefaultComponentContext`.**
-Navigation is generic (`fn navigate<C: ComponentContext>`) and uses `Rc<C>` wherever
-shared ownership is needed; `ContextFactory<C>: Clone` (an `Rc` closure) is the clonable
-thing, not `C`. `DefaultComponentContext` implements `Clone` itself as a shared-handle
-convenience (clones share one scope); custom contexts implement `Clone` only if their own
-design wants it.
+```rust
+pub trait ComponentContext: Sized {
+    fn lifecycle(&self) -> LifecycleRegistry;
+    fn state_keeper(&self) -> SharedKeeper;
+    fn instance_keeper(&self) -> SharedInstances;
+    fn back_handler(&self) -> SharedBack;
+    /// Upstream `componentContextFactory`: builds the SAME custom type from
+    /// prepared child scope parts, closing over any extra services.
+    fn context_factory(&self) -> ContextFactory<Self>;
 
-## Analysis
+    /// Provided: prepare the child scope, then construct through the factory.
+    fn child_context(&self, key: &str) -> Result<Self, DecomposeError> { /* ... */ }
+    fn child_context_with_lifecycle(&self, key: &str, lifecycle: &LifecycleRegistry)
+        -> Result<Self, DecomposeError> { /* ... */ }
+}
+```
 
-- *Prototype* (`/tmp/dc-proto-a`, real `essenty-* 0.1.0` deps): generic `build_children<C>`
-  with no `Clone` bound holds, constructs, and retains both a `Clone` default context and a
-  custom context holding a genuinely non-`Clone` field (`Subscription` guard) via `Rc<C>`
-  storage and an `Rc<dyn Fn(ContextParts) -> C>` factory. Negative probe confirms the
-  custom context does NOT implement `Clone` while remaining fully usable.
-- *Object safety*: `Self`-returning methods make the trait non-`dyn`-compatible — accepted,
-  because no call site needs `dyn` (engine holds concrete `C` or `Rc<C>`).
-- *Generic child factories*: associated `ContextFactory<C> = Rc<dyn Fn(ContextParts) -> C>`
-  keeps factory types nameable and clonable per `C`.
-- *Custom contexts*: delegation pattern verified against upstream docs recipe; the factory
-  closes over shared services (`Rc<Logger>`-style) while per-scope state (guards, handles)
-  stays per-instance and possibly non-`Clone`.
-- *Lifetimes/mockability*: no lifetimes in the trait (owned `String` keys, `Rc` handles);
-  test doubles implement the trait directly.
-- Rejected (bare struct only): cannot carry user services without a global type or `dyn Any`
-  maps. Rejected (F-bound generics): reproducing `out T` covariance via associated types
-  adds complexity for zero additional expressiveness. Rejected (`C: Clone` bound): proven
-  unnecessary by prototype; would forbid legitimate non-`Clone` services.
+- `from_parts` remains only as an inherent/private constructor on concrete types
+  (`DefaultComponentContext::from_parts`, `TestContext::from_parts`) — never on the trait.
+- `child_context` is a provided trait method: scope preparation (steps F-06/1–8) runs once
+  in the default impl; construction (step 9) goes through `self.context_factory()(parts)`,
+  so every custom type preserves itself with zero casts and no `Clone` bound.
+- The factory is computed from `&self` per call (fresh `Rc` closure capturing current
+  services + base factory). It is never stored on the context, so no self-referential
+  `Rc` cycle is possible by construction.
+
+## Analysis (executed in `/tmp/dc-proto-c`, module `trait_nesting`)
+
+- Three nested `AppContext` generations (`generation` counter + shared `logger`) built
+  through the same generic `child_context`; services propagate, types preserved.
+- Dropping all ancestors leaves descendants fully usable (no factory cycle).
+- `Rc<AppContext>` navigation-style storage with no `C: Clone` bound.
+- Custom context holds a genuinely non-`Clone` field and still implements the trait.
+- Rejected (trait `from_parts`): incoherent for service-bearing types (the F-01 finding).
+- Rejected (stored factory): invites self-referential cycles for zero benefit; computing
+  per call costs one `Rc` allocation per `child_context`, at UI-tree rates.
+- Rejected (`C: Clone` bound, again): still unnecessary.
 
 ## Consequences
 
-Phase 1 implements the trait (no `Clone` bound), the `Clone` default struct, and one
-non-`Clone` custom-context example with tests. Future navigation generics bind on the trait
-and store `Rc<C>`; no redesign expected.
+Phase 1 implements the five-method trait with provided `child_context` methods, the
+`Clone` default struct, and a non-`Clone` service-bearing custom-context example with
+tests. Navigation binds on the trait and constructs exclusively via `context_factory`.

@@ -70,7 +70,32 @@ Upstream suites inventoried: `MergedLifecycleTest` (40+ cases), `DefaultChildBac
 15. **Manual-destroy panic**: `catch_unwind` around `manual.destroy()` on an attached child
     lifecycle asserts the panic (message contract) and that the registry still reports
     `Destroyed`; already-destroyed input at creation asserts `Err(ChildLifecycleDestroyed)`
-    with zero registration side effects.
+    with zero registration side effects. Fresh fixtures; no post-panic cleanup assertions.
+16. **SharedBack reentrancy (all nine F-02 cases on fresh fixtures, zero `RefCell` panics)**:
+    parent→child forwarding; self-disable / self-unregister during forwarded back;
+    aggregation change mid-dispatch; priority change during + after dispatch;
+    start→progress→cancel; start→progress→invoke; mid-gesture priority immunity;
+    register-during-dispatch → `Err(DispatchInProgress)` while other in-callback mutations
+    queue safely.
+17. **In-handler mutation contract (F-11)**: idle mutations apply synchronously and are
+    immediately observable; in-callback same-dispatcher mutations via `SharedBack` apply
+    after drain with no panic. No test claims generic nested borrowing.
+18. **Framing (F-05)**: empty map, nested frame-in-frame, empty key, binary payload,
+    corrupt magic, truncation at every prefix length, trailing bytes, duplicate encoded
+    key, `u32::MAX` length prefix (errors, never panics), full round-trip.
+19. **Construction atomicity + rollback (F-06)**: duplicate key consumes no restored bytes
+    and creates no scope/bridge/subscription; factory panic propagates while the rollback
+    guard removes only attempt-created resources and a pre-existing retained scope keeps
+    `Rc::ptr_eq` identity.
+20. **Root attachTo (F-07)**: root destroy ends the default keeper (`is_destroyed`);
+    supplied external keeper untouched (no hook installed).
+21. **Merged driver sequence (F-08)**: `Initialized → Destroyed` observes exactly
+    `[Created, Destroyed]`; post-destroy driver calls are silent no-ops.
+22. **Error minimalism (F-09)**: each `DecomposeError` variant has a producing-API test;
+    no `ContextDestroyed`/`TypeMismatch` variants exist; framing failures surface as
+    `StateKeeperError::Decode`.
+23. **`get_or_create` identity (F-04)**: same-key recreation returns `Rc::ptr_eq` scope;
+    recreation tests assert pointer identity, not just equality.
 
 ## Later / excluded
 

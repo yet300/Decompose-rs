@@ -7,28 +7,40 @@ Decisions reference ADRs in `docs/adr/`.
 
 ```rust
 pub trait ComponentContext: Sized {
-    fn from_parts(parts: ContextParts) -> Self;
+    fn lifecycle(&self) -> LifecycleRegistry;
+    fn state_keeper(&self) -> SharedKeeper;
+    fn instance_keeper(&self) -> SharedInstances;
+    fn back_handler(&self) -> SharedBack;
+    /// Upstream `componentContextFactory`, computed from &self per call.
+    fn context_factory(&self) -> ContextFactory<Self>;
+
+    /// Provided: prepare the child scope, then construct through the factory.
     fn child_context(&self, key: &str) -> Result<Self, DecomposeError>;
     fn child_context_with_lifecycle(
         &self,
         key: &str,
         lifecycle: &LifecycleRegistry,
     ) -> Result<Self, DecomposeError>;
-    // ... lifecycle()/state_keeper()/instance_keeper()/back_handler() accessors ...
 }
 ```
 
 - Trait (not bare struct): preserves upstream's mandatory custom-context capability via
   generics (`fn navigate<C: ComponentContext>(ctx: &C)`), with zero casts and no global type.
-- **No `Clone` bound** (Phase 0.5, prototype-validated): a custom context may hold
-  non-`Clone` services/state. Shared ownership uses `Rc<C>`; the clonable factory
-  (`ContextFactory<C>`, an `Rc` closure) is what gets cloned, not `C`.
+- **No `Clone` bound**: a custom context may hold non-`Clone` services/state. Shared
+  ownership uses `Rc<C>`; the clonable factory (`ContextFactory<C>`, an `Rc` closure) is
+  what gets cloned, not `C`. (Three nested service-bearing generations executed in
+  `/tmp/dc-proto-c` without any `Clone` bound.)
+- **No `from_parts` on the trait** (F-01): a generic constructor cannot synthesize custom
+  services. `from_parts` exists only as an inherent constructor on concrete types
+  (`DefaultComponentContext::from_parts`). The trait's fifth member is the factory —
+  mirroring upstream's `componentContextFactory`, not a constructor.
 - Concrete `DefaultComponentContext` struct ships in-core and implements `Clone` itself as
   a shared-handle convenience (clones share one scope).
 - Rejected: bare-struct-only (kills custom contexts), `dyn`-compatible trait (impossible
   with `Self`-returning factory; navigation is generic, so `dyn` is unnecessary),
   Kotlin-style F-bound generics (no Rust equivalent worth the complexity), `C: Clone`
-  bound (proven unnecessary; would forbid legitimate services).
+  bound (proven unnecessary; would forbid legitimate services), stored factory (invites
+  self-referential cycles; computing per call costs one `Rc` allocation).
 
 ## 2. Factory representation: `Rc<dyn Fn(...) -> C>` (ADR-0002: DECIDED)
 
@@ -40,15 +52,15 @@ pub struct ContextParts {
     state: SharedKeeper,
     instances: SharedInstances,
     back: SharedBack,
-    scope: ContextScope,
 }
 
 impl ContextParts {
     // No public constructor and no public fields. Downstream code can
     // inspect/clone the four usable handles, but cannot construct
-    // ContextParts manually and cannot access ContextScope. The canonical
-    // construction path consumes the original ContextParts through
-    // C::from_parts(parts) or a delegating base factory.
+    // ContextParts manually. The canonical construction path consumes the
+    // original ContextParts through a base factory call or a concrete
+    // inherent from_parts(parts). (No ContextScope struct: REDUNDANT per
+    // ADR-0002 — the four handles are the scope; lifetime is parent-held.)
     pub fn lifecycle(&self) -> &LifecycleRegistry;
     pub fn state_keeper(&self) -> SharedKeeper;
     pub fn instance_keeper(&self) -> SharedInstances;
@@ -59,10 +71,8 @@ impl ContextParts {
 Closures first; introduce a `factory trait` only if a future navigation generic demands
 named-type factories (no evidence now). The factory is explicitly **detached** (same
 contract as upstream): scoping inputs are prepared by `child_context`/engine, the factory
-only assembles — and it must forward the private `scope` (by constructing through
-`from_parts` or a delegating base factory) so the child cannot silently detach. Because
-retained provider closures must be `'static`, the public boundary takes `&str` keys but
-everything captured is an owned `String` (compiler-enforced).
+only assembles. Because retained provider closures must be `'static`, the public boundary
+takes `&str` keys but everything captured is an owned `String` (compiler-enforced).
 
 ```rust
 let base = base_factory.clone();
@@ -78,11 +88,13 @@ let factory: ContextFactory<AppContext> = Rc::new(move |parts| {
 ## 3. Key model (DECIDED)
 
 ```rust
-pub struct ChildKey(String); // owned; unique-within-parent only — "" is allowed
+pub(crate) struct ChildKey(String); // owned; unique-within-parent only — "" is allowed
 ```
 
-- Public key type is an owned `String` wrapper (callers pass `&str`; storage is owned).
-  Upstream requires only *uniqueness within the parent scope* (verified: `ChildStateKeeper`
+- Phase-1 child APIs accept `&str`; no Phase-1 external API consumes `ChildKey`, so it
+  stays **crate-private** (F-10 — no unused public vocabulary; revisit in Phase 2 when
+  engine-generated keys exist). Internally it is an owned `String` wrapper.
+- Upstream requires only *uniqueness within the parent scope* (verified: `ChildStateKeeper`
   checks `isRegistered` only; no length/content validation), so Rust adds no non-empty or
   format restriction. `""` is legal if unique.
 - Nested namespaces are *positional composition*, not string concatenation: each scope holds
@@ -92,23 +104,27 @@ pub struct ChildKey(String); // owned; unique-within-parent only — "" is allow
   where it becomes a deterministic per-collection counter + caller key).
 - Duplicate parent-level key → `Err(DecomposeError::DuplicateKey { key })`. No panics.
 
-## 4. Error model (DECIDED)
+## 4. Error model (DECIDED; minimized per F-09)
 
 ```rust
 pub enum DecomposeError {
     DuplicateKey { key: String },
     ChildLifecycleDestroyed,          // supplied lifecycle already destroyed at creation
-    ContextDestroyed,                  // operation on a destroyed scope
+    BackDispatchInProgress,           // register requested while that dispatcher is dispatching
     Lifecycle(LifecycleError),         // transparent Essenty passthrough (#[from])
     StateKeeper(StateKeeperError),
     InstanceKeeper(InstanceKeeperError),
-    TypeMismatch { key: String },      // retained-type conflicts
 }
 ```
 
-- `Result` + typed error everywhere a caller can recover (duplicate keys, destroyed inputs
-  detectable *before* side effects, consumed-state decode, type mismatches).
-  `thiserror`-style, mirroring Essenty-rs errors.
+Only variants with a real Phase-1 producing API exist. Removed as speculative:
+`ContextDestroyed` (child creation on a destroyed parent is *allowed* — the merged scope
+is simply born destroyed with no subscriptions, mirroring upstream; no error path
+produces it) and `TypeMismatch` (child-scope construction uses fixed internal types with
+Decompose-namespaced keys, so no caller-observable mismatch path exists in Phase 1;
+genuine keeper mismatches still surface through the transparent
+`InstanceKeeper(InstanceKeeperError)` passthrough). Framing decode failures surface as
+`StateKeeper(StateKeeperError::Decode { .. })` — no new variant.
 - Programmer-contract violations that surface *through Essenty-owned calls* are panics, not
   `Result`s — Decompose cannot change `LifecycleRegistry::destroy()`'s signature:
   - **Manual destruction of an attached child lifecycle panics.** `child_context` registers
@@ -199,7 +215,8 @@ impl ComponentContext for AppContext { /* delegate + closed-over logger factory 
 
 `child_context` takes `&self` (shared handles + short `RefCell` borrows; never held
 across observer delivery, back dispatch, user callbacks, or factory invocation —
-prototype-validated for nested and observer-driven creation).
+executed for nested and observer-driven creation in `/tmp/dc-proto-b` and
+`/tmp/dc-proto-c` with no borrow panics).
 
 Fixed child:
 
@@ -220,13 +237,84 @@ manual.resume().unwrap();   // merged lifecycle advances only with the parent
 ## 9. API stability strategy (first release `0.1.x`)
 
 - Public immediately: `ComponentContext` trait, `DefaultComponentContext`,
-  `ContextFactory`/`ContextParts`, `ChildKey`, `DecomposeError`, `MergedLifecycle`,
-  child-scope constructors, `DEFAULT_BACK_PRIORITY`.
-- Crate-private: `ContextScope` (private fields, travels inside `ContextParts`),
-  `ChildStateKeeper`/`ChildInstanceKeeper`/`ChildBackHandler` adapter
-  internals (exposed only through `child_context` behavior + `pub(crate)` items),
-  detached-subscription ids, enabled-listener tokens.
+  `ContextFactory`/`ContextParts` (no public fields), `SharedBack`, `DecomposeError`,
+  `MergedLifecycle`, child-scope constructors, `DEFAULT_BACK_PRIORITY`.
+- Crate-private: `ChildKey`, adapter internals (exposed only through `child_context`
+  behavior + `pub(crate)` items), detached-subscription ids, enabled-listener tokens,
+  framing codec.
 - Experimental (feature-gated or clearly marked): back-priority override overload,
   predictive-back forwarding surface.
 - Waits for navigation: everything observable (`Value`), codecs, `children()` engine,
   `Child.{Created,Destroyed}`.
+
+## 10. Shared back-handler access (ADR-0004: DECIDED)
+
+`ComponentContext::back_handler()` returns `SharedBack` — an `Rc`-backed (`Clone`,
+`!Send + !Sync`, no `Arc`/`Mutex`) reentrancy-safe handle. Raw `Rc<RefCell<BackDispatcher>>`
+never appears in public API: Essenty holds a mutable borrow across synchronous callback
+dispatch, so any nested borrow from inside a callback panics.
+
+- Uniform busy window: outermost entry runs its operation then drains a FIFO pending
+  queue; nested entries only enqueue. Panic guard resets depth on unwind without draining.
+- Queued when busy: `set_enabled`, `set_priority`, `unregister`, listener add/remove,
+  same-dispatcher reentrant `back`/predictive (returns `false`, applied in order).
+- Rejected with `Err(DispatchInProgress)`: new-callback `register` during dispatch
+  (no id reservation exists for queued registration; engine never needs it).
+- `can_handle()`: fresh read when idle, maintained cached aggregate when busy.
+- Bridge use (normative): plain `register` (not `register_reentrant` — `BackCommand` has
+  no priority op and covers no cross-dispatcher listener hazard); strong child capture;
+  `Weak` parent link in the enabled-listener; gate updates through wrapper methods.
+- In-handler rule (F-11): idle mutations apply synchronously and are immediately
+  observable; in-callback same-dispatcher mutation MUST use `SharedBack` methods. All
+  nine F-02 cases plus the contract executed in `/tmp/dc-proto-c`.
+
+## 11. Internal child-state framing (F-05: DECIDED, no ADR — versioned, cheap to evolve)
+
+`child StateKeeper::save()` yields `BTreeMap<String, Vec<u8>>`; the parent provider needs
+one `Vec<u8>`. The internal `DCS1` container (not a public serializer; navigation codecs
+layer above it in Phase 6):
+
+```text
+magic "DCS1" (4 bytes) | entry_count u32 LE
+per entry: key_len u32 LE | key UTF-8 bytes | value_len u32 LE | value bytes
+stable BTreeMap order; no serde dependency
+```
+
+Decode failures: bad magic / truncation (all prefix lengths) / trailing bytes / invalid
+UTF-8 keys / duplicate encoded keys → typed decode error surfacing as
+`StateKeeperError::Decode`; `u32` lengths with checked cursor arithmetic (huge prefixes
+error, never panic). Empty map, empty keys, and arbitrary binary payloads are legal;
+nesting works by framing a frame. Eight coverage cases (incl. overflow) executed in
+`/tmp/dc-proto-c`.
+
+## 12. Construction order, rollback, root attachment, merged driver (DECIDED)
+
+Normative `child_context` sequence (F-06):
+
+```text
+1. validate supplied lifecycle state (destroyed → Err(ChildLifecycleDestroyed), no effects)
+2. duplicate state-key check BEFORE consuming restored bytes
+3. consume restored state
+4. create/register child state keeper (DCS1 provider)
+5. obtain retained child InstanceKeeper via get_or_create (record pre-existence)
+6. create/register back bridge
+7. merged lifecycle + subscriptions in dependency order
+8. build ContextParts
+9. invoke custom context factory LAST
+```
+
+- Recoverable failure (`DuplicateKey` at step 2): nothing consumed, created, registered,
+  or subscribed — explicit atomicity test.
+- Factory panic (step 9): option A, temporary rollback guard (executed in `/tmp/dc-proto-c`).
+  The guard owns exactly: state-key registration, back-callback registration, merged-sub
+  ids, and the instance entry *iff created by this attempt* (pre-existence recorded at
+  step 5). A pre-existing retained scope is never removed. Guard `Drop` is infallible
+  (`try_borrow_mut`, no unwraps); success defuses it.
+- Root `attachTo` (F-07): fresh default `InstanceKeeper` + one detached destroy
+  subscription calling `destroy_all()` — lifetime independent of any temporary guard, no
+  context-drop teardown. Supplied external keepers get no hook. Tests: root destroy ends
+  the default keeper; external keeper untouched.
+- Merged driver (F-08): `Initialized → Destroyed` emits `Created` then `Destroyed`
+  (via `create(); destroy()`, matching the upstream observable sequence — bare Essenty
+  `destroy()` would skip `Created`); `AlreadyDestroyed` from race/reentrant paths is
+  swallowed as idempotent success.
