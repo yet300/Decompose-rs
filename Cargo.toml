@@ -1,0 +1,23 @@
+[package]
+name = "decompose-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+license = "Apache-2.0"
+repository = "https://github.com/yet300/Decompose-rs"
+homepage = "https://github.com/yet300/Decompose-rs"
+description = "Independent Rust port of Ark Ivanov's Decompose component-context foundation (Phase 1: ComponentContext only, no navigation)"
+keywords = ["ui", "navigation", "component", "lifecycle", "state"]
+categories = ["gui"]
+exclude = ["upstream-ref/", "/target"]
+
+[dependencies]
+essenty-lifecycle = "0.1.0"
+essenty-state-keeper = "0.1.0"
+essenty-instance-keeper = "0.1.0"
+essenty-back-handler = "0.1.0"
+thiserror = "2"
+
+[lib]
+name = "decompose_rs"
+path = "src/lib.rs"

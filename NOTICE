@@ -1,0 +1,24 @@
+Decompose-rs — NOTICE
+========================
+
+Decompose-rs is an independent Rust port of the component-context
+foundation of Decompose by Ark Ivanov. It preserves observable behavioral
+semantics; it is not a copy of the upstream implementation and makes no
+claim of official affiliation with Ark Ivanov or the Decompose project.
+
+Upstream project: Decompose
+Upstream repository: https://github.com/arkivanov/Decompose
+Pinned research baseline: master @ 00840bcfed6d55710c8fbb1a72503f2041eda490
+
+Essenty-rs dependency (registry-only, crates.io):
+  essenty-lifecycle = "0.1.0"
+  essenty-state-keeper = "0.1.0"
+  essenty-instance-keeper = "0.1.0"
+  essenty-back-handler = "0.1.0"
+Essenty release source: 2bf0e9108d8ae2dcd67ac3ab7ea7ca54cae16092
+
+Behavioral transition tables and parity tests in this repository may cite
+upstream source locations and the pinned SHA above for traceability.
+No large Kotlin implementation bodies are copied verbatim.
+
+License: Apache-2.0 (see LICENSE-APACHE).
