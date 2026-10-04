@@ -36,15 +36,20 @@ impl SharedBack {
 }
 ```
 
-Algorithm (executed in `/tmp/dc-proto-c`):
+Algorithm (executed in `/tmp/dc-proto-c`, as amended by the Phase 1.1
+re-audit resolutions below — the amendment section is normative; the two
+struck paragraphs are retained as explicitly SUPERSEDED history):
 
 - **Uniform busy window.** Every entry point increments a `busy` depth counter; the
   *outermost* frame runs its operation then drains the FIFO pending queue; nested frames
-  only enqueue. A panic guard resets `busy` on unwind without draining (leftovers drain at
-  the next entry). No `RefCell` borrow is ever held across a nested entry: each queued op
-  borrows separately.
+  only enqueue. ~~A panic guard resets `busy` on unwind without draining (leftovers
+  drain at the next entry).~~ SUPERSEDED by R-02: on unwind the busy flag resets and
+  the entire pending queue is discarded — nothing replays later. No `RefCell` borrow
+  is ever held across a nested entry: each queued op borrows separately.
 - **Queued ops**: `SetEnabled`, `SetPriority`, `Unregister`, `AddListener`,
-  `RemoveListener`, and deferred same-dispatcher `Invoke` (back / predictive variants).
+  `RemoveListener`~~, and deferred same-dispatcher `Invoke` (back / predictive
+  variants)~~. SUPERSEDED by R-01: there is no deferred same-dispatcher `Invoke`;
+  reentrant back/predictive calls return the false-equivalent and queue nothing.
   FIFO order; each applied after the outer dispatch releases dispatcher access.
 - **Registration during dispatch is rejected** with `Err(DispatchInProgress)` — a precise,
   testable contract. Essenty exposes no id reservation for queued registration, and a

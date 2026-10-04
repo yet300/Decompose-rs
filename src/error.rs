@@ -2,10 +2,15 @@
 //!
 //! Every variant has exactly one real producing path in Phase 1, one test,
 //! and one documentation entry. No speculative variants exist: there is no
-//! `ContextDestroyed` (child creation on a destroyed parent is allowed — the
-//! scope is simply born destroyed) and no `TypeMismatch` wrapper (child-scope
-//! construction uses fixed internal types; genuine keeper mismatches surface
-//! through the transparent [`DecomposeError::InstanceKeeper`] passthrough).
+//! `ContextDestroyed` — a destroyed *lifecycle* does not by itself forbid
+//! child creation (the scope is simply born destroyed) — BUT if the relevant
+//! parent `InstanceKeeper` scope has already been destroyed, construction
+//! fails with `InstanceKeeperError::Destroyed` (for default root contexts,
+//! lifecycle destroy drives the attached keeper's `destroy_all`, so later
+//! child creation on that root fails). There is likewise no `TypeMismatch`
+//! wrapper (child-scope construction uses fixed internal types; genuine
+//! keeper mismatches surface through the transparent
+//! [`DecomposeError::InstanceKeeper`] passthrough).
 //!
 //! Programmer-contract violations that surface through Essenty-owned calls
 //! are panics, not `Result`s (see

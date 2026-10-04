@@ -118,9 +118,12 @@ pub enum DecomposeError {
 ```
 
 Only variants with a real Phase-1 producing API exist. Removed as speculative:
-`ContextDestroyed` (child creation on a destroyed parent is *allowed* — the merged scope
-is simply born destroyed with no subscriptions, mirroring upstream; no error path
-produces it) and `TypeMismatch` (child-scope construction uses fixed internal types with
+`ContextDestroyed` (a destroyed *lifecycle* does not by itself forbid child creation —
+the scope is simply born destroyed with no subscriptions, mirroring upstream — BUT a
+destroyed parent *keeper scope* fails construction with
+`InstanceKeeperError::Destroyed`; for default root contexts lifecycle destroy drives the
+attached keeper's `destroy_all`, so later child creation on that root fails) and
+`TypeMismatch` (child-scope construction uses fixed internal types with
 Decompose-namespaced keys, so no caller-observable mismatch path exists in Phase 1;
 genuine keeper mismatches still surface through the transparent
 `InstanceKeeper(InstanceKeeperError)` passthrough). Framing decode failures surface as
@@ -255,9 +258,13 @@ never appears in public API: Essenty holds a mutable borrow across synchronous c
 dispatch, so any nested borrow from inside a callback panics.
 
 - Uniform busy window: outermost entry runs its operation then drains a FIFO pending
-  queue; nested entries only enqueue. Panic guard resets depth on unwind without draining.
-- Queued when busy: `set_enabled`, `set_priority`, `unregister`, listener add/remove,
-  same-dispatcher reentrant `back`/predictive (returns `false`, applied in order).
+  queue; nested entries only enqueue. ~~Panic guard resets depth on unwind without
+  draining.~~ SUPERSEDED by R-02 (Phase 1.1): unwind resets the flag and discards the
+  whole pending queue.
+- Queued when busy: `set_enabled`, `set_priority`, `unregister`, listener add/remove.
+  ~~same-dispatcher reentrant `back`/predictive (returns `false`, applied in order).~~
+  SUPERSEDED by R-01 (Phase 1.1): same-dispatcher reentrant `back`/predictive returns
+  the false-equivalent and queues nothing — there is no deferred `Invoke`.
 - Rejected with `Err(DispatchInProgress)`: new-callback `register` during dispatch
   (no id reservation exists for queued registration; engine never needs it).
 - `can_handle()`: fresh read when idle, maintained cached aggregate when busy.

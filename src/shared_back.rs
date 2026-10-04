@@ -259,12 +259,28 @@ impl SharedBack {
     /// (LIFO). The callback receives the event plus this handle for
     /// in-handler mutations.
     ///
+    /// WARNING (P1-06): the `&SharedBack` peer is for in-handler operations
+    /// only — DO NOT retain, clone, or store it beyond callback execution.
+    /// A retained peer closes `dispatcher → callback → peer → dispatcher`
+    /// and leaks the dispatcher for as long as the peer is held (proven by
+    /// the bridge-lifetime test). Clone the handle you registered *with*
+    /// instead if shared ownership is needed.
+    ///
     /// # Errors
     ///
     /// Returns [`DispatchInProgress`](crate::DispatchInProgress) when called
     /// while this same dispatcher is dispatching. There is no queued
     /// registration: callers (notably child-scope construction from inside a
     /// back callback) must treat this as a hard failure and roll back.
+    ///
+    /// # Panics
+    ///
+    /// A panicking wrapper enabled listener during register-triggered
+    /// notification (P1-07) leaves the underlying Essenty handler inserted
+    /// before any public handle is returned: partially applied state.
+    /// Listener panics are programmer error — use a fresh fixture, do not
+    /// catch and continue on this path. (R-02 queue discard covers
+    /// callback-*dispatch* panics, not listener registration races.)
     pub fn register(
         &self,
         priority: i32,
@@ -511,6 +527,12 @@ impl SharedBack {
     /// Additions requested while busy queue FIFO and take effect at drain,
     /// so a listener added from inside a callback never observes the event
     /// currently being delivered.
+    ///
+    /// # Panics
+    ///
+    /// Wrapper enabled listeners must not panic (P1-07). A panic unwinds
+    /// through the notifying dispatcher operation with partially applied
+    /// state; treat it as programmer error and use a fresh fixture.
     pub fn add_enabled_changed_listener(&self, listener: impl Fn(bool) + 'static) -> u64 {
         let id = self.inner.next_listener_id.get();
         self.inner.next_listener_id.set(id + 1);

@@ -42,7 +42,9 @@ Upstream suites inventoried: `MergedLifecycleTest` (40+ cases), `DefaultChildBac
    difference); child-lifecycle destroy removes exactly once (second destroy safe);
    destroyed-lifecycle → detached keeper; type-mismatch `Err` leaves retained value intact.
 7. **BackHandler hierarchy**: `start`/`stop` idempotence + `handler_count`;
-   `enabled == lifecycle_gate && child.can_handle()` full 2×2 matrix; destroyed-lifecycle
+   `enabled == lifecycle_gate && evented_child_enabled` full 2×2 matrix (`can_handle()`
+   inside the listener is forbidden — the busy-window value is stale by design, see
+   R-03); destroyed-lifecycle
    detached (`back() == false`); lifecycle `STARTED` gate table (`CREATED+enabled→false`).
 8. **BackHandler priority**: explicit priorities dispatch highest-first; default ordering is
    reverse creation order (LIFO ties); live priority mutation affects subsequent presses.

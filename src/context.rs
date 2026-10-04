@@ -27,11 +27,28 @@ use crate::shared_back::SharedBack;
 /// `Rc`-backed and [`Clone`]; `!Send + !Sync` like the rest of the core.
 /// Mutated through short `borrow_mut()` calls that never cross observer
 /// delivery, back dispatch, user callbacks, or factory invocation.
+///
+/// # Borrow discipline
+///
+/// Callers MUST NOT hold a `Ref`/`RefMut` on the keeper across Decompose
+/// operations that may mutate that same shared keeper — notably
+/// `child_context*` construction and root lifecycle destroy when using the
+/// default attached `InstanceKeeper`. Violating this panics at runtime under
+/// normal `RefCell` borrowing rules; the API does not (and cannot)
+/// statically prevent it. Decompose itself upholds the mirror discipline:
+/// it never holds a keeper borrow across observer delivery, back dispatch,
+/// user callbacks, or factory invocation.
 pub type SharedKeeper = Rc<RefCell<StateKeeper>>;
 
 /// Shared parent-side instance-keeper handle.
 ///
-/// Same sharing and borrow discipline as [`SharedKeeper`].
+/// Same sharing discipline as [`SharedKeeper`].
+///
+/// # Borrow discipline
+///
+/// Same contract as [`SharedKeeper`]: never hold a borrow across
+/// `child_context*` construction or root lifecycle destroy with the default
+/// attached keeper. A conflicting borrow panics per `RefCell` rules.
 pub type SharedInstances = Rc<RefCell<InstanceKeeper>>;
 
 /// Detached context factory: builds a context of type `C` from prepared
@@ -193,6 +210,12 @@ pub trait ComponentContext: Sized {
     /// - [`DecomposeError::StateKeeper`] for malformed restored child state.
     /// - [`DecomposeError::BackDispatchInProgress`] when called from inside
     ///   a back callback of the same parent dispatcher.
+    ///
+    /// # Panics
+    ///
+    /// Holding a `Ref`/`RefMut` borrow on the parent state or instance
+    /// keeper across this call panics under `RefCell` rules (see the
+    /// borrow-discipline sections on [`SharedKeeper`]/[`SharedInstances`]).
     fn child_context(&self, key: &str) -> Result<Self, DecomposeError> {
         self.child_context_with_priority(key, DEFAULT_BACK_PRIORITY)
     }
@@ -218,6 +241,10 @@ pub trait ComponentContext: Sized {
     /// in reverse subscription order): functional cleanup hooks run first,
     /// then the panic. Post-panic observer cleanup is unspecified — use
     /// fresh fixtures when testing this path.
+    ///
+    /// Holding a keeper borrow across this call panics under `RefCell`
+    /// rules, same as
+    /// [`child_context`](ComponentContext::child_context).
     fn child_context_with_lifecycle(
         &self,
         key: &str,
@@ -235,6 +262,11 @@ pub trait ComponentContext: Sized {
     /// # Errors
     ///
     /// Same as [`child_context`](ComponentContext::child_context).
+    ///
+    /// # Panics
+    ///
+    /// Same keeper-borrow contract as
+    /// [`child_context`](ComponentContext::child_context).
     fn child_context_with_priority(
         &self,
         key: &str,
@@ -265,7 +297,9 @@ pub trait ComponentContext: Sized {
     /// # Panics
     ///
     /// Same manual-destroy contract as
-    /// [`child_context_with_lifecycle`](ComponentContext::child_context_with_lifecycle).
+    /// [`child_context_with_lifecycle`](ComponentContext::child_context_with_lifecycle),
+    /// plus the same keeper-borrow contract as
+    /// [`child_context`](ComponentContext::child_context).
     fn child_context_with_lifecycle_and_priority(
         &self,
         key: &str,
