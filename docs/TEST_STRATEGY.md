@@ -49,11 +49,24 @@ Upstream suites inventoried: `MergedLifecycleTest` (40+ cases), `DefaultChildBac
     state round-trips through real bytes; config change retains instance identity;
     process death replaces it.
 11. **Cleanup / leak**: after full teardown, parent `subscriber_count == 0`,
-    `handler_count == 0`, no providers registered; scope drop defensively unregisters
-    (double-teardown safe).
-12. **Reentrancy**: `child_context` and navigation-style transitions issued from inside
-    lifecycle/back observers converge without deadlock (`RefCell` discipline: never hold a
-    borrow across observer dispatch).
+    `handler_count == 0`, no providers registered; lifecycle-driven hooks (not scope drop)
+    perform teardown — assert dropping a child context alone detaches nothing.
+12. **Reentrancy**: `child_context(&self)` and navigation-style transitions issued from
+    inside lifecycle/back observers converge without deadlock (`RefCell` discipline: never
+    hold a borrow across observer dispatch, back dispatch, user callbacks, or factory
+    invocation; nested three-level creation covered).
+13. **Scope survival**: after the factory returns with all temporaries dropped, parent
+    `subscriber_count`/`handler_count`/provider registration prove merged subscription,
+    back bridge, state provider, and instance retention are live; advancing the parent
+    advances the merged child.
+14. **Strong-provider ownership (mandatory)**: create child state scope; register child
+    state; drop ALL ordinary external child handles not semantically required; save parent
+    while the namespace is registered; assert child state is present and round-trips
+    through restore. (A `Weak` provider fails this test by construction.)
+15. **Manual-destroy panic**: `catch_unwind` around `manual.destroy()` on an attached child
+    lifecycle asserts the panic (message contract) and that the registry still reports
+    `Destroyed`; already-destroyed input at creation asserts `Err(ChildLifecycleDestroyed)`
+    with zero registration side effects.
 
 ## Later / excluded
 

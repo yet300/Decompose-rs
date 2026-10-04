@@ -63,6 +63,18 @@ componentContextFactory(
   child follows parent through resume and destroy.
 - Non-null → `MergedLifecycle(parent, child)`; manual destruction of the supplied
   lifecycle is a programmer error (`IllegalStateException`).
+- Destroyed-input subtlety (verified Phase 0.5 against Essenty `LifecycleExt.doOnDestroy`,
+  which runs the block *immediately* when already destroyed): at the `childContext` level,
+  an already-destroyed supplied lifecycle throws via the line-51 guard *before* any child
+  helper runs — there is no detached-`childContext` path. The "detached dispatcher"
+  behavior applies only to the internal `StateKeeper/InstanceKeeper/BackHandler.child()`
+  helpers, which tolerate destroyed lifecycles individually. The Rust port mirrors the
+  post-creation panic exactly, and returns a recoverable `ChildLifecycleDestroyed` error for
+  already-destroyed input at creation (documented divergence: nothing has happened yet, so
+  recovery is safe — see `PUBLIC_API_PROPOSAL.md` §4).
+- Panic ordering: the destroy-contract guard is subscribed *first* (line 51, before the
+  merged/keeper/handler hooks), so a manual destroy panics before sibling cleanup hooks
+  run — post-panic hook state is deliberately unspecified (programmer-error path).
 - `backHandlerPriority` overload (default `BackCallback.PRIORITY_DEFAULT = 0`) controls
   global back ordering; default ordering is reverse creation order (LIFO on ties).
 
@@ -96,12 +108,18 @@ else if (!lifecycle.isDestroyed) { register(key, supplier = child::save); lifecy
 
 - The child key is a namespace: the parent reserves it (`register`) and consumes the
   restored container exactly once (destructive read) to seed the child dispatcher.
+  Only *uniqueness within the parent* is enforced — no length/content validation, so `""`
+  is legal if unique. The Rust port must not add a non-empty restriction.
 - `save()` chains: parent save → child save → grandchildren (nested dispatchers recurse).
 - Child-lifecycle destroy releases the key (`unregister`, exactly once) so it is reusable.
 - Already-destroyed lifecycle: consume still runs, but nothing is registered — a detached,
   never-saved dispatcher.
 - Siblings may reuse the same *internal* state keys; the parent-level key keeps them disjoint.
 - Forbidden: duplicate parent-level keys (`IllegalStateException` with the key in the message).
+- Ownership (Phase 0.5): the registered supplier is a **strong** bound reference
+  (`child::save`) — while registered, the child dispatcher is kept alive *by the
+  registration itself*, regardless of external references. The Rust port must use strong
+  `Rc` ownership here, not `Weak`.
 
 ## 6. `ChildInstanceKeeper` — nested retention
 

@@ -17,7 +17,7 @@ difference (retention cleanup timing) is documented below.
 | Subscription replay (new subscribers catch up to current state) | `subscribe` replays `Created/Started/Resumed` for the current state | DIRECT MATCH |
 | Reverse-delivery order | `apply` notifies in reverse for `Started/Created/Destroyed` retreat transitions | DIRECT MATCH |
 | Per-event hooks (`doOnCreate/doOnStart/doOnResume/doOnPause/doOnStop/doOnDestroy`) incl. direction tracking (`Started` from pause vs start) | `do_on_create/do_on_start(_once)/do_on_resume(_once)/do_on_pause(_once)/do_on_stop(_once)/do_on_destroy`; pause/stop track consecutive deliveries; `do_on_destroy` on destroyed registry runs immediately | DIRECT MATCH |
-| RAII unsubscription for merged-lifecycle observers | `Subscription` guard: drop unsubscribes, `detach() -> u64`, `unsubscribe(id)`, `is_active()` | DIRECT MATCH (store guards in `MergedLifecycle`; `Weak`-keyed teardown) |
+| RAII unsubscription for merged-lifecycle observers | `Subscription` guard: drop unsubscribes, `detach() -> u64`, `unsubscribe(id)`, `is_active()` | DIRECT MATCH (observers parent-held + `detach()`ed; explicit removal by id in teardown hooks — ADR-0003) |
 | State providers under unique keys; duplicate rejection | `register` / `register_value` / `register_optional(_value)` → `Err(DuplicateKey)` | DIRECT MATCH (map to `DecomposeError::DuplicateKey`) |
 | Single-shot consume of restored state | `consume_bytes` / `consume_value` (remove-on-read, `None` when absent/consumed) | DIRECT MATCH |
 | Deterministic save chaining (parent → child → grandchildren) | `save() -> BTreeMap<String, Vec<u8>>`; providers replace restored values; `None` providers preserve restored | DIRECT MATCH (child registers `move \|\| child.save()` closure) |
@@ -38,35 +38,40 @@ difference (retention cleanup timing) is documented below.
 | Thread-safe (`Send+Sync`) registries / Tokio integration | `essenty-lifecycle-tokio` exists but is optional-only | OPTIONAL INTEGRATION, never a core dependency |
 | `Instance.onDestroy()` deterministic cleanup callback | **Not present**: retention follows Rust ownership — `Drop` runs at last-`Rc` release, not at scope end | ADAPTER IN DECOMPOSE with documented semantic difference (see §3); NOT a blocker |
 
-## 2. Adapter shapes (all implementable with public APIs only)
+## 2. Adapter shapes (all implementable with public APIs only; Phase 0.5 revision)
 
-- **MergedLifecycle**: struct holding `LifecycleRegistry` (the merged registry handed out)
-  + two parent `Subscription` guards + `Rc<RefCell<(LifecycleState, LifecycleState)>>`
-  side-state. Subscribe to each parent with `subscribe(move \|state\| ...)`; on each
-  delivery compute `target = min_non_destroyed(a, b)` (explicit destroyed checks — do NOT
-  use derived `Ord`, on which `Destroyed` is maximal) and drive the merged registry with
-  the single-step methods toward the target. Destroyed input at construction → immediately
-  `destroy()` the merged registry and subscribe to nothing. Hold the merged registry behind
-  `Rc` so children share it; teardown = drop guards (RAII unsubscription).
-- **Child StateKeeper**: needs `&mut` access to the parent keeper at construction
-  (`consume` + `register` take `&mut self`), then only a shared `Rc<RefCell<StateKeeper>>`
-  for the child dispatcher plus the parent link for `unregister` on destroy. Because
-  `register` providers are `'static`, the child's save closure must own an
-  `Rc<RefCell<…>>` to the child map (or call `save()` through a `Weak` upgrade).
-  This `&mut`-at-construction shape is why `child_context` takes `&mut` or consumes a
-  `ChildScopeFactory` — a deliberate, documented divergence from Kotlin's interface
-  extension (see ADR-0003).
+Parent keepers/dispatchers are shared as `Rc<RefCell<…>>`, so `child_context(&self)` uses
+short `borrow_mut()` calls that never cross observer delivery, back dispatch, user
+callbacks, or factory invocation (prototype-validated, incl. nested + observer-driven
+creation). Because `register` providers are `'static`, the public boundary takes `&str`
+keys but everything captured is an owned `String`.
+
+- **MergedLifecycle**: struct holding the merged `LifecycleRegistry` + side-state cells.
+  Parent registries own the observer closures (self-sustaining; removed by detached id
+  from the teardown hook, or self-removed after driving merged to `Destroyed`). On each
+  delivery compute `target = min` with explicit destroyed checks — do NOT use derived
+  `Ord`, on which `Destroyed` is maximal — and drive the merged registry toward the
+  target. Destroyed input at construction → immediately `destroy()` the merged registry
+  and subscribe to nothing.
+- **Child StateKeeper**: `consume_bytes` + `register` via short borrows. The save closure
+  captures a **strong** `Rc<RefCell<StateKeeper>>` to the child dispatcher (upstream's
+  `stateKeeper::save` bound reference is strong; no back edge exists, so no cycle).
+  Teardown link = lifecycle-destroy `unregister`; never context drop.
+- **Child InstanceKeeper**: `put(key, …)` the child scope (retained, strong by
+  construction; `get_or_create` identity for config-change retention); wire the child
+  lifecycle's destroy hook to `destroy(key)` (idempotent `bool`).
 - **Child InstanceKeeper**: `get_or_create(key, \|\| ChildScope::new())` on the parent
   keeper where `ChildScope` owns a nested `InstanceKeeper`; wire the child lifecycle's
   `do_on_destroy` to `parent.remove::<ChildScope>(key)` (exactly-once via `bool` return).
   Already-destroyed lifecycle → fresh detached `InstanceKeeper::new()`.
 - **Child BackHandler**: struct holding the child `BackDispatcher` + parent handle id +
-  `enabled` gate flag + lifecycle `Subscription` guards + enabled-listener token.
-  Register one parent callback forwarding `BackEvent.phase` to the child dispatcher
-  (`Started→predictive_start`, `Progressed→predictive_progress(first)`,
-  `Cancelled→predictive_cancel`, `Invoked→back`); aggregate
-  `parent.set_enabled(handle, gate && child.can_handle())` on every gate change and via
-  `child.add_enabled_changed_listener`. `stop()` = `parent.unregister(handle)`.
+  gate cell + detached-subscription ids. Register one parent callback (capturing a strong
+  `Rc` to the child dispatcher) forwarding `BackEvent.phase` to it
+  (`Started→predictive_start`, `Progressed→predictive_progress`, `Cancelled→predictive_cancel`,
+  `Invoked→back`); aggregate `parent.set_enabled(handle, gate && child.can_handle())` on
+  every gate change and via `child.add_enabled_changed_listener` (which captures a
+  **`Weak`** parent link — the one genuine cycle, broken by upgrade-per-call).
+  `stop()` = `parent.unregister(handle)`. Teardown hook drives the full sequence.
 
 ## 3. Intentional semantic difference: retention cleanup timing
 

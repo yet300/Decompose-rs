@@ -6,25 +6,29 @@ Decisions reference ADRs in `docs/adr/`.
 ## 1. `ComponentContext` representation: trait + concrete struct (ADR-0001: DECIDED)
 
 ```rust
-pub trait ComponentContext: Sized + Clone {
-    fn lifecycle(&self) -> &LifecycleHandle;
-    fn state_keeper(&self) -> &SharedKeeper<StateKeeper>;
-    // ... instance_keeper(), back_handler(), factory() ...
+pub trait ComponentContext: Sized {
+    fn from_parts(parts: ContextParts) -> Self;
     fn child_context(&self, key: &str) -> Result<Self, DecomposeError>;
-    fn child_context_with_lifecycle(&self, key: &str, lifecycle: &LifecycleRegistry)
-        -> Result<Self, DecomposeError>;
+    fn child_context_with_lifecycle(
+        &self,
+        key: &str,
+        lifecycle: &LifecycleRegistry,
+    ) -> Result<Self, DecomposeError>;
+    // ... lifecycle()/state_keeper()/instance_keeper()/back_handler() accessors ...
 }
 ```
 
 - Trait (not bare struct): preserves upstream's mandatory custom-context capability via
   generics (`fn navigate<C: ComponentContext>(ctx: &C)`), with zero casts and no global type.
-- Concrete `DefaultComponentContext` struct ships in-core as the default `C`.
+- **No `Clone` bound** (Phase 0.5, prototype-validated): a custom context may hold
+  non-`Clone` services/state. Shared ownership uses `Rc<C>`; the clonable factory
+  (`ContextFactory<C>`, an `Rc` closure) is what gets cloned, not `C`.
+- Concrete `DefaultComponentContext` struct ships in-core and implements `Clone` itself as
+  a shared-handle convenience (clones share one scope).
 - Rejected: bare-struct-only (kills custom contexts), `dyn`-compatible trait (impossible
-  with `Self`-returning factory; navigation is generic, so `dyn` is unnecessary — validated
-  by prototype), Kotlin-style F-bound generics (`GenericComponentContext<T>` has no Rust
-  equivalent worth the complexity; a single trait + associated factory carries the same power).
-- Object safety is a non-goal; genericity is the mechanism. Mockability comes from
-  implementing the trait on test doubles, not from `dyn`.
+  with `Self`-returning factory; navigation is generic, so `dyn` is unnecessary),
+  Kotlin-style F-bound generics (no Rust equivalent worth the complexity), `C: Clone`
+  bound (proven unnecessary; would forbid legitimate services).
 
 ## 2. Factory representation: `Rc<dyn Fn(...) -> C>` (ADR-0002: DECIDED)
 
@@ -33,16 +37,25 @@ pub type ContextFactory<C> = Rc<dyn Fn(ContextParts) -> C>;
 
 pub struct ContextParts {
     pub lifecycle: LifecycleRegistry,      // already merged / child-scoped by the caller
-    pub state_keeper: SharedKeeper<StateKeeper>,
-    pub instance_keeper: SharedKeeper<InstanceKeeper>,
-    pub back_handler: SharedDispatcher,
+    pub state: SharedKeeper,               // Rc<RefCell<StateKeeper>> child dispatcher
+    pub instances: SharedInstances,        // Rc<RefCell<InstanceKeeper>> child scope
+    pub back: SharedBack,                  // Rc<RefCell<BackDispatcher>> child dispatcher
+    scope: ContextScope,                   // PRIVATE lifetime owner: must be forwarded
+}
+
+impl ContextParts {
+    // No public constructor. Handles are obtained via accessors; the sanctioned
+    // sink is C::from_parts(parts), which retains `scope` (ADR-0002/0003).
 }
 ```
 
 Closures first; introduce a `factory trait` only if a future navigation generic demands
 named-type factories (no evidence now). The factory is explicitly **detached** (same
 contract as upstream): scoping inputs are prepared by `child_context`/engine, the factory
-only assembles. Custom contexts close over extra services:
+only assembles — and it must forward the private `scope` (by constructing through
+`from_parts` or a delegating base factory) so the child cannot silently detach. Because
+retained provider closures must be `'static`, the public boundary takes `&str` keys but
+everything captured is an owned `String` (compiler-enforced).
 
 ```rust
 let factory: ContextFactory<AppContext> = Rc::new(move |parts| {
@@ -56,11 +69,13 @@ let factory: ContextFactory<AppContext> = Rc::new(move |parts| {
 ## 3. Key model (DECIDED)
 
 ```rust
-pub struct ChildKey(String); // validated, non-empty; Display + AsRef<str> + Debug
+pub struct ChildKey(String); // owned; unique-within-parent only — "" is allowed
 ```
 
 - Public key type is an owned `String` wrapper (callers pass `&str`; storage is owned).
-  `&str` at boundaries, owned in maps — no wrapper proliferation, no lifetimes in context types.
+  Upstream requires only *uniqueness within the parent scope* (verified: `ChildStateKeeper`
+  checks `isRegistered` only; no length/content validation), so Rust adds no non-empty or
+  format restriction. `""` is legal if unique.
 - Nested namespaces are *positional composition*, not string concatenation: each scope holds
   its own keeper/dispatcher; the child key indexes the parent map. Sibling scopes may reuse
   identical internal keys. Deterministic: keys come from callers or engine counters —
@@ -73,8 +88,7 @@ pub struct ChildKey(String); // validated, non-empty; Display + AsRef<str> + Deb
 ```rust
 pub enum DecomposeError {
     DuplicateKey { key: String },
-    ChildLifecycleDestroyed,          // supplied lifecycle already destroyed at child_context
-    ManualChildLifecycleDestroy,       // supplied child lifecycle destroyed while attached
+    ChildLifecycleDestroyed,          // supplied lifecycle already destroyed at creation
     ContextDestroyed,                  // operation on a destroyed scope
     Lifecycle(LifecycleError),         // transparent Essenty passthrough (#[from])
     StateKeeper(StateKeeperError),
@@ -83,14 +97,27 @@ pub enum DecomposeError {
 }
 ```
 
-- `Result` + typed error everywhere a caller can recover (duplicate keys, destroyed inputs,
-  consumed-state decode, type mismatches). `thiserror`-style, mirroring Essenty-rs errors.
-- Panic **only** for programmer-contract violations that upstream signals with
-  `error(...)`: manual destruction of an attached child lifecycle. Even there, prefer
-  returning `Err(ManualChildLifecycleDestroy)` at the destroy *call site* when detectable,
-  and panic only on the asynchronous path where no `Result` can propagate (exact behavior
-  pinned by parity tests in Phase 1).
+- `Result` + typed error everywhere a caller can recover (duplicate keys, destroyed inputs
+  detectable *before* side effects, consumed-state decode, type mismatches).
+  `thiserror`-style, mirroring Essenty-rs errors.
+- Programmer-contract violations that surface *through Essenty-owned calls* are panics, not
+  `Result`s — Decompose cannot change `LifecycleRegistry::destroy()`'s signature:
+  - **Manual destruction of an attached child lifecycle panics.** `child_context` registers
+    a destroy observer (mirroring upstream `doOnDestroy { error(...) }`, verified to fire
+    synchronously inside `destroy()`); destroying the supplied manual registry afterwards
+    panics with `"The lifecycle of a child ComponentContext must never be destroyed
+    manually."` Documented with a `# Panics` section on `child_context_with_lifecycle`;
+    covered by a `catch_unwind` parity test. (Essenty-rs sets state to `Destroyed` before
+    notifying, so the registry still reports destroyed after the panic; post-panic cleanup
+    of sibling hooks is deliberately unspecified — programmer-error path only.)
+  - **Creation-time detection stays recoverable:** if the supplied lifecycle is *already*
+    destroyed when `child_context_with_lifecycle` is called, return
+    `Err(ChildLifecycleDestroyed)` *before* any registration side effect. (Deliberate,
+    documented divergence: upstream throws at creation too, as an artifact of immediate
+    `doOnDestroy`; Rust recovers because nothing has happened yet. Post-creation destroy
+    still panics.)
 - No `Option`-swallowing: absent restored state is `Ok(None)` at consume sites, never silent default.
+- Do NOT invent a wrapper lifecycle type just to `Result`-ify the manual-destroy path.
 
 ## 5. Observable state direction (DEFERRED WITH REASON)
 
@@ -152,14 +179,18 @@ impl<C: ComponentContext> RootComponent<C> {
 }
 ```
 
-Custom context (extra service preserved through navigation):
+Custom context (extra service preserved through navigation; `Clone` NOT required —
+a context may hold non-`Clone` per-scope state such as subscription guards):
 
 ```rust
-#[derive(Clone)]
 struct AppContext { delegate: DefaultComponentContext, logger: Rc<Logger> }
 
 impl ComponentContext for AppContext { /* delegate + closed-over logger factory */ }
 ```
+
+`child_context` takes `&self` (shared handles + short `RefCell` borrows; never held
+across observer delivery, back dispatch, user callbacks, or factory invocation —
+prototype-validated for nested and observer-driven creation).
 
 Fixed child:
 
@@ -173,7 +204,8 @@ Manually-controlled lifecycle child:
 let manual = LifecycleRegistry::new();
 let child = parent.child_context_with_lifecycle("modal", &manual)?;
 manual.resume().unwrap();   // merged lifecycle advances only with the parent
-// manual.destroy() → Err/panic: destroying an attached child lifecycle is forbidden
+// manual.destroy() → PANICS: destroying an attached child lifecycle is forbidden
+// (see §4 error model for the # Panics contract).
 ```
 
 ## 9. API stability strategy (first release `0.1.x`)
@@ -181,9 +213,10 @@ manual.resume().unwrap();   // merged lifecycle advances only with the parent
 - Public immediately: `ComponentContext` trait, `DefaultComponentContext`,
   `ContextFactory`/`ContextParts`, `ChildKey`, `DecomposeError`, `MergedLifecycle`,
   child-scope constructors, `DEFAULT_BACK_PRIORITY`.
-- Crate-private: `ChildStateKeeper`/`ChildInstanceKeeper`/`ChildBackHandler` adapter
+- Crate-private: `ContextScope` (private fields, travels inside `ContextParts`),
+  `ChildStateKeeper`/`ChildInstanceKeeper`/`ChildBackHandler` adapter
   internals (exposed only through `child_context` behavior + `pub(crate)` items),
-  subscription-guard fields, enabled-listener tokens.
+  detached-subscription ids, enabled-listener tokens.
 - Experimental (feature-gated or clearly marked): back-priority override overload,
   predictive-back forwarding surface.
 - Waits for navigation: everything observable (`Value`), codecs, `children()` engine,

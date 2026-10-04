@@ -14,6 +14,10 @@ Essenty release SHA: 2bf0e9108d8ae2dcd67ac3ab7ea7ca54cae16092 (tag v0.1.0, 2026-
 Research workspace:  /Users/yet/development/rust/decompose (local git, branch
                      codex/phase-0-decompose-research; upstream-ref/ is a gitignored
                      reference clone, never committed)
+Phase 0.5 remediation (2026-10-04): Clone bound removed; parent-held scope lifetime;
+                     strong state provider; manual-destroy panic contract; &self
+                     receiver; key validation removed. Prototypes: /tmp/dc-proto-a,
+                     /tmp/dc-proto-b (throwaway, real essenty-* 0.1.0 deps).
 Git mutation performed: NONE on any remote. Local-only repo init + research docs.
                         No pushes, no deletions, no rewrites of yet300/Decompose.
 ```
@@ -22,16 +26,17 @@ Git mutation performed: NONE on any remote. Local-only repo init + research docs
 
 | Decision | Status | Outcome |
 |---|---|---|
-| ComponentContext trait vs struct | DECIDED | Trait + `DefaultComponentContext` struct (ADR-0001) |
-| Generic/custom context strategy | DECIDED | Single generic trait; custom contexts delegate + close over services |
-| ComponentContextFactory representation | DECIDED | `Rc<dyn Fn(ContextParts) -> C>` closures first (ADR-0002) |
-| Ownership model | DECIDED | `Rc` handles + `&mut`-at-birth + RAII guards + `Weak` in parent-registered closures (ADR-0003) |
+| ComponentContext trait vs struct | DECIDED (0.5: no `Clone` bound) | Trait (`Sized` only) + `DefaultComponentContext`; `Rc<C>` for sharing (ADR-0001) |
+| Generic/custom context strategy | DECIDED | Single generic trait; custom contexts delegate + close over services; non-`Clone` allowed |
+| ComponentContextFactory representation | DECIDED (0.5: scope rule) | `Rc<dyn Fn(ContextParts) -> C>`; private `scope` forwarded via `from_parts` (ADR-0002) |
+| Ownership model | DECIDED (0.5: rewritten) | Parent-held strong captures; lifecycle-driven teardown, never drop-driven (ADR-0003) |
 | Child lifecycle representation | DECIDED | `MergedLifecycle` struct over Essenty primitives (min-state + sticky destroy) |
-| StateKeeper child namespace | DECIDED | Adapter in Decompose: consume-seed + register-save + unregister-on-destroy |
-| InstanceKeeper child namespace | DECIDED | Adapter: retained `ChildScope` + remove-on-destroy; Drop-timing difference documented |
-| BackHandler child bridge | DECIDED | Adapter: single parent callback, `gate && can_handle`, 1:1 predictive forwarding |
-| Error strategy | DECIDED | Typed `DecomposeError` + `Result`; panic only for async-path contract violations |
-| Key strategy | DECIDED | Owned-`String` `ChildKey`; positional namespaces; deterministic, never random |
+| StateKeeper child namespace | DECIDED (0.5: strong provider) | Adapter: consume-seed + strong-Rc register-save + unregister-on-destroy |
+| InstanceKeeper child namespace | DECIDED | Adapter: retained scope + remove-on-destroy; Drop-timing difference documented |
+| BackHandler child bridge | DECIDED (0.5: Weak only for listener) | Adapter: single parent callback (strong child), `gate && can_handle`, 1:1 predictive forwarding |
+| Error strategy | DECIDED (0.5: panic contract) | Typed `DecomposeError` + `Result`; manual-destroy panics, creation-destroyed is `Err` |
+| Key strategy | DECIDED (0.5: no validation) | Owned-`String` `ChildKey`; uniqueness only — `""` legal; deterministic, never random |
+| `child_context` receiver | DECIDED (0.5) | `&self` via `Rc<RefCell<…>>` short borrows; never across callbacks |
 | Observable state abstraction | DEFERRED WITH REASON | Phase 2 with the engine; leading candidate `Rc`-backed `Value<T>`; no Tokio |
 | Serialization boundary | DEFERRED WITH REASON | Caller-supplied codecs to opaque bytes; no `serde` in core; revisit Phase 6 |
 | Crate layout | DECIDED | One `decompose-rs` crate through Phase 5; no premature splits |
@@ -75,10 +80,12 @@ navigation must work before persistence is refined.
 ## Phase 1 acceptance gate
 
 ```text
-ComponentContext API implemented (trait + default + custom-context support)
-child_context (+with_lifecycle, +priority) implemented
+ComponentContext API implemented (trait without Clone + default + non-Clone custom-context support)
+child_context(&self) (+with_lifecycle, +priority) implemented
+scope-survival + strong-provider ownership tests green (zero-external-refs save)
 MergedLifecycle / child-StateKeeper / child-InstanceKeeper / child-BackHandler parity green
 predictive-back delegation covered
+manual-destroy catch_unwind panic test green; creation-destroyed Err test green
 no mandatory Tokio; no mandatory Send + Sync; no platform types in core
 registry-only Essenty dependencies (4 primitives)
 21-target compile matrix if practical for core, else documented subset
