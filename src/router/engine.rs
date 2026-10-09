@@ -14,6 +14,13 @@ pub(crate) trait Model<C, T>: 'static {
     fn persistent(&self) -> bool;
     fn configurations(&self, state: &Self::State) -> Vec<Rc<C>>;
     fn on_state_changed(&self, _state: &Self::State, _old: Option<&Self::State>) {}
+    // Opt-in models refresh future factory input without recreating live instances.
+    fn canonicalize_reused_configurations(&self) -> bool {
+        false
+    }
+    fn normalize(&self, state: Self::State) -> Self::State {
+        state
+    }
     fn validate(&self, state: &Self::State) -> Result<(), NavigationError>;
     fn statuses(&self, state: &Self::State) -> Vec<PageStatus>;
     fn snapshot(&self, children: Vec<PageChild<C, T>>, state: &Self::State) -> Self::Snapshot;
@@ -267,6 +274,28 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             Ok(())
         }
     }
+    fn ensure_child_available(&self, key: &str) -> Result<(), NavigationError> {
+        self.ensure_alive()?;
+        let scope = self.items.try_borrow().ok().and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.key == key)
+                .and_then(|item| item.scope.clone())
+        });
+        if scope.is_some_and(|scope| {
+            !scope.parts.local.state().is_destroyed()
+                && !scope.parts.merged.state().is_destroyed()
+                && scope
+                    .parts
+                    .instances
+                    .try_borrow()
+                    .is_ok_and(|instances| !instances.is_destroyed())
+        }) {
+            Ok(())
+        } else {
+            Err(NavigationError::ChildUnavailable)
+        }
+    }
     fn create(
         &self,
         config: Rc<C>,
@@ -386,6 +415,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         state: M::State,
         restored: Option<SavedChildren>,
     ) -> Result<(), NavigationError> {
+        let state = self.model.normalize(state);
         self.model.validate(&state)?;
         self.ensure_alive()?;
         // Policy callbacks precede preparation, so a policy panic owns no fresh scopes.
@@ -404,7 +434,11 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                 .find(|(i, item)| !matched[*i] && item.reusable() && item.configuration == *config);
             let mut item = if let Some((i, item)) = existing {
                 matched[i] = true;
-                item.clone()
+                let mut item = item.clone();
+                if self.model.canonicalize_reused_configurations() {
+                    item.configuration = config.clone();
+                }
+                item
             } else {
                 let (key, saved) = if let Some(restored) = &restored {
                     restored[index].clone()
@@ -658,6 +692,25 @@ where
     T: 'static,
     M: Model<C, T>,
 {
+    build_with_control(context, navigation, initial, key, model, factory).map(|(value, _)| value)
+}
+
+type ControlledValue<S, V> = (Value<V>, NavigationControl<S>);
+
+pub(crate) fn build_with_control<Ctx, C, T, M>(
+    context: &Ctx,
+    navigation: &NavigationSource<M::State>,
+    initial: M::State,
+    key: String,
+    model: M,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<ControlledValue<M::State, M::Snapshot>, NavigationError>
+where
+    Ctx: ComponentContext + 'static,
+    C: Eq + 'static,
+    T: 'static,
+    M: Model<C, T>,
+{
     if context.lifecycle().state().is_destroyed() {
         return Err(NavigationError::Destroyed);
     }
@@ -695,6 +748,7 @@ where
         .unwrap_or(initial);
     let restore_children = restored.as_ref().map(|saved| saved.children.clone());
     let next_key = restored.as_ref().map(|saved| saved.next_key).unwrap_or(0);
+    let initial = model.normalize(initial);
     model.validate(&initial)?;
     if let Some(restored) = &restored {
         for (key, _) in &restored.children {
@@ -818,5 +872,86 @@ where
         .expect("initialized stack")
         .value();
     construction.committed = true;
-    Ok(value)
+    let weak = Rc::downgrade(&engine);
+    let alive = weak.clone();
+    let dispatch = weak.clone();
+    let availability = weak.clone();
+    let control = NavigationControl {
+        alive: Rc::new(move || {
+            alive
+                .upgrade()
+                .ok_or(NavigationError::Destroyed)?
+                .ensure_alive()
+        }),
+        availability: Rc::new(move |key| {
+            availability
+                .upgrade()
+                .ok_or(NavigationError::Destroyed)?
+                .ensure_child_available(key)
+        }),
+        dispatch: Rc::new(move |event| match dispatch.upgrade() {
+            Some(engine) if engine.ensure_alive().is_ok() => engine.enqueue(event),
+            _ => (event.completion)(Err(NavigationError::Destroyed)),
+        }),
+        synchronous: Rc::new(move |event| {
+            let engine = weak.upgrade().ok_or(NavigationError::Destroyed)?;
+            engine.ensure_alive()?;
+            if engine.initializing.get()
+                || engine.processing.get()
+                || engine.back.is_dispatching()
+                || engine.deferred.get()
+            {
+                return Err(NavigationError::NavigationInProgress);
+            }
+            let result = Rc::new(RefCell::new(None));
+            let out = result.clone();
+            let completion = event.completion;
+            engine.enqueue(Event {
+                transformer: event.transformer,
+                completion: Rc::new(move |r| {
+                    *out.borrow_mut() = Some(r.as_ref().map(|_| ()).map_err(Clone::clone));
+                    completion(r);
+                }),
+            });
+            result
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(NavigationError::ChildUnavailable))
+        }),
+    };
+    Ok((value, control))
+}
+
+type ChildAvailability = dyn Fn(&str) -> Result<(), NavigationError>;
+
+/// Weak receiver callbacks share the engine's event queue and ownership.
+pub(crate) struct NavigationControl<S> {
+    alive: Rc<dyn Fn() -> Result<(), NavigationError>>,
+    availability: Rc<ChildAvailability>,
+    dispatch: Rc<dyn Fn(Event<S>)>,
+    synchronous: Rc<dyn Fn(Event<S>) -> Result<(), NavigationError>>,
+}
+impl<S> Clone for NavigationControl<S> {
+    fn clone(&self) -> Self {
+        Self {
+            alive: self.alive.clone(),
+            availability: self.availability.clone(),
+            dispatch: self.dispatch.clone(),
+            synchronous: self.synchronous.clone(),
+        }
+    }
+}
+impl<S> NavigationControl<S> {
+    pub(crate) fn ensure_alive(&self) -> Result<(), NavigationError> {
+        (self.alive)()
+    }
+    pub(crate) fn ensure_child_available(&self, key: &str) -> Result<(), NavigationError> {
+        (self.availability)(key)
+    }
+    pub(crate) fn dispatch(&self, event: Event<S>) {
+        (self.dispatch)(event)
+    }
+    pub(crate) fn dispatch_sync(&self, event: Event<S>) -> Result<(), NavigationError> {
+        (self.synchronous)(event)
+    }
 }

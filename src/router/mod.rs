@@ -1,5 +1,6 @@
 //! Runtime-independent component navigation.
 mod engine;
+pub mod items;
 mod navigation;
 pub mod pages;
 pub mod panels;
@@ -38,12 +39,21 @@ pub enum NavigationError {
         selected_index: Option<usize>,
         item_count: usize,
     },
-    /// Equal configurations require the per-stack opt-in.
+    /// Equal configurations violate this navigation model's duplicate policy.
     #[error("duplicate configurations are disabled")]
     DuplicateConfiguration,
     /// The hosting navigation scope already ended.
     #[error("navigation scope is destroyed")]
     Destroyed,
+    /// Lazy lookup requested an absent configuration.
+    #[error("unknown item configuration")]
+    UnknownConfiguration,
+    /// Inactive lazy activation cannot run during navigation or Back dispatch.
+    #[error("navigation is in progress")]
+    NavigationInProgress,
+    /// Queued work removed or deactivated the requested child.
+    #[error("requested child is unavailable")]
+    ChildUnavailable,
     /// Saved bytes or user codec could not be processed.
     #[error("navigation state: {0}")]
     State(String),

@@ -91,8 +91,9 @@ assert_eq!(value.get().main.instance.lifecycle().state(), LifecycleState::Resume
 
 Progress: complete. Independent specification and quality reviews passed without
 findings; controller verification and documentation are complete. The previous
-ChildPages stage was committed as a1f675b; this stage remains local and uncommitted
-on codex/child-panels. No merge or push was performed.
+ChildPages stage was committed as a1f675b. ChildPanels was subsequently committed
+as 0336a19 (`feat: implement typed ChildPanels with lifecycle modes`) at the
+user's request before starting ChildItems. No merge or push was performed.
 
 ## Verification record (2026-10-09)
 

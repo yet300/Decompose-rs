@@ -3,12 +3,14 @@
 Independent Rust port of [Ark Ivanov’s Decompose](https://github.com/arkivanov/Decompose),
 implemented on top of [Essenty-rs](https://github.com/yet300/Essenty).
 
-**Current scope: ComponentContext, ChildStack, ChildSlot, ChildPages and ChildPanels.** The port includes observable
+**Current scope: ComponentContext, ChildStack, ChildSlot, ChildPages, ChildPanels and ChildItems.** The port includes observable
 values, navigation operations, child lifecycle management, Back routing and
 configuration/state restoration. ChildSlot represents zero-or-one children and
 supports activation, replacement and dismissal. ChildPages keeps page identities and
 saved state while creating or destroying instances according to a lifecycle policy.
 ChildPanels manages typed Main/Details/Extra components in Single, Dual or Triple mode.
+ChildItems manages a unique list with per-configuration lifecycle targets and
+explicit lazy component creation.
 Other navigation families and platform/UI
 integrations are outside this delivery. Behavior is checked against pinned
 Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`, not an unspecified
@@ -53,6 +55,8 @@ Run `cargo run --example child_pages` for lazy pages, destruction/recreation und
 the same key, child-state recovery and restored selection.
 Run `cargo run --example child_panels` for distinct role types, mode transitions,
 Single-only automatic Back and restored mode/child state.
+Run `cargo run --example child_items` for lazy activation, viewport lifecycle
+targets, deactivation/recreation and restoration of inactive child state.
 
 ## Rust API and behavior
 
@@ -238,6 +242,77 @@ and factories; failed construction keeps original input available for retry.
 Without a codec Panels is transient and parent saves skip its child providers.
 Existing DST1, DSL1 and DPG1 frames remain compatible.
 
+## ChildItems
+
+`router::items` exposes `Items<C>`, `ChildItems<C, T>`, `ActiveChild<C, T>`,
+`ActiveLifecycleState`, `ItemMap<C, V>`, `ItemsNavigation`, `ItemsNavigator`,
+`ItemsOptions`, `ItemsCodec`, `LazyChildItems` and `child_items`.
+`Items::new(configurations)` validates unique membership; an empty list is valid.
+Each active configuration has a Created, Started or Resumed target. Absent
+activity means the component is inactive, with no factory invocation or keeper.
+Parent lifecycle bounds the actual state of each active component.
+
+Activity is keyed by configuration equality, so list reorders preserve the
+component and its target. Equal configuration replacement also preserves a live
+component; after deactivation, a fresh factory receives the current configuration,
+including updated fields ignored by Eq. `ItemMap` provides Eq-based map operations over Rc keys,
+without imposing Hash, Ord or configuration Clone. Lookups are linear. Inserting
+an equal key replaces its value; active keys absent from membership are pruned,
+and surviving keys use the canonical membership handle. Duplicate member
+configurations are always rejected; there is no opt-in for duplicates.
+
+```rust
+use decompose_rs::router::items::{child_items, Items, ItemsNavigation, ItemsOptions};
+use decompose_rs::{ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState};
+
+let lifecycle = LifecycleRegistry::new();
+lifecycle.move_to(LifecycleState::Resumed).unwrap();
+let root = DefaultComponentContext::new(lifecycle.clone());
+let navigation = ItemsNavigation::new();
+let items = child_items(&root, &navigation, Items::new(vec![1u8, 2, 3]).unwrap(),
+    ItemsOptions::default(), |_, context| context,
+).unwrap();
+assert!(items.get().active_items.is_empty());
+let component = items.get_or_create(&2).unwrap();
+assert_eq!(component.lifecycle().state(), LifecycleState::Created);
+items.set_active_items(|mut active| { active.remove(&2); active });
+assert_eq!(component.lifecycle().state(), LifecycleState::Destroyed);
+lifecycle.destroy().unwrap();
+```
+
+Both `ItemsNavigation` and `LazyChildItems` provide `navigate`/`navigate_with`,
+`set_items`/`set_items_with` and `set_active_items`/`set_active_items_with`.
+The helpers accept transformers over the current list or active map. The source
+broadcasts to each receiver; the lazy handle changes only its own receiver.
+Explicit completions receive typed old/new Items states or errors; convenience
+calls panic on rejected navigation. No-op events publish and complete.
+
+`LazyChildItems::get()` returns the current snapshot, `value()` returns an
+observable Value, and `subscribe()` observes it. `get_or_create(&configuration)`
+returns an active component unchanged or synchronously activates an inactive
+member as Created. An absent member returns UnknownConfiguration. An inactive
+fetch during navigation/construction/Back dispatch returns NavigationInProgress
+without queuing activation. If queued user work removes or deactivates the new
+component before the call completes, it returns ChildUnavailable. The same error
+rejects an ended scope still present in a snapshot after a caught lifecycle panic;
+the getter checks actual scope availability before returning a component. A destroyed
+handle returns Destroyed. Dropping the source leaves local navigation available;
+dropping views does not end parent-owned navigation.
+
+Deactivation saves child state and ends the component/keeper. Reactivation uses
+the same stable key and saved state with fresh component/keeper instances. Removal
+forgets the key/state; re-adding an equal configuration starts afresh. The model
+has no automatic Back operation. Effective Started/Resumed child handlers can
+handle Back; Created and inactive children cannot. Queued recursive events,
+predictive cancellation and deferred Back scope changes use the common engine.
+
+`ItemsCodec` has ordered configuration-list callbacks. DPI1 separately records
+activity, keys, counter and child states, including inactive entries. Saved empty
+or all-inactive membership overrides initial input. Structural corruption is
+rejected before user decode/factories; decoded count/uniqueness is checked before
+factories. Transient Items skips child providers during parent saves and resets
+on recreation. Existing DST1, DSL1, DPG1 and DPN1 bytes remain compatible.
+
 ## State and retained instances
 
 `StackOptions::codec` defaults to None for transient navigation. Supply a
@@ -274,9 +349,9 @@ separate context, value and stack crates in this scope.
 | `merged`, `shared_back` | Parent-bounded lifecycle and reentrant Back dispatch |
 | `state`, `framing` | Essenty state adapter and child-state encoding |
 | public `value` | Observable immutable snapshots and subscription guards |
-| public `router::stack`, `router::slot`, `router::pages`, `router::panels` | Model APIs, operations, snapshots and codecs |
+| public `router::stack`, `router::slot`, `router::pages`, `router::panels`, `router::items` | Model APIs, operations, snapshots and codecs |
 | private router machinery | Shared scope ownership, transactions and queued events |
-| private model state modules | DST1 stack / DSL1 slot / DPG1 pages / DPN1 panels envelopes |
+| private model state modules | DST1 stack / DSL1 slot / DPG1 pages / DPN1 panels / DPI1 items envelopes |
 
 Dependencies remain the four published `essenty-* 0.1.0` primitives and
 `thiserror`. No Essenty source changes, path/git overrides or additional runtime
@@ -296,6 +371,9 @@ describe stateful navigation policies and page destruction/recreation.
 [ADR-0008](docs/adr/0008-typed-child-panels.md) and the
 [ChildPanels design](docs/superpowers/specs/2026-10-09-child-panels-design.md)
 describe heterogeneous role types and lifecycle modes.
+[ADR-0009](docs/adr/0009-lazy-child-items.md) and the
+[ChildItems design](docs/superpowers/specs/2026-10-09-child-items-design.md)
+describe configuration-keyed activity and receiver-local lazy activation.
 
 ## Verification (Rust 1.96.0)
 
@@ -309,12 +387,13 @@ cargo run --example child_stack
 cargo run --example child_slot
 cargo run --example child_pages
 cargo run --example child_panels
+cargo run --example child_items
 ```
 
-Verified on 2026-10-09: **262 unit/integration tests and 1 doctest passed**.
-Format, strict Clippy, strict rustdoc and all four runnable examples passed. Library
+Verified on 2026-10-09: **325 unit/integration tests and 1 doctest passed**.
+Format, strict Clippy, strict rustdoc and all five runnable examples passed. Library
 compilation passed all 24 installed targets, including WASM, Apple, Android,
-Linux and Windows. The [ChildPanels implementation plan](docs/superpowers/plans/2026-10-09-child-panels.md)
+Linux and Windows. The [ChildItems implementation plan](docs/superpowers/plans/2026-10-09-child-items.md)
 records counts, commands, target matrix and review findings.
 
 Regression tests cover restored-state loss, retry after construction failure,
@@ -325,6 +404,9 @@ recreation under a stable key, custom lifecycle policies and restored selection.
 Panels tests cover all twelve mode/presence combinations, 36 mode transitions,
 typed role identity, hook ordering/reentry, panic recovery, Back modes and strict
 DPN1 restoration. Old DST1, DSL1 and DPG1 fixture bytes remain compatible.
+Items tests cover lazy/local navigation, inactive state recovery, updated equal
+configuration data, lifecycle/Back gates, strict DPI1 framing and panic/ownership
+recovery; the DPN1 fixture also remains compatible.
 Compile-target results are recorded in the implementation plan; compilation
 alone does not establish platform runtime behavior.
 
