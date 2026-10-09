@@ -1,5 +1,8 @@
 # Rust Ownership Model
 
+> Historical Phase 1 research. Implemented state-adapter and retention-lifetime
+> corrections in [ADR-0005](adr/0005-stack-and-retention-corrections.md) supersede conflicting statements here.
+
 ## 1. Baseline
 
 - Rust 1.96.0, Edition 2024 (matches Essenty-rs; no toolchain exception needed).

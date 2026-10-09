@@ -14,9 +14,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::StateKeeper;
 use essenty_instance_keeper::InstanceKeeper;
 use essenty_lifecycle::LifecycleRegistry;
-use essenty_state_keeper::StateKeeper;
 
 use crate::child::build_child;
 use crate::error::DecomposeError;

@@ -1,5 +1,8 @@
 # ADR-0003: Child-scope ownership (parent-held lifetime, lifecycle-driven teardown)
 
+> Historical Phase 1 research. Implemented state-adapter and retention-lifetime
+> corrections in [ADR-0005](0005-stack-and-retention-corrections.md) supersede conflicting statements here.
+
 Date: 2026-10-04. Rewritten: 2026-10-04 (Phase 0.5).
 Amended: 2026-10-04 (Phase 0.6: `SharedBack` replaces raw `Rc<RefCell<BackDispatcher>>`;
 `get_or_create` normative; destroy-ordering corrected; root `attachTo` specified;

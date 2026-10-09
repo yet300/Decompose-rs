@@ -1,5 +1,8 @@
 # Essenty-rs Compatibility Audit (`essenty-* 0.1.0`)
 
+> Historical Phase 1 research. Implemented state-adapter and retention-lifetime
+> corrections in [ADR-0005](adr/0005-stack-and-retention-corrections.md) supersede conflicting statements here.
+
 Audited against the published crates.io sources (registry copies), not design notes.
 Essenty release: tag `v0.1.0` = `2bf0e9108d8ae2dcd67ac3ab7ea7ca54cae16092` (2026-09-24).
 All four crates: Edition 2024, `rust-version 1.96.0`, Apache-2.0, `!Send + !Sync` (`Rc`-based),

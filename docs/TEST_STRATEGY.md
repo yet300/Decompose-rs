@@ -1,5 +1,8 @@
 # Test Strategy (upstream → Rust parity matrix)
 
+> Historical Phase 1 research. Implemented state-adapter and retention-lifetime
+> corrections in [ADR-0005](adr/0005-stack-and-retention-corrections.md) supersede conflicting statements here.
+
 Principle: tests prove **semantics**, not implementation. Every suite below derives from
 an upstream `commonTest` suite; each item states the observable behavior and the
 classification for Phase 1.

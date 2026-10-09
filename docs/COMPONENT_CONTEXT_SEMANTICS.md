@@ -1,5 +1,8 @@
 # ComponentContext Semantics (upstream behavioral contract)
 
+> Historical Phase 1 research. Implemented state-adapter and retention-lifetime
+> corrections in [ADR-0005](adr/0005-stack-and-retention-corrections.md) supersede conflicting statements here.
+
 Source: `upstream-ref` @ `00840bc`. All statements verified against implementation
 *and* `commonTest` suites. This document states the contract the Rust port must honor;
 for the Rust mapping see `RUST_OWNERSHIP_MODEL.md` and `PUBLIC_API_PROPOSAL.md`.

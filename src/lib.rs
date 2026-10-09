@@ -1,39 +1,38 @@
-//! `decompose-rs`: independent Rust port of Ark Ivanov's Decompose.
+//! Lifecycle-aware component contexts and observable child-stack navigation.
 //!
-//! Phase 1 implements the `ComponentContext` foundation only:
+//! This independent Rust port of Ark Ivanov’s Decompose currently implements
+//! [`ComponentContext`], [`DefaultComponentContext`], [`ContextFactory`] and
+//! [`router::stack`] with navigation operations, Back handling and explicit
+//! configuration codecs. [`value`] supplies synchronous observable snapshots.
 //!
-//! - [`ComponentContext`] trait with provided `child_context` constructors
-//! - [`DefaultComponentContext`] with upstream-equivalent defaults
-//! - [`ContextFactory`] / [`ContextParts`] detached-factory assembly
-//! - [`MergedLifecycle`] (`min(parent, manual)` as a lifecycle)
-//! - [`SharedBack`] reentrancy-safe back-dispatcher handle
-//! - [`DecomposeError`] minimal producing-error surface
-//! - [`DEFAULT_BACK_PRIORITY`] + LIFO tiebreak contract
+//! The core uses `Rc` and is single-threaded, synchronous and runtime-agnostic.
+//! Contexts, configurations and components need no Clone implementation.
+//! Custom contexts propagate services through their detached factory. Child
+//! lifecycles are bounded by their parent; retained scopes belong to the parent
+//! instance keeper. Dropping an observable view does not end navigation.
 //!
-//! Child `StateKeeper` / `InstanceKeeper` / back-handler scoping,
-//! construction atomicity with factory-panic rollback, and root
-//! `InstanceKeeper` attachment all live behind the `child_context`
-//! constructors.
+//! [`StateKeeper`] adapts Essenty state storage to preserve consumed input on
+//! construction rollback. Convert owned Essenty keepers with `StateKeeper::from`;
+//! [`EssentyStateKeeper`] reexports the original primitive.
 //!
-//! Explicitly NOT implemented (Phase 2+): `Value` / `MutableValue` / `Relay`,
-//! `ChildrenNavigator`, `ChildStack`, `ChildSlot`, `ChildPages`,
-//! `ChildPanels`, `ChildItems`, web history, and any UI integration.
-//!
-//! This crate is an independent implementation preserving observable
-//! behavioral semantics of upstream Decompose
-//! (`arkivanov/Decompose@00840bc`). No claim of official affiliation.
-//! See `NOTICE` for attribution. The core is synchronous,
-//! runtime-agnostic, and single-threaded (`!Send + !Sync`, `Rc`-based like
-//! `essenty-*`), with registry-only `essenty-* 0.1.0` dependencies.
+//! Behavior is checked against Decompose revision `00840bc`, using the four
+//! published `essenty-* 0.1.0` crates. Other navigation families, web history
+//! and UI/platform integrations are outside the current delivery. See the
+//! repository README and `examples/child_stack.rs` for usage, and `NOTICE`
+//! for attribution. This project has no official upstream affiliation.
 
 mod child;
 mod context;
 mod error;
 mod framing;
 mod merged;
+mod retention;
+pub mod router;
 mod shared_back;
+mod state;
 #[cfg(test)]
 mod testing;
+pub mod value;
 
 pub use context::{
     ComponentContext, ContextFactory, ContextParts, DEFAULT_BACK_PRIORITY, DefaultComponentContext,
@@ -43,6 +42,7 @@ pub use error::{DecomposeError, DispatchInProgress};
 pub use essenty_back_handler::{BackError, BackEvent, BackHandle, BackPhase, GesturePosition};
 pub use essenty_instance_keeper::{InstanceKeeper, InstanceKeeperError};
 pub use essenty_lifecycle::{LifecycleError, LifecycleRegistry, LifecycleState};
-pub use essenty_state_keeper::{StateKeeper, StateKeeperError};
+pub use essenty_state_keeper::{StateKeeper as EssentyStateKeeper, StateKeeperError};
 pub use merged::MergedLifecycle;
 pub use shared_back::SharedBack;
+pub use state::StateKeeper;

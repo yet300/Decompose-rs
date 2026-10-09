@@ -35,7 +35,7 @@ impl TestContext {
         lifecycle.resume().unwrap();
         Self {
             lifecycle,
-            state: Rc::new(RefCell::new(essenty_state_keeper::StateKeeper::new())),
+            state: Rc::new(RefCell::new(crate::StateKeeper::new())),
             instances: Rc::new(RefCell::new(essenty_instance_keeper::InstanceKeeper::new())),
             back: SharedBack::new(),
         }
@@ -45,7 +45,7 @@ impl TestContext {
     pub(crate) fn initialized() -> Self {
         Self {
             lifecycle: LifecycleRegistry::new(),
-            state: Rc::new(RefCell::new(essenty_state_keeper::StateKeeper::new())),
+            state: Rc::new(RefCell::new(crate::StateKeeper::new())),
             instances: Rc::new(RefCell::new(essenty_instance_keeper::InstanceKeeper::new())),
             back: SharedBack::new(),
         }
@@ -82,9 +82,7 @@ impl TestContext {
         };
         Self {
             lifecycle,
-            state: Rc::new(RefCell::new(
-                essenty_state_keeper::StateKeeper::with_restored(saved),
-            )),
+            state: Rc::new(RefCell::new(crate::StateKeeper::with_restored(saved))),
             instances,
             back: SharedBack::new(),
         }

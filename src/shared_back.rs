@@ -66,6 +66,8 @@ struct Inner {
     /// take queue/reject paths instead.
     busy: Cell<usize>,
     pending: RefCell<VecDeque<PendingOp>>,
+    after: RefCell<VecDeque<Box<dyn FnOnce()>>>,
+    running_after: Cell<bool>,
     /// Aggregate `can_handle` as of the last completed outer operation.
     /// Served to callers that ask during a busy window.
     cached_can_handle: Cell<bool>,
@@ -78,6 +80,27 @@ struct Inner {
 }
 
 impl Inner {
+    fn run_after(&self) {
+        if self.running_after.replace(true) {
+            return;
+        }
+        struct Reset<'a>(&'a Inner);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.running_after.set(false);
+                if std::thread::panicking() {
+                    let abandoned = std::mem::take(&mut *self.0.after.borrow_mut());
+                    drop(abandoned);
+                }
+            }
+        }
+        let _reset = Reset(self);
+        loop {
+            let callback = self.after.borrow_mut().pop_front();
+            let Some(callback) = callback else { break };
+            callback();
+        }
+    }
     /// Applies queued ops FIFO. Each op borrows the dispatcher separately;
     /// listener callbacks fired along the way re-queue (busy is still held).
     fn drain(&self) {
@@ -166,6 +189,7 @@ impl<'a> OuterFrame<'a> {
         self.inner.drain();
         self.inner.busy.set(0);
         self.completed = true;
+        self.inner.run_after();
     }
 }
 
@@ -179,6 +203,13 @@ impl Drop for OuterFrame<'_> {
             if let Ok(mut pending) = self.inner.pending.try_borrow_mut() {
                 pending.clear();
             }
+            let abandoned = self
+                .inner
+                .after
+                .try_borrow_mut()
+                .ok()
+                .map(|mut after| std::mem::take(&mut *after));
+            drop(abandoned);
             self.inner.busy.set(0);
             if let Ok(dispatcher) = self.inner.dispatcher.try_borrow() {
                 self.inner.cached_can_handle.set(dispatcher.can_handle());
@@ -219,6 +250,13 @@ impl std::fmt::Debug for SharedBack {
 }
 
 impl SharedBack {
+    /// Runs internal navigation work once the dispatcher borrow is released.
+    pub(crate) fn after_dispatch(&self, callback: impl FnOnce() + 'static) {
+        self.inner.after.borrow_mut().push_back(Box::new(callback));
+        if !self.is_dispatching() {
+            self.inner.run_after();
+        }
+    }
     /// Creates a fresh dispatcher with no callbacks and no listeners.
     #[must_use]
     pub fn new() -> Self {
@@ -226,6 +264,8 @@ impl SharedBack {
             dispatcher: RefCell::new(BackDispatcher::new()),
             busy: Cell::new(0),
             pending: RefCell::new(VecDeque::new()),
+            after: RefCell::new(VecDeque::new()),
+            running_after: Cell::new(false),
             cached_can_handle: Cell::new(false),
             cached_handler_count: Cell::new(0),
             listeners: RefCell::new(BTreeMap::new()),

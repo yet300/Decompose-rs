@@ -1,5 +1,8 @@
 # Public API Proposal (design proposal, not committed API)
 
+> Historical Phase 1 research. Implemented state-adapter and retention-lifetime
+> corrections in [ADR-0005](adr/0005-stack-and-retention-corrections.md) supersede conflicting statements here.
+
 All signatures below are proposals to be tested against the ergonomics examples in §8.
 Decisions reference ADRs in `docs/adr/`.
 

@@ -29,10 +29,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use crate::StateKeeper;
+use crate::retention::RetainedScope;
 use essenty_back_handler::BackPhase;
+#[cfg(test)]
 use essenty_instance_keeper::InstanceKeeper;
 use essenty_lifecycle::{LifecycleRegistry, LifecycleState};
-use essenty_state_keeper::{StateKeeper, StateKeeperError};
+use essenty_state_keeper::StateKeeperError;
 
 use crate::context::{
     ChildKey, ContextFactory, ContextParts, MANUAL_DESTROY_PANIC_MESSAGE, SharedInstances,
@@ -55,6 +58,7 @@ struct BackRollback {
 }
 
 struct Rollback {
+    restored: Option<(SharedKeeper, String, Vec<u8>)>,
     state: Option<(SharedKeeper, String)>,
     instance: Option<(SharedInstances, String)>,
     back: Option<BackRollback>,
@@ -65,27 +69,18 @@ struct Rollback {
     /// a failed construction leaves zero observers on the caller-owned
     /// manual lifecycle (P1-03).
     manual_hooks: Option<(LifecycleRegistry, Vec<u64>)>,
-    /// Merged-destroy cascade hook installed by this attempt. Same
-    /// provisional lifetime as the manual hooks.
-    merged_cascade: Option<(LifecycleRegistry, u64)>,
-    /// Fixed-child instance-cascade hook, which lives on the parent
-    /// lifecycle and is therefore parent-visible. Manual-path hooks live on
-    /// the caller-owned manual registry instead: they die with that registry
-    /// (manual destroy clears them) and are tracked in `manual_hooks`.
-    fixed_hook: Option<(LifecycleRegistry, u64)>,
     defused: bool,
 }
 
 impl Rollback {
     fn new() -> Self {
         Self {
+            restored: None,
             state: None,
             instance: None,
             back: None,
             merged: None,
             manual_hooks: None,
-            merged_cascade: None,
-            fixed_hook: None,
             defused: false,
         }
     }
@@ -103,6 +98,11 @@ impl Drop for Rollback {
             && let Ok(mut keeper) = state.try_borrow_mut()
         {
             keeper.unregister(&key);
+        }
+        if let Some((state, key, bytes)) = self.restored.take()
+            && let Ok(mut keeper) = state.try_borrow_mut()
+        {
+            keeper.return_bytes(key, bytes);
         }
         // Only entries created by this attempt are tracked here; a
         // pre-existing retained scope is never destroyed by rollback.
@@ -124,18 +124,11 @@ impl Drop for Rollback {
             merged.shutdown();
         }
         // Provisional lifecycle hooks, if any. Unsubscribing is pure cleanup
-        // (no delivery), ordered to avoid user-visible behavior: manual
-        // hooks first, then the merged cascade, then the fixed hook.
+        // (no delivery); remove only observers installed by this attempt.
         if let Some((lifecycle, ids)) = self.manual_hooks.take() {
             for id in ids {
                 let _ = lifecycle.unsubscribe(id);
             }
-        }
-        if let Some((lifecycle, id)) = self.merged_cascade.take() {
-            let _ = lifecycle.unsubscribe(id);
-        }
-        if let Some((lifecycle, id)) = self.fixed_hook.take() {
-            let _ = lifecycle.unsubscribe(id);
         }
     }
 }
@@ -175,15 +168,18 @@ pub(crate) fn build_child<C>(
 
     // Step 3: consume restored child-state bytes once.
     let restored = parent_state.borrow_mut().consume_bytes(key.as_str());
+    rollback.restored = restored
+        .as_ref()
+        .map(|bytes| (parent_state.clone(), key_str.clone(), bytes.clone()));
 
     // Step 4: decode DCS1 and create/register the child state keeper. The
     // registered provider captures a STRONG Rc to the child keeper
     // (mandatory): the registration itself keeps the child saveable with
     // zero external handles alive. The graph parent -> provider -> child has
     // no back edge, so no cycle.
-    let seeded: BTreeMap<String, Vec<u8>> = match restored {
+    let seeded: BTreeMap<String, Vec<u8>> = match restored.as_ref() {
         None => BTreeMap::new(),
-        Some(bytes) => framing::decode(&bytes).map_err(|reason| {
+        Some(bytes) => framing::decode(bytes).map_err(|reason| {
             DecomposeError::StateKeeper(StateKeeperError::Decode {
                 key: key_str.clone(),
                 reason: reason.to_string(),
@@ -197,7 +193,7 @@ pub(crate) fn build_child<C>(
         // frame, returned verbatim when a later save cannot produce a fresh
         // one. Staleness is bounded by construction — it is always a real
         // past save, never fabricated — and a healthy save refreshes it.
-        let last_good: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
+        let last_good: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(restored));
         let cache = Rc::clone(&last_good);
         parent_state
             .borrow_mut()
@@ -234,10 +230,12 @@ pub(crate) fn build_child<C>(
     // is recorded so rollback never destroys a retained scope it did not
     // create. A destroyed parent scope surfaces Destroyed here (F-09).
     let pre_existed = parent_instances.borrow().contains(key.as_str());
-    let child_instances: SharedInstances = parent_instances
+    let retained_scope = parent_instances
         .borrow_mut()
-        .get_or_create(key.as_str(), || RefCell::new(InstanceKeeper::new()))
+        .get_or_create(key.as_str(), RetainedScope::new)
         .map_err(DecomposeError::InstanceKeeper)?;
+    let child_instances = retained_scope.instances.clone();
+    drop(retained_scope);
     if !pre_existed {
         rollback.instance = Some((Rc::clone(parent_instances), key_str.clone()));
     }
@@ -345,22 +343,9 @@ pub(crate) fn build_child<C>(
         let merged = MergedLifecycle::new(parent_lifecycle, manual);
         let parent_observer_id = merged.observer_ids().0;
         child_lifecycle = merged.lifecycle();
-        // Child-scope end marks the nested keeper destroyed immediately
-        // (bookkeeping; retained-value Drop follows last-Rc release).
-        // Provisional until factory success (P1-03).
-        {
-            let owned = Rc::clone(&child_instances);
-            rollback.merged_cascade = Some((
-                child_lifecycle.clone(),
-                child_lifecycle
-                    .do_on_destroy(move || {
-                        if let Ok(mut scope) = owned.try_borrow_mut() {
-                            scope.destroy_all();
-                        }
-                    })
-                    .detach(),
-            ));
-        }
+        // Retention belongs to the parent keeper and the explicitly supplied
+        // local lifecycle, not to the merged component lifecycle. A parent
+        // lifecycle can end while an external keeper survives recreation.
         // Teardown hook LAST so it fires FIRST: unregister state key,
         // destroy instance entry, end child scope, stop the back bridge,
         // release the parent merged observer, then drive merged destroyed.
@@ -401,29 +386,9 @@ pub(crate) fn build_child<C>(
         rollback.merged = Some(merged);
     } else {
         child_lifecycle = parent_lifecycle.clone();
-        // Fixed children persist to parent-scope end. Rust-ownership
-        // adaptation (documented): a destroy hook on the shared lifecycle
-        // ends the nested scope deterministically when the parent scope ends.
-        // Upstream achieves this through GC-owned provider destruction; the
-        // hook is the explicit equivalent. The hook removes the parent
-        // instance entry as well as ending the nested keeper (P1-08,
-        // option B): same-key recreation after parent-scope end then yields
-        // a fresh live scope instead of the destroyed one. Config-change
-        // retention is unaffected — no lifecycle is destroyed on that path.
-        let owned = Rc::clone(&child_instances);
-        let retained = Rc::clone(parent_instances);
-        let entry_key = key_str.clone();
-        let hook_id = parent_lifecycle
-            .do_on_destroy(move || {
-                if let Ok(mut instances) = retained.try_borrow_mut() {
-                    instances.destroy(&entry_key);
-                }
-                if let Ok(mut scope) = owned.try_borrow_mut() {
-                    scope.destroy_all();
-                }
-            })
-            .detach();
-        rollback.fixed_hook = Some((parent_lifecycle.clone(), hook_id));
+        // Fixed-child retained scopes belong to the parent InstanceKeeper.
+        // Destroying an old component lifecycle during recreation must not
+        // remove entries from an externally retained parent keeper.
     }
 
     // Step 8: build ContextParts.
@@ -483,9 +448,8 @@ mod tests {
         assert!(parent.state_keeper().borrow().is_registered("c"));
         assert!(parent.instance_keeper().borrow().contains("c"));
         assert_eq!(parent.back_handler().handler_count(), 1);
-        // Fixed children add exactly one parent-lifecycle observer: the
-        // instance-cascade hook (documented Rust-ownership adaptation).
-        assert_eq!(parent.lifecycle().subscriber_count(), 1);
+        // Fixed-child retention belongs to the InstanceKeeper, not lifecycle.
+        assert_eq!(parent.lifecycle().subscriber_count(), 0);
     }
 
     #[test]
@@ -723,15 +687,14 @@ mod tests {
 
     #[test]
     fn parent_destroy_marks_nested_scopes_destroyed() {
-        // Fixed child: parent-scope end cascades deterministically.
-        let parent = TestContext::new();
+        // Default roots own their keeper, so lifecycle end ends retention.
+        let parent = DefaultComponentContext::new(LifecycleRegistry::new());
         let child = parent.child_context("c").unwrap();
         parent.lifecycle().destroy().unwrap();
         assert!(child.instance_keeper().borrow().is_destroyed());
 
-        // Manual child: parent destroy drives merged destroyed, and the
-        // merged-destroy cascade ends the nested scope.
-        let parent = TestContext::new();
+        // Manual child under a default root also ends with the owned keeper.
+        let parent = DefaultComponentContext::new(LifecycleRegistry::new());
         let manual = manual();
         let child = parent.child_context_with_lifecycle("m", &manual).unwrap();
         assert_eq!(child.lifecycle().state(), LifecycleState::Initialized);
@@ -1449,30 +1412,17 @@ mod tests {
     // -- P1-08: surviving external keeper edge ---------------------------------
 
     #[test]
-    fn p1_08_fixed_cascade_removes_entry_and_recreation_is_fresh() {
+    fn fixed_retention_ends_with_external_keeper_not_old_lifecycle() {
         let lifecycle = LifecycleRegistry::new();
         lifecycle.create().unwrap();
-        // Supplied keeper: survives parent lifecycle destroy (no hook).
         let external: SharedInstances = Rc::new(RefCell::new(InstanceKeeper::new()));
         let parent =
-            DefaultComponentContext::with_instance_keeper(lifecycle.clone(), Rc::clone(&external));
+            DefaultComponentContext::with_instance_keeper(lifecycle.clone(), external.clone());
         let child = parent.child_context("c").unwrap();
-        assert!(external.borrow().contains("c"));
-
         lifecycle.destroy().unwrap();
-        // Cascade ended the nested scope AND removed the entry (option B).
+        assert!(!child.instance_keeper().borrow().is_destroyed());
+        assert!(external.borrow().contains("c"));
+        external.borrow_mut().destroy_all();
         assert!(child.instance_keeper().borrow().is_destroyed());
-        assert!(!external.borrow().contains("c"));
-        // The state provider still persists for the parent lifetime.
-        assert!(parent.state_keeper().borrow().is_registered("c"));
-
-        // Same-key recreation at the keeper layer yields a fresh live scope,
-        // never the destroyed one.
-        let fresh: SharedInstances = external
-            .borrow_mut()
-            .get_or_create("c", || RefCell::new(InstanceKeeper::new()))
-            .unwrap();
-        assert!(!fresh.borrow().is_destroyed());
-        assert!(!Rc::ptr_eq(&fresh, &child.instance_keeper()));
     }
 }
