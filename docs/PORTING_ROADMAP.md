@@ -1,10 +1,12 @@
 # Porting Roadmap
 
 > Current delivery (2026-10-09): ComponentContext corrections, observable values
-> and ChildStack, including Back and explicit-codec persistence, are implemented.
+> and ChildStack/ChildSlot, including Back and explicit-codec persistence, form
+> the current implementation scope.
 > The original phased research below is historical; the user approved the focused
 > stack delivery instead of all nine phases. ADR-0005 supersedes conflicting
-> retention/state assumptions. Other navigation families and integrations remain
+> retention/state assumptions; ADR-0006 records the shared private navigation
+> engine and ChildSlot. Other navigation families and integrations remain
 > outside scope.
 
 ## Research identity
@@ -148,6 +150,7 @@ save/restore; tombstone re-instantiation under the same key), and `ChildControll
 PHASE 0 RESEARCH: PASSED
 COMPONENT CONTEXT: IMPLEMENTED WITH STATE/RETENTION CORRECTIONS (ADR-0005)
 CHILD STACK: IMPLEMENTED (operations, Back, reentrancy, codecs)
+CHILD SLOT: IMPLEMENTED (optional membership, Back, reentrancy, empty/populated persistence)
 OTHER NAVIGATION MODELS / PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
 ESSENTY-RS CHANGES: NONE REQUIRED
 ```

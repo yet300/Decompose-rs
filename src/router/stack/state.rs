@@ -32,11 +32,7 @@ impl<C> Clone for StackCodec<C> {
         }
     }
 }
-pub(crate) struct SavedStack<C> {
-    pub(crate) configurations: Vec<Rc<C>>,
-    pub(crate) children: Vec<(String, BTreeMap<String, Vec<u8>>)>,
-    pub(crate) next_key: u64,
-}
+use crate::router::engine::SavedState as SavedStack;
 const MAGIC: &[u8; 4] = b"DST1";
 fn state_error(message: impl Into<String>) -> NavigationError {
     NavigationError::State(message.into())
@@ -182,6 +178,17 @@ mod tests {
             2,
         )
         .unwrap()
+    }
+    #[test]
+    fn dst1_bytes_match_the_pre_slot_fixture() {
+        let fixture: &[u8] = &[
+            68, 83, 84, 49, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 2, 2, 0, 0, 0, 7, 0, 0, 0, 115,
+            116, 97, 99, 107, 47, 48, 24, 0, 0, 0, 68, 67, 83, 49, 1, 0, 0, 0, 6, 0, 0, 0, 110,
+            101, 115, 116, 101, 100, 2, 0, 0, 0, 0, 255, 7, 0, 0, 0, 115, 116, 97, 99, 107, 47, 49,
+            8, 0, 0, 0, 68, 67, 83, 49, 0, 0, 0, 0,
+        ];
+        assert_eq!(sample(), fixture);
+        assert_eq!(decode(&codec(), fixture).unwrap().next_key, 2);
     }
     #[test]
     fn round_trip_keeps_configuration_child_order_and_counter() {

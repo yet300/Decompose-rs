@@ -948,3 +948,80 @@ fn queued_initial_event_destroying_parent_returns_a_construction_error() {
     assert!(matches!(result, Err(NavigationError::Destroyed)));
     assert_eq!(root.back_handler().handler_count(), 0);
 }
+
+fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
+    let parent = root();
+    let navigation = StackNavigation::new();
+    let calls = Rc::new(std::cell::Cell::new(0));
+    let count = calls.clone();
+    let prepared = Rc::new(RefCell::new(None::<SharedInstances>));
+    let captured = prepared.clone();
+    let stack = child_stack(
+        &parent,
+        &navigation,
+        vec![1u32],
+        StackOptions::default(),
+        move |configuration, context| {
+            count.set(count.get() + 1);
+            if *configuration == 1 && outgoing_destroy && count.get() == 1 {
+                let _ = context
+                    .lifecycle()
+                    .do_on_destroy(|| panic!("outgoing destroy failed"))
+                    .detach();
+            }
+            if *configuration == 2 {
+                *captured.borrow_mut() = Some(context.instance_keeper());
+                if !outgoing_destroy {
+                    let _ = context
+                        .lifecycle()
+                        .do_on_resume(|| panic!("incoming resume failed"))
+                        .detach();
+                }
+            }
+            context
+        },
+    )
+    .unwrap();
+    let old = stack.get().active.clone();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || navigation.replace_current(2)
+        ))
+        .is_err()
+    );
+    assert!(old.instance.lifecycle().state().is_destroyed());
+    assert!(prepared.borrow().as_ref().unwrap().borrow().is_destroyed());
+    let completed = Rc::new(std::cell::Cell::new(false));
+    let done = completed.clone();
+    navigation.navigate_with(
+        |_| vec![Rc::new(1)],
+        move |result| {
+            assert!(result.is_ok());
+            done.set(true);
+        },
+    );
+    assert!(completed.get());
+    let retried = stack.get().active.clone();
+    assert_eq!(
+        retried.instance.lifecycle().state(),
+        LifecycleState::Resumed
+    );
+    assert!(!Rc::ptr_eq(&old.instance, &retried.instance));
+    assert_ne!(old.key, retried.key);
+    assert_eq!(calls.get(), 3);
+    assert!(old.instance.instance_keeper().borrow().is_destroyed());
+    assert!(!retried.instance.instance_keeper().borrow().is_destroyed());
+    navigation.replace_current(1);
+    assert!(Rc::ptr_eq(&retried.instance, &stack.get().active.instance));
+    assert_eq!(calls.get(), 3);
+}
+
+#[test]
+fn retry_old_configuration_after_outgoing_destroy_panic_creates_live_stack_child() {
+    retry_old_configuration_after_lifecycle_panic(true);
+}
+
+#[test]
+fn retry_old_configuration_after_incoming_resume_panic_creates_live_stack_child() {
+    retry_old_configuration_after_lifecycle_panic(false);
+}

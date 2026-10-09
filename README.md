@@ -3,9 +3,10 @@
 Independent Rust port of [Ark Ivanov’s Decompose](https://github.com/arkivanov/Decompose),
 implemented on top of [Essenty-rs](https://github.com/yet300/Essenty).
 
-**Current scope: ComponentContext and ChildStack.** The port includes observable
+**Current scope: ComponentContext, ChildStack and ChildSlot.** The port includes observable
 values, navigation operations, child lifecycle management, Back routing and
-configuration/state restoration. Other navigation families and platform/UI
+configuration/state restoration. ChildSlot represents zero-or-one children and
+supports activation, replacement and dismissal. Other navigation families and platform/UI
 integrations are outside this delivery. Behavior is checked against pinned
 Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`, not an unspecified
 latest release. See `NOTICE` for attribution.
@@ -43,6 +44,8 @@ lifecycle.destroy().unwrap();
 Run `cargo run --example child_stack` for an enum-route example with automatic
 Back, explicit configuration codecs, saving and process-death restoration.
 The example is in [examples/child_stack.rs](examples/child_stack.rs).
+Run `cargo run --example child_slot` for combined Stack/Slot navigation, Back
+dismissal and restoration of a saved empty slot.
 
 ## Rust API and behavior
 
@@ -78,7 +81,61 @@ duplicates). Use `navigate_with` for a `Result<NavigationResult<C>, NavigationEr
 completion callback. A shared source reports once per connected stack; a queued
 call has no immediate final result. User panics propagate, with cleanup of
 incomplete construction and abandoned queued work. Successful user callback
-side effects are outside that rollback boundary.
+side effects are outside that rollback boundary. If a lifecycle callback panic
+ends a child before membership commits, subsequent navigation reconstructs that
+child instead of reusing its ended scope.
+
+## ChildSlot
+
+`router::slot` exposes `ChildSlot<C, T> { child: Option<Child<C, T>> }`,
+`SlotNavigation<C>`, `SlotOptions<C>`, `SlotCodec<C>` and `child_slot`.
+Use None as the initial configuration for an empty slot. The factory receives
+`&C` and the same custom context type used by the parent.
+
+```rust
+use decompose_rs::router::slot::{child_slot, SlotNavigation, SlotOptions};
+use decompose_rs::{DefaultComponentContext, LifecycleRegistry, LifecycleState};
+
+let lifecycle = LifecycleRegistry::new();
+lifecycle.move_to(LifecycleState::Resumed).unwrap();
+let root = DefaultComponentContext::new(lifecycle.clone());
+let navigation = SlotNavigation::new();
+let slot = child_slot(&root, &navigation, None::<String>,
+    SlotOptions { handle_back_button: true, ..SlotOptions::default() },
+    |_, context| context,
+).unwrap();
+
+navigation.activate("Confirm deletion".into());
+assert!(slot.get().child.is_some());
+navigation.dismiss();
+assert!(slot.get().child.is_none());
+lifecycle.destroy().unwrap();
+```
+
+`activate` with an equal configuration preserves the child's instance, stable
+key and lifecycle. Replacement ends the outgoing child before resuming the new
+one; `dismiss` destroys the child's lifecycle and retained scope. Empty dismissal
+is a no-op. A child targets Resumed, bounded by the parent. No-op navigation still
+publishes an observable snapshot and runs completion, as in upstream.
+
+`navigate`/`navigate_with` transform `Option<Rc<C>>`. `activate_with` reports
+old/new configuration snapshots through a typed completion;
+`dismiss_with` reports `Result<bool, NavigationError>`, true if a child existed.
+Convenience calls panic on rejected transitions, while explicit completions
+receive errors. Shared sources report independently for each connected slot.
+
+`SlotCodec::new` accepts callbacks for one configuration. With a codec,
+DSL1 persists explicit empty/populated membership, child key, allocation counter
+and nested state. Empty saves invoke neither configuration callback, and restore
+as empty even when a populated initial configuration is supplied. This prevents
+a dismissed dialog reappearing from an earlier save. Without a codec, the slot
+is transient. Malformed state is rejected before child factories.
+
+Stack and Slot may coexist under different keys, and may be nested through
+custom contexts. `handle_back_button` defaults to false; when enabled, an
+unhandled Back dismisses a populated slot. Child handlers have precedence over
+automatic navigation. Sibling handlers follow SharedBack priority/LIFO ordering;
+an empty slot does not consume Back. Predictive cancellation preserves membership.
 
 ## State and retained instances
 
@@ -116,8 +173,9 @@ separate context, value and stack crates in this scope.
 | `merged`, `shared_back` | Parent-bounded lifecycle and reentrant Back dispatch |
 | `state`, `framing` | Essenty state adapter and child-state encoding |
 | public `value` | Observable immutable snapshots and subscription guards |
-| public `router::stack` | Stack API, operations and user codecs |
-| private stack `engine`, `navigation`, `state` | Scope ownership, queued events and persistence |
+| public `router::stack`, `router::slot` | Model APIs, operations, snapshots and codecs |
+| private router machinery | Shared scope ownership, transactions and queued events |
+| private model state modules | DST1 stack / DSL1 slot envelopes |
 
 Dependencies remain the four published `essenty-* 0.1.0` primitives and
 `thiserror`. No Essenty source changes, path/git overrides or additional runtime
@@ -125,7 +183,12 @@ are required. [ADR-0005](docs/adr/0005-stack-and-retention-corrections.md) recor
 implemented corrections and supersedes conflicting assumptions in older
 Phase 1 research. The [approved design](docs/superpowers/specs/2026-10-09-component-context-child-stack-design.md)
 and [implementation plan](docs/superpowers/plans/2026-10-09-component-context-child-stack.md)
-record the delivery boundaries.
+record the first delivery boundaries.
+[ADR-0006](docs/adr/0006-child-slot-and-private-navigation-engine.md) and the
+[ChildSlot design](docs/superpowers/specs/2026-10-09-child-slot-design.md) describe
+the optional-child model and the shared private engine. Existing
+`router::stack::Child` and `router::stack::NavigationError` imports remain valid;
+the common types are also available under `router` and `router::slot`.
 
 ## Verification (Rust 1.96.0)
 
@@ -136,11 +199,14 @@ cargo test --all-targets --all-features
 cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo run --example child_stack
+cargo run --example child_slot
 ```
 
-Verified on 2026-10-09: 143 unit/integration tests and 1 doctest passed; format,
-Clippy, rustdoc and the example passed. Library compilation passed for all
-24 installed targets, including WASM, Apple, Android, Linux and Windows.
+Verified on 2026-10-09: **180 unit/integration tests and 1 doctest passed**.
+Format, strict Clippy, strict rustdoc and both runnable examples passed. Library
+compilation passed all 24 installed targets, including WASM, Apple, Android,
+Linux and Windows. The [ChildSlot implementation plan](docs/superpowers/plans/2026-10-09-child-slot.md)
+records counts, commands, target matrix and review findings.
 
 Regression tests cover restored-state loss, retry after construction failure,
 retained recreation, non-Clone custom nesting, identity/lifecycle ordering,

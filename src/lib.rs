@@ -1,8 +1,8 @@
-//! Lifecycle-aware component contexts and observable child-stack navigation.
+//! Lifecycle-aware component contexts and observable child-stack and child-slot navigation.
 //!
 //! This independent Rust port of Ark Ivanov’s Decompose currently implements
 //! [`ComponentContext`], [`DefaultComponentContext`], [`ContextFactory`] and
-//! [`router::stack`] with navigation operations, Back handling and explicit
+//! [`router::stack`] and [`router::slot`] with navigation operations, Back handling and explicit
 //! configuration codecs. [`value`] supplies synchronous observable snapshots.
 //!
 //! The core uses `Rc` and is single-threaded, synchronous and runtime-agnostic.
@@ -18,7 +18,7 @@
 //! Behavior is checked against Decompose revision `00840bc`, using the four
 //! published `essenty-* 0.1.0` crates. Other navigation families, web history
 //! and UI/platform integrations are outside the current delivery. See the
-//! repository README and `examples/child_stack.rs` for usage, and `NOTICE`
+//! repository README and `examples/child_stack.rs` / `examples/child_slot.rs` for usage, and `NOTICE`
 //! for attribution. This project has no official upstream affiliation.
 
 mod child;
