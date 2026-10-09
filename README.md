@@ -3,10 +3,12 @@
 Independent Rust port of [Ark Ivanov’s Decompose](https://github.com/arkivanov/Decompose),
 implemented on top of [Essenty-rs](https://github.com/yet300/Essenty).
 
-**Current scope: ComponentContext, ChildStack and ChildSlot.** The port includes observable
+**Current scope: ComponentContext, ChildStack, ChildSlot and ChildPages.** The port includes observable
 values, navigation operations, child lifecycle management, Back routing and
 configuration/state restoration. ChildSlot represents zero-or-one children and
-supports activation, replacement and dismissal. Other navigation families and platform/UI
+supports activation, replacement and dismissal. ChildPages keeps page identities and
+saved state while creating or destroying instances according to a lifecycle policy.
+Other navigation families and platform/UI
 integrations are outside this delivery. Behavior is checked against pinned
 Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`, not an unspecified
 latest release. See `NOTICE` for attribution.
@@ -46,6 +48,8 @@ Back, explicit configuration codecs, saving and process-death restoration.
 The example is in [examples/child_stack.rs](examples/child_stack.rs).
 Run `cargo run --example child_slot` for combined Stack/Slot navigation, Back
 dismissal and restoration of a saved empty slot.
+Run `cargo run --example child_pages` for lazy pages, destruction/recreation under
+the same key, child-state recovery and restored selection.
 
 ## Rust API and behavior
 
@@ -137,6 +141,50 @@ unhandled Back dismisses a populated slot. Child handlers have precedence over
 automatic navigation. Sibling handlers follow SharedBack priority/LIFO ordering;
 an empty slot does not consume Back. Predictive cancellation preserves membership.
 
+## ChildPages
+
+`router::pages` exposes `Pages<C>`, `ChildPages<C, T>`, `PageChild<C, T>`,
+`PageStatus`, `PagesNavigation`, `PagesOptions`, `PagesCodec` and `child_pages`.
+`Pages::new(configurations, selected_index)` validates the initial position.
+Snapshots use `Option<usize>`: an empty collection selects None, while a nonempty
+collection always selects a valid index. Configurations and components need no Clone.
+
+By default, the selected page targets Resumed, its immediate neighbors target
+Created, and all other pages are Destroyed. Only live pages invoke the component
+factory. A destroyed page exposes its configuration and stable key through
+`PageChild`, with `instance()` returning None. It retains saved child state.
+Selecting it later creates a new component and keeper using that same key and
+state. An old snapshot may keep the previous component object alive, but its
+lifecycle has ended. Equal configurations match by occurrence and preserve keys
+across list reorders; duplicates require explicit opt-in.
+
+`PagesOptions::page_status` accepts a policy callback that chooses Created,
+Started, Resumed or Destroyed for each position. This supports circular neighbors
+or keeping additional pages live. The hosting lifecycle bounds each live page.
+The default policy and a circular navigation operation are independent choices.
+
+`PagesNavigation` provides `navigate`/`navigate_with`, `select`/`select_with`,
+`select_next(circular)`, `select_prev(circular)`, `select_first`, `select_last`,
+`clear` and `set_items`. Boundary movement clamps unless circular behavior is
+requested. Empty selection operations are no-ops. `set_items` clamps the previous
+numeric index to the new list; it does not follow the selected configuration
+when items move. Explicit completion callbacks receive typed errors for invalid
+nonempty selection; convenience methods panic on rejection.
+
+With `handle_back_button: true`, unhandled Back selects the previous page when
+the selected index exceeds zero. Enabled child handlers take precedence.
+Created and Destroyed pages cannot handle Back. Shared source events, repeated
+callback entry, parent ownership and deferred Back transitions follow the other
+router models.
+
+`PagesCodec::new` uses configuration-list encode/decode callbacks, like Stack.
+DPG1 persists order, selection, child keys and allocation counter, and state for
+both live and destroyed pages. Empty saved membership overrides initial pages.
+Restoration recomputes statuses using the current policy. Without a codec the
+router is transient; it does not invoke child providers for a parent save.
+Codec/framing failures return errors and constructor rollback keeps input
+available for retry. DST1 and DSL1 remain compatible with earlier router saves.
+
 ## State and retained instances
 
 `StackOptions::codec` defaults to None for transient navigation. Supply a
@@ -173,9 +221,9 @@ separate context, value and stack crates in this scope.
 | `merged`, `shared_back` | Parent-bounded lifecycle and reentrant Back dispatch |
 | `state`, `framing` | Essenty state adapter and child-state encoding |
 | public `value` | Observable immutable snapshots and subscription guards |
-| public `router::stack`, `router::slot` | Model APIs, operations, snapshots and codecs |
+| public `router::stack`, `router::slot`, `router::pages` | Model APIs, operations, snapshots and codecs |
 | private router machinery | Shared scope ownership, transactions and queued events |
-| private model state modules | DST1 stack / DSL1 slot envelopes |
+| private model state modules | DST1 stack / DSL1 slot / DPG1 pages envelopes |
 
 Dependencies remain the four published `essenty-* 0.1.0` primitives and
 `thiserror`. No Essenty source changes, path/git overrides or additional runtime
@@ -189,6 +237,9 @@ record the first delivery boundaries.
 the optional-child model and the shared private engine. Existing
 `router::stack::Child` and `router::stack::NavigationError` imports remain valid;
 the common types are also available under `router` and `router::slot`.
+[ADR-0007](docs/adr/0007-child-pages-and-destroyed-page-state.md) and the
+[ChildPages design](docs/superpowers/specs/2026-10-09-child-pages-design.md)
+describe stateful navigation policies and page destruction/recreation.
 
 ## Verification (Rust 1.96.0)
 
@@ -200,17 +251,20 @@ cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo run --example child_stack
 cargo run --example child_slot
+cargo run --example child_pages
 ```
 
-Verified on 2026-10-09: **180 unit/integration tests and 1 doctest passed**.
-Format, strict Clippy, strict rustdoc and both runnable examples passed. Library
+Verified on 2026-10-09: **220 unit/integration tests and 1 doctest passed**.
+Format, strict Clippy, strict rustdoc and all three runnable examples passed. Library
 compilation passed all 24 installed targets, including WASM, Apple, Android,
-Linux and Windows. The [ChildSlot implementation plan](docs/superpowers/plans/2026-10-09-child-slot.md)
+Linux and Windows. The [ChildPages implementation plan](docs/superpowers/plans/2026-10-09-child-pages.md)
 records counts, commands, target matrix and review findings.
 
 Regression tests cover restored-state loss, retry after construction failure,
 retained recreation, non-Clone custom nesting, identity/lifecycle ordering,
 Back priority, repeated callback entry, persistence errors and teardown.
+Pages tests also cover lazy creation, state-preserving tombstones, fresh-instance
+recreation under a stable key, custom lifecycle policies and restored selection.
 Compile-target results are recorded in the implementation plan; compilation
 alone does not establish platform runtime behavior.
 

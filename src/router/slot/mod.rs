@@ -49,7 +49,7 @@ impl<C> Clone for NavigationResult<C> {
 /// Shared, single-threaded navigation source. Each connected slot reports its own result.
 /// Reentrant events are delivered FIFO after the current broadcast completes.
 pub struct SlotNavigation<C> {
-    navigation: super::navigation::NavigationSource<C>,
+    navigation: super::navigation::NavigationSource<Vec<Rc<C>>>,
 }
 impl<C> Clone for SlotNavigation<C> {
     fn clone(&self) -> Self {
@@ -123,11 +123,18 @@ impl<C: 'static> SlotNavigation<C> {
 }
 struct SlotModel<C>(SlotOptions<C>);
 impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
+    type State = Vec<Rc<C>>;
+    fn configurations<'a>(&self, state: &'a Self::State) -> &'a [Rc<C>] {
+        state
+    }
+    fn statuses(&self, state: &Self::State) -> Vec<super::pages::PageStatus> {
+        vec![super::pages::PageStatus::Resumed; state.len()]
+    }
     type Snapshot = ChildSlot<C, T>;
     fn persistent(&self) -> bool {
         self.0.codec.is_some()
     }
-    fn validate(&self, configurations: &[Rc<C>]) -> Result<(), NavigationError> {
+    fn validate(&self, configurations: &Vec<Rc<C>>) -> Result<(), NavigationError> {
         if configurations.len() > 1 {
             return Err(NavigationError::State(
                 "slot requires zero or one configuration".into(),
@@ -135,13 +142,20 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
         }
         Ok(())
     }
-    fn snapshot(&self, mut children: Vec<Child<C, T>>) -> Self::Snapshot {
+    fn snapshot(
+        &self,
+        children: Vec<super::pages::PageChild<C, T>>,
+        _: &Self::State,
+    ) -> Self::Snapshot {
         ChildSlot {
-            child: children.pop(),
+            child: children.into_iter().next().map(|child| match child {
+                super::pages::PageChild::Created(c) => c,
+                _ => unreachable!("slot children always live"),
+            }),
         }
     }
-    fn back_enabled(&self, count: usize) -> bool {
-        self.0.handle_back_button && count == 1
+    fn back_enabled(&self, state: &Self::State) -> bool {
+        self.0.handle_back_button && state.len() == 1
     }
     fn back_transform(&self, _: Vec<Rc<C>>) -> Vec<Rc<C>> {
         Vec::new()
@@ -149,7 +163,7 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
     fn decode(
         &self,
         bytes: &[u8],
-    ) -> Result<Option<super::engine::SavedState<C>>, NavigationError> {
+    ) -> Result<Option<super::engine::SavedState<Vec<Rc<C>>>>, NavigationError> {
         self.0
             .codec
             .as_ref()
@@ -158,7 +172,7 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
     }
     fn encode(
         &self,
-        configs: &[Rc<C>],
+        configs: &Vec<Rc<C>>,
         children: &Vec<(String, std::collections::BTreeMap<String, Vec<u8>>)>,
         next_key: u64,
     ) -> Result<Option<Vec<u8>>, NavigationError> {
@@ -182,7 +196,7 @@ pub fn child_slot<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
     super::engine::build(
         context,
         &navigation.navigation,
-        initial.into_iter().collect(),
+        initial.into_iter().map(Rc::new).collect(),
         options.key.clone(),
         SlotModel(options),
         factory,

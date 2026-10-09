@@ -1,7 +1,8 @@
 use super::NavigationError;
 #[cfg(test)]
 use crate::router::navigation::Event;
-pub use crate::router::navigation::NavigationResult;
+/// Configuration snapshots before and after successful stack navigation.
+pub type NavigationResult<C> = crate::router::navigation::NavigationResult<Vec<Rc<C>>>;
 use crate::router::navigation::NavigationSource;
 #[cfg(test)]
 use crate::value::Subscription;
@@ -10,7 +11,7 @@ use std::rc::Rc;
 /// A shared, single-threaded source of stack navigation events.
 /// Each connected stack applies events independently; reentrant events are FIFO.
 pub struct StackNavigation<C> {
-    pub(crate) source: NavigationSource<C>,
+    pub(crate) source: NavigationSource<Vec<Rc<C>>>,
 }
 impl<C> Clone for StackNavigation<C> {
     fn clone(&self) -> Self {
@@ -50,7 +51,7 @@ impl<C: 'static> StackNavigation<C> {
         self.source.navigate_with(transformer, completion);
     }
     #[cfg(test)]
-    pub(crate) fn subscribe(&self, callback: impl Fn(Event<C>) + 'static) -> Subscription {
+    pub(crate) fn subscribe(&self, callback: impl Fn(Event<Vec<Rc<C>>>) + 'static) -> Subscription {
         self.source.subscribe(callback)
     }
     /// Appends a new top configuration.

@@ -6,16 +6,16 @@ use std::{
     rc::Rc,
 };
 
-type Transformer<C> = dyn Fn(Vec<Rc<C>>) -> Vec<Rc<C>>;
+type Transformer<S> = dyn Fn(S) -> S;
 
 /// Configuration snapshots before and after a successful navigation event.
 pub struct NavigationResult<C> {
     /// The previous configurations in bottom-to-top order.
-    pub old_stack: Vec<Rc<C>>,
+    pub old_stack: C,
     /// The committed configurations in bottom-to-top order.
-    pub new_stack: Vec<Rc<C>>,
+    pub new_stack: C,
 }
-impl<C> Clone for NavigationResult<C> {
+impl<C: Clone> Clone for NavigationResult<C> {
     fn clone(&self) -> Self {
         Self {
             old_stack: self.old_stack.clone(),
@@ -46,8 +46,8 @@ struct Source<C> {
 }
 /// Shared event broadcasting for child-navigation models.
 ///
-/// Each connected stack applies the transformer to its own current snapshot
-/// and reports its own result. Events with no connected stacks are discarded.
+/// Each connected receiver applies the transformer to its own current snapshot
+/// and reports its own result. Events with no connected receivers are discarded.
 /// Nested events are delivered in FIFO order after the current broadcast.
 pub(crate) struct NavigationSource<C> {
     source: Rc<Source<C>>,
@@ -75,14 +75,14 @@ impl<C: 'static> NavigationSource<C> {
             }),
         }
     }
-    /// Transforms each connected stack and receives its committed result.
+    /// Transforms each connected receiver and receives its committed result.
     ///
-    /// Completion runs once per connected stack, after that stack publishes
+    /// Completion runs once per connected stack, after that receiver publishes
     /// its updated children. A panic interrupts the current broadcast, drops
     /// queued events, and propagates; the source remains usable afterward.
     pub(crate) fn navigate_with(
         &self,
-        transformer: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static,
+        transformer: impl Fn(C) -> C + 'static,
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     ) {
         self.source.pending.borrow_mut().push_back(Event {

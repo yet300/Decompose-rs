@@ -1431,3 +1431,28 @@ fn retry_old_configuration_after_outgoing_destroy_panic_creates_live_slot_child(
 fn retry_old_configuration_after_incoming_resume_panic_creates_live_slot_child() {
     retry_old_configuration_after_lifecycle_panic(false);
 }
+
+#[test]
+fn dsl1_populated_bytes_remain_identical_to_frozen_pre_pages_fixture() {
+    let parent = root();
+    let options = SlotOptions {
+        codec: Some(SlotCodec::new(|c: &u8| Ok(vec![*c]), |bytes| Ok(bytes[0]))),
+        ..Default::default()
+    };
+    child_slot(
+        &parent,
+        &SlotNavigation::new(),
+        Some(7u8),
+        options,
+        |_, ctx| ctx,
+    )
+    .unwrap();
+    let fixture: &[u8] = &[
+        68, 83, 76, 49, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 7, 7, 0, 0, 0, 99, 104,
+        105, 108, 100, 47, 48, 8, 0, 0, 0, 68, 67, 83, 49, 0, 0, 0, 0,
+    ];
+    assert_eq!(
+        parent.state_keeper().borrow().save().unwrap()["DefaultChildSlot"],
+        fixture
+    );
+}

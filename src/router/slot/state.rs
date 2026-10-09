@@ -102,7 +102,7 @@ impl<'a> Reader<'a> {
 pub(super) fn decode<C>(
     codec: &SlotCodec<C>,
     bytes: &[u8],
-) -> Result<SavedState<C>, NavigationError> {
+) -> Result<SavedState<Vec<Rc<C>>>, NavigationError> {
     let mut reader = Reader { bytes, cursor: 0 };
     if reader.take(4)? != b"DSL1" {
         return Err(error("bad DSL1 magic"));

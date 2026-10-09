@@ -3,26 +3,30 @@ type ChildFactory<Ctx, C, T> = Rc<dyn Fn(&C, Ctx) -> T>;
 type SavedChildren = Vec<(String, BTreeMap<String, Vec<u8>>)>;
 use super::{Child, NavigationError};
 
-pub(crate) struct SavedState<C> {
-    pub(crate) configurations: Vec<Rc<C>>,
+pub(crate) struct SavedState<S> {
+    pub(crate) configurations: S,
     pub(crate) children: SavedChildren,
     pub(crate) next_key: u64,
 }
 pub(crate) trait Model<C, T>: 'static {
+    type State: Clone + 'static;
     type Snapshot: 'static;
     fn persistent(&self) -> bool;
-    fn validate(&self, configurations: &[Rc<C>]) -> Result<(), NavigationError>;
-    fn snapshot(&self, children: Vec<Child<C, T>>) -> Self::Snapshot;
-    fn back_enabled(&self, count: usize) -> bool;
-    fn back_transform(&self, configurations: Vec<Rc<C>>) -> Vec<Rc<C>>;
-    fn decode(&self, bytes: &[u8]) -> Result<Option<SavedState<C>>, NavigationError>;
+    fn configurations<'a>(&self, state: &'a Self::State) -> &'a [Rc<C>];
+    fn validate(&self, state: &Self::State) -> Result<(), NavigationError>;
+    fn statuses(&self, state: &Self::State) -> Vec<PageStatus>;
+    fn snapshot(&self, children: Vec<PageChild<C, T>>, state: &Self::State) -> Self::Snapshot;
+    fn back_enabled(&self, state: &Self::State) -> bool;
+    fn back_transform(&self, state: Self::State) -> Self::State;
+    fn decode(&self, bytes: &[u8]) -> Result<Option<SavedState<Self::State>>, NavigationError>;
     fn encode(
         &self,
-        configurations: &[Rc<C>],
+        state: &Self::State,
         children: &SavedChildren,
         next_key: u64,
     ) -> Result<Option<Vec<u8>>, NavigationError>;
 }
+use super::pages::{PageChild, PageStatus};
 use crate::retention::RetainedScope;
 use crate::value::{MutableValue, Subscription, Value};
 use crate::{
@@ -40,6 +44,23 @@ use std::{
 struct RetainedNavigation {
     scopes: RefCell<BTreeMap<String, Rc<RetainedScope>>>,
 }
+impl RetainedNavigation {
+    fn remove(&self, key: &str) {
+        let removed = self.scopes.borrow_mut().remove(key);
+        drop(removed);
+    }
+    fn retain(&self, mut keep: impl FnMut(&str) -> bool) {
+        let removed = {
+            let mut scopes = self.scopes.borrow_mut();
+            let keys: Vec<_> = scopes.keys().filter(|key| !keep(key)).cloned().collect();
+            keys.into_iter()
+                .filter_map(|key| scopes.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        // InstanceKeeper destruction may invoke user callbacks; release the map first.
+        drop(removed);
+    }
+}
 
 struct ScopeParts {
     gate: Rc<Cell<bool>>,
@@ -51,28 +72,49 @@ struct ScopeParts {
     parent_back: SharedBack,
     handle: u64,
     listener: u64,
+    lifecycle_listener: u64,
 }
 impl ScopeParts {
     fn end(&self, end_retention: bool) {
+        self.gate.set(false);
         self.parent_back.unregister(self.handle);
         self.back.remove_enabled_changed_listener(self.listener);
+        let _ = self.merged.lifecycle().unsubscribe(self.lifecycle_listener);
+        // Cleanup still runs when a lifecycle observer panics during destroy.
+        struct Cleanup<'a> {
+            parts: &'a ScopeParts,
+            retention: bool,
+        }
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.parts.merged.shutdown();
+                if self.retention {
+                    self.parts.instances.borrow_mut().destroy_all();
+                }
+            }
+        }
+        let _cleanup = Cleanup {
+            parts: self,
+            retention: end_retention,
+        };
         if !self.local.state().is_destroyed() {
             let _ = self.local.destroy();
         }
-        self.merged.shutdown();
-        if end_retention {
-            self.instances.borrow_mut().destroy_all();
-        }
     }
-    fn activate(&self, active: bool) {
-        // Back-stack entries are stopped before any new active child resumes.
+    fn activate(&self, status: PageStatus) {
+        let active = matches!(status, PageStatus::Started | PageStatus::Resumed);
         self.gate.set(active);
+        let effective = matches!(
+            self.merged.state(),
+            LifecycleState::Started | LifecycleState::Resumed
+        );
         self.parent_back
-            .set_enabled(self.handle, active && self.back.can_handle());
-        let target = if active {
-            LifecycleState::Resumed
-        } else {
-            LifecycleState::Created
+            .set_enabled(self.handle, active && effective && self.back.can_handle());
+        let target = match status {
+            PageStatus::Created => LifecycleState::Created,
+            PageStatus::Started => LifecycleState::Started,
+            PageStatus::Resumed => LifecycleState::Resumed,
+            PageStatus::Destroyed => LifecycleState::Destroyed,
         };
         let _ = self.local.move_to(target);
     }
@@ -85,6 +127,51 @@ impl Drop for ScopeParts {
 struct Scope<C, T> {
     child: Child<C, T>,
     parts: ScopeParts,
+}
+
+struct Managed<C, T> {
+    configuration: Rc<C>,
+    key: String,
+    scope: Option<Rc<Scope<C, T>>>,
+    saved: BTreeMap<String, Vec<u8>>,
+}
+impl<C, T> Clone for Managed<C, T> {
+    fn clone(&self) -> Self {
+        Self {
+            configuration: self.configuration.clone(),
+            key: self.key.clone(),
+            scope: self.scope.clone(),
+            saved: self.saved.clone(),
+        }
+    }
+}
+impl<C, T> Managed<C, T> {
+    fn child(&self) -> PageChild<C, T> {
+        self.scope.as_ref().map_or_else(
+            || PageChild::Destroyed {
+                configuration: self.configuration.clone(),
+                key: self.key.clone(),
+            },
+            |s| PageChild::Created(s.child.clone()),
+        )
+    }
+    fn reusable(&self) -> bool {
+        self.scope.as_ref().is_none_or(|s| {
+            !s.parts.local.state().is_destroyed() && !s.parts.instances.borrow().is_destroyed()
+        })
+    }
+    fn save(&self) -> Result<BTreeMap<String, Vec<u8>>, NavigationError> {
+        match &self.scope {
+            Some(scope) => scope
+                .parts
+                .state
+                .try_borrow()
+                .map_err(|_| NavigationError::State("child state keeper is borrowed".into()))?
+                .save()
+                .map_err(|error| NavigationError::State(error.to_string())),
+            None => Ok(self.saved.clone()),
+        }
+    }
 }
 
 struct Prepared<C, T> {
@@ -100,8 +187,7 @@ impl<C, T> Drop for Prepared<C, T> {
         for (scope, fresh_retention) in self.scopes.iter().rev() {
             scope.parts.end(*fresh_retention);
             if *fresh_retention {
-                let removed = self.retained.scopes.borrow_mut().remove(&scope.child.key);
-                drop(removed);
+                self.retained.remove(&scope.child.key);
             }
         }
     }
@@ -157,9 +243,10 @@ struct Engine<Ctx, C, T, M: Model<C, T>> {
     key: String,
     model: M,
     next_key: Cell<u64>,
-    items: RefCell<Vec<Rc<Scope<C, T>>>>,
+    items: RefCell<Vec<Managed<C, T>>>,
+    navigation_state: RefCell<M::State>,
     state: RefCell<Option<MutableValue<M::Snapshot>>>,
-    queue: RefCell<VecDeque<Event<C>>>,
+    queue: RefCell<VecDeque<Event<M::State>>>,
     processing: Cell<bool>,
     initializing: Cell<bool>,
     destroyed: Cell<bool>,
@@ -178,13 +265,6 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         } else {
             Ok(())
         }
-    }
-    fn configs(&self) -> Vec<Rc<C>> {
-        self.items
-            .borrow()
-            .iter()
-            .map(|item| item.child.configuration.clone())
-            .collect()
     }
     fn create(
         &self,
@@ -237,12 +317,32 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         let id = handle.id();
         let parent = self.back.downgrade();
         let gate = Rc::new(Cell::new(false));
+        let effective = Rc::new(Cell::new(false));
         let listener_gate = gate.clone();
+        let listener_effective = effective.clone();
         let listener = back.add_enabled_changed_listener(move |enabled| {
             if let Some(parent) = parent.upgrade() {
-                parent.set_enabled(id, listener_gate.get() && enabled);
+                parent.set_enabled(
+                    id,
+                    listener_gate.get() && listener_effective.get() && enabled,
+                );
             }
         });
+        let lifecycle_gate = gate.clone();
+        let lifecycle_back = back.downgrade();
+        let lifecycle_parent = self.back.downgrade();
+        let lifecycle_listener = merged
+            .lifecycle()
+            .subscribe(move |state| {
+                let active = matches!(state, LifecycleState::Started | LifecycleState::Resumed);
+                effective.set(active);
+                if let (Some(back), Some(parent)) =
+                    (lifecycle_back.upgrade(), lifecycle_parent.upgrade())
+                {
+                    parent.set_enabled(id, lifecycle_gate.get() && active && back.can_handle());
+                }
+            })
+            .detach();
         let parts = ScopeParts {
             gate,
             local,
@@ -253,6 +353,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             parent_back: self.back.clone(),
             handle: id,
             listener,
+            lifecycle_listener,
         };
         let context = (self.context_factory)(ContextParts::new(
             parts.merged.lifecycle(),
@@ -275,106 +376,155 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             },
             parts,
         });
-        self.retained.scopes.borrow_mut().insert(key, owner);
+        let replaced = self.retained.scopes.borrow_mut().insert(key, owner);
+        drop(replaced);
         Ok(scope)
     }
     fn switch(
         &self,
-        configs: Vec<Rc<C>>,
+        state: M::State,
         restored: Option<SavedChildren>,
     ) -> Result<(), NavigationError> {
-        self.model.validate(&configs)?;
-        if self.destroyed.get() {
-            return Err(NavigationError::Destroyed);
-        }
+        self.model.validate(&state)?;
+        self.ensure_alive()?;
+        // Policy callbacks precede preparation, so a policy panic owns no fresh scopes.
+        let statuses = self.model.statuses(&state);
+        self.ensure_alive()?;
+        let configs = self.model.configurations(&state);
         let old = self.items.borrow().clone();
         let mut matched = vec![false; old.len()];
         let mut next = Vec::with_capacity(configs.len());
+        let mut counter = self.next_key.get();
+        for (index, config) in configs.iter().enumerate() {
+            let existing = old
+                .iter()
+                .enumerate()
+                .find(|(i, item)| !matched[*i] && item.reusable() && item.configuration == *config);
+            let mut item = if let Some((i, item)) = existing {
+                matched[i] = true;
+                item.clone()
+            } else {
+                let (key, saved) = if let Some(restored) = &restored {
+                    restored[index].clone()
+                } else {
+                    let key = format!("child/{counter}");
+                    counter = counter.checked_add(1).ok_or_else(|| {
+                        NavigationError::State("child key counter exhausted".into())
+                    })?;
+                    (key, BTreeMap::new())
+                };
+                Managed {
+                    configuration: config.clone(),
+                    key,
+                    scope: None,
+                    saved,
+                }
+            };
+            if statuses[index] == PageStatus::Destroyed {
+                // Save every outgoing live page before any destructive lifecycle delivery.
+                item.saved = item.save()?;
+                item.scope = None;
+            }
+            next.push(item);
+        }
+        self.ensure_alive()?;
         let mut prepared = Prepared {
             scopes: Vec::new(),
             retained: self.retained.clone(),
             committed: false,
         };
-        // Prepared children are owned locally until membership is committed.
-        // Their scope guards clean up on a factory panic or a later error.
-        for (index, config) in configs.into_iter().enumerate() {
-            let existing = old.iter().enumerate().find(|(i, item)| {
-                // A callback panic can end the old scope before membership commits.
-                // Its configuration still appears in the snapshot, but retry must
-                // create a fresh child rather than reactivate an ended scope.
-                !matched[*i]
-                    && !item.parts.local.state().is_destroyed()
-                    && !item.parts.instances.borrow().is_destroyed()
-                    && item.child.configuration == config
-            });
-            if let Some((i, item)) = existing {
-                matched[i] = true;
-                next.push(item.clone());
-            } else {
-                let (key, saved) = if let Some(restored) = restored.as_ref() {
-                    restored[index].clone()
-                } else {
-                    let counter = self.next_key.get();
-                    let next_counter = counter.checked_add(1).ok_or_else(|| {
-                        NavigationError::State("child key counter exhausted".into())
-                    })?;
-                    self.next_key.set(next_counter);
-                    (format!("child/{counter}"), BTreeMap::new())
-                };
+        for (index, item) in next.iter_mut().enumerate() {
+            if statuses[index] != PageStatus::Destroyed && item.scope.is_none() {
                 let fresh_retention = self
                     .retained
                     .scopes
                     .borrow()
-                    .get(&key)
-                    .is_none_or(|scope| scope.instances.borrow().is_destroyed());
-                let scope = self.create(config, key, saved)?;
+                    .get(&item.key)
+                    .is_none_or(|s| s.instances.borrow().is_destroyed());
+                let scope = self.create(
+                    item.configuration.clone(),
+                    item.key.clone(),
+                    item.saved.clone(),
+                )?;
                 prepared.scopes.push((scope.clone(), fresh_retention));
-                next.push(scope);
+                item.scope = Some(scope);
             }
         }
-        // First stop every child that will be inactive, including old top.
+        // Stop outgoing or demoted scopes before any incoming scope advances.
         for item in &old {
-            if !next.last().is_some_and(|top| Rc::ptr_eq(top, item)) {
-                item.parts.activate(false);
-            }
-            self.ensure_alive()?;
-        }
-        for (index, item) in old.iter().enumerate().rev() {
-            if !matched[index] {
-                item.parts.end(true);
+            if let Some(scope) = &item.scope {
+                let target = next
+                    .iter()
+                    .enumerate()
+                    .find(|(_, item)| {
+                        item.scope
+                            .as_ref()
+                            .is_some_and(|other| Rc::ptr_eq(other, scope))
+                    })
+                    .map(|(i, _)| statuses[i])
+                    .unwrap_or(PageStatus::Created);
+                let rank = |s| match s {
+                    PageStatus::Created => 1,
+                    PageStatus::Started => 2,
+                    PageStatus::Resumed => 3,
+                    PageStatus::Destroyed => 0,
+                };
+                let current = match scope.parts.local.state() {
+                    LifecycleState::Started => 2,
+                    LifecycleState::Resumed => 3,
+                    _ => 1,
+                };
+                if rank(target) < current {
+                    scope.parts.activate(target);
+                }
                 self.ensure_alive()?;
-                self.retained.scopes.borrow_mut().remove(&item.child.key);
             }
         }
-        for item in next.iter().take(next.len().saturating_sub(1)) {
-            item.parts.activate(false);
-            self.ensure_alive()?;
+        for item in old.iter().rev() {
+            if let Some(scope) = &item.scope
+                && !next.iter().any(|item| {
+                    item.scope
+                        .as_ref()
+                        .is_some_and(|other| Rc::ptr_eq(other, scope))
+                })
+            {
+                scope.parts.end(true);
+                self.ensure_alive()?;
+                self.retained.remove(&item.key);
+            }
         }
-        // Commit only after activation succeeds. Reentrant callbacks append
-        // events and cannot observe partly prepared membership.
-        if let Some(active) = next.last() {
-            active.parts.activate(true);
+        // Retention only belongs to desired live entries, including restoration tombstones.
+        self.retained.retain(|key| {
+            next.iter()
+                .any(|item| item.key == key && item.scope.is_some())
+        });
+        for (index, item) in next.iter().enumerate() {
+            if let Some(scope) = &item.scope {
+                scope.parts.activate(statuses[index]);
+                self.ensure_alive()?;
+            }
         }
-        self.ensure_alive()?;
         if let Some(handle) = self.pop_handle.get() {
             self.back
-                .set_enabled(handle, self.model.back_enabled(next.len()));
+                .set_enabled(handle, self.model.back_enabled(&state));
         }
         self.ensure_alive()?;
+        self.next_key.set(counter);
         *self.items.borrow_mut() = next.clone();
+        *self.navigation_state.borrow_mut() = state.clone();
         prepared.committed = true;
         let snapshot = self
             .model
-            .snapshot(next.iter().map(|item| item.child.clone()).collect());
-        let state = self.state.borrow().clone();
-        if let Some(state) = state {
-            state.set(snapshot);
+            .snapshot(next.iter().map(Managed::child).collect(), &state);
+        let value = self.state.borrow().clone();
+        if let Some(value) = value {
+            value.set(snapshot);
         } else {
             *self.state.borrow_mut() = Some(MutableValue::new(snapshot));
         }
         Ok(())
     }
-    fn enqueue(self: &Rc<Self>, event: Event<C>) {
+    fn enqueue(self: &Rc<Self>, event: Event<M::State>) {
         if self.destroyed.get() {
             return;
         }
@@ -426,7 +576,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             return;
         }
         self.processing.set(true);
-        struct Reset<'a, C>(&'a Cell<bool>, &'a RefCell<VecDeque<Event<C>>>);
+        struct Reset<'a, S>(&'a Cell<bool>, &'a RefCell<VecDeque<Event<S>>>);
         impl<C> Drop for Reset<'_, C> {
             fn drop(&mut self) {
                 self.0.set(false);
@@ -440,11 +590,11 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         loop {
             let event = self.queue.borrow_mut().pop_front();
             let Some(event) = event else { break };
-            let old_stack = self.configs();
+            let old_stack = self.navigation_state.borrow().clone();
             let configs = (event.transformer)(old_stack.clone());
             let result = self.switch(configs, None).map(|()| NavigationResult {
                 old_stack,
-                new_stack: self.configs(),
+                new_stack: self.navigation_state.borrow().clone(),
             });
             (event.completion)(result);
             if self.destroyed.get() {
@@ -457,24 +607,13 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             return Ok(None);
         }
         let items = self.items.borrow().clone();
-        let configs: Vec<_> = items
-            .iter()
-            .map(|item| item.child.configuration.clone())
-            .collect();
+        let state = self.navigation_state.borrow().clone();
         let next_key = self.next_key.get();
         let mut children = Vec::with_capacity(items.len());
         for item in &items {
-            let state = item
-                .parts
-                .state
-                .try_borrow()
-                .map_err(|_| NavigationError::State("child state keeper is borrowed".into()))?;
-            let saved = state
-                .save()
-                .map_err(|error| NavigationError::State(error.to_string()))?;
-            children.push((item.child.key.clone(), saved));
+            children.push((item.key.clone(), item.save()?));
         }
-        self.model.encode(&configs, &children, next_key)
+        self.model.encode(&state, &children, next_key)
     }
     fn teardown(&self) {
         if self.destroyed.replace(true) {
@@ -487,7 +626,9 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             self.back.unregister(handle);
         }
         for item in self.items.borrow().iter().rev() {
-            item.parts.end(false);
+            if let Some(scope) = &item.scope {
+                scope.parts.end(false);
+            }
         }
         if let Some(state) = self.parent_state.upgrade() {
             state.borrow_mut().unregister(&self.key);
@@ -500,8 +641,8 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
 
 pub(crate) fn build<Ctx, C, T, M>(
     context: &Ctx,
-    navigation: &NavigationSource<C>,
-    initial: Vec<C>,
+    navigation: &NavigationSource<M::State>,
+    initial: M::State,
     key: String,
     model: M,
     factory: impl Fn(&C, Ctx) -> T + 'static,
@@ -546,7 +687,7 @@ where
     let initial = restored
         .as_ref()
         .map(|state| state.configurations.clone())
-        .unwrap_or_else(|| initial.into_iter().map(Rc::new).collect());
+        .unwrap_or(initial);
     let restore_children = restored.as_ref().map(|saved| saved.children.clone());
     let next_key = restored.as_ref().map(|saved| saved.next_key).unwrap_or(0);
     model.validate(&initial)?;
@@ -572,14 +713,14 @@ where
     construction.previous_scopes = retained.scopes.borrow().clone();
     construction.retained = Some(retained.clone());
     if let Some(restored) = &restored {
-        retained.scopes.borrow_mut().retain(|key, _| {
+        retained.retain(|key| {
             restored
                 .children
                 .iter()
                 .any(|(saved_key, _)| saved_key == key)
         });
     } else {
-        retained.scopes.borrow_mut().clear();
+        retained.retain(|_| false);
     }
     let engine = Rc::new(Engine {
         parent: context.lifecycle(),
@@ -592,6 +733,7 @@ where
         model,
         next_key: Cell::new(next_key),
         items: RefCell::new(Vec::new()),
+        navigation_state: RefCell::new(initial.clone()),
         state: RefCell::new(None),
         queue: RefCell::new(VecDeque::new()),
         processing: Cell::new(false),
@@ -616,7 +758,7 @@ where
         .back
         .register(
             0,
-            engine.model.back_enabled(engine.items.borrow().len()),
+            engine.model.back_enabled(&engine.navigation_state.borrow()),
             move |event, _| {
                 if event.phase == crate::BackPhase::Invoked
                     && let Some(engine) = weak.upgrade()

@@ -1,6 +1,7 @@
 //! Runtime-independent component navigation.
 mod engine;
 mod navigation;
+pub mod pages;
 pub mod slot;
 pub mod stack;
 use crate::DecomposeError;
@@ -30,6 +31,12 @@ pub enum NavigationError {
     /// Every stack must have an active child.
     #[error("configuration stack must not be empty")]
     EmptyStack,
+    /// A nonempty pages state requires an in-range selected index.
+    #[error("invalid pages selection {selected_index:?} for {item_count} items")]
+    InvalidSelection {
+        selected_index: Option<usize>,
+        item_count: usize,
+    },
     /// Equal configurations require the per-stack opt-in.
     #[error("duplicate configurations are disabled")]
     DuplicateConfiguration,

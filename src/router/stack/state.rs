@@ -111,7 +111,7 @@ impl<'a> Reader<'a> {
 pub(crate) fn decode<C>(
     codec: &StackCodec<C>,
     bytes: &[u8],
-) -> Result<SavedStack<C>, NavigationError> {
+) -> Result<SavedStack<Vec<Rc<C>>>, NavigationError> {
     let mut reader = Reader { bytes, cursor: 0 };
     if reader.take(4)? != MAGIC {
         return Err(state_error("bad DST1 magic"));

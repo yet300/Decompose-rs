@@ -138,4 +138,6 @@ x86_64-unknown-linux-musl
 
 Delivery complete within the approved scope. One crate and unchanged Essenty
 primitive dependencies; no UI/runtime integration or public generic engine.
-Changes remain local on codex/child-slot; no automatic commit, merge or publication.
+Committed on the user's request as e293ab9 (`feat: implement ChildSlot with shared
+navigation engine`). The next-stage branch codex/child-pages starts at that commit.
+No merge or publication was requested in that continuation.
