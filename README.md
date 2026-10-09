@@ -3,11 +3,12 @@
 Independent Rust port of [Ark Ivanov’s Decompose](https://github.com/arkivanov/Decompose),
 implemented on top of [Essenty-rs](https://github.com/yet300/Essenty).
 
-**Current scope: ComponentContext, ChildStack, ChildSlot and ChildPages.** The port includes observable
+**Current scope: ComponentContext, ChildStack, ChildSlot, ChildPages and ChildPanels.** The port includes observable
 values, navigation operations, child lifecycle management, Back routing and
 configuration/state restoration. ChildSlot represents zero-or-one children and
 supports activation, replacement and dismissal. ChildPages keeps page identities and
 saved state while creating or destroying instances according to a lifecycle policy.
+ChildPanels manages typed Main/Details/Extra components in Single, Dual or Triple mode.
 Other navigation families and platform/UI
 integrations are outside this delivery. Behavior is checked against pinned
 Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`, not an unspecified
@@ -50,6 +51,8 @@ Run `cargo run --example child_slot` for combined Stack/Slot navigation, Back
 dismissal and restoration of a saved empty slot.
 Run `cargo run --example child_pages` for lazy pages, destruction/recreation under
 the same key, child-state recovery and restored selection.
+Run `cargo run --example child_panels` for distinct role types, mode transitions,
+Single-only automatic Back and restored mode/child state.
 
 ## Rust API and behavior
 
@@ -185,6 +188,56 @@ router is transient; it does not invoke child providers for a parent save.
 Codec/framing failures return errors and constructor rollback keeps input
 available for retry. DST1 and DSL1 remain compatible with earlier router saves.
 
+## ChildPanels
+
+`router::panels` exposes `Panels<MC, DC, EC>`,
+`ChildPanels<MC, MT, DC, DT, EC, ET>`, `ChildPanelsMode`, `PanelsNavigation`,
+`PanelsOptions`, `PanelsCodec` and `child_panels`. Each role has its own
+configuration and component type, with no Clone requirement. Main is required;
+Details and Extra are independently optional. `Panels::new(main)` defaults to
+Single mode with no optional panels. Public fields allow whole-state transforms.
+
+| Mode | Main | Details | Extra |
+|---|---|---|---|
+| Single | Resumed only with no optional panels; otherwise Created | Resumed without Extra; otherwise Created | Resumed |
+| Dual | Resumed | Resumed without Extra; otherwise Created | Resumed |
+| Triple | Resumed | Resumed | Resumed |
+
+The table applies to present roles; the parent lifecycle bounds each target.
+Every present panel stays live. Mode changes preserve component, retained keeper
+and stable key. Equality preserves identity within a role; equal underlying
+values in different roles remain separate children. Factories run Main, Details,
+Extra order and destruction runs in reverse. Replacing Main leaves optional
+panels unchanged. Dismissing Details leaves Extra unchanged.
+
+Navigation provides `navigate`/`navigate_with`, `set_panels`,
+`set_details_extra`, `set_extra`, `activate_main`, `activate_details`,
+`activate_extra`, `dismiss_details`, `dismiss_extra`, `pop` and `set_mode`.
+Helpers have `_with` forms reporting typed old/new state per connected receiver.
+`pop` removes Extra first, then Details, and preserves Main. Explicit pop works
+in every mode; automatic Back requires Single and `handle_back_button: true`.
+Enabled child handlers have precedence; Created children cannot intercept Back.
+
+`PanelsOptions::on_state_changed` receives the new state and optional old state.
+The initial notification has old=None and runs after provider/Back registration,
+while initialization still holds queued work. Later notifications run after
+observable publication and Back enablement, before event completion. No-op
+events and automatic Back also notify. Reentrant calls remain queued. Callback
+panics propagate; committed state and successful callback effects persist.
+
+`child_panels_without_extra` accepts just Main/Details factories and uses
+`std::convert::Infallible` for both Extra configuration and component types.
+This expresses an unsupported role without a fictitious extra component.
+`PanelsCodec::without_extra` adapts a two-role codec to the same representation.
+
+`PanelsCodec::new` accepts typed encode/decode callbacks for Main and optional
+Details/Extra configurations. DPN1 adds mode, role presence, stable keys,
+allocation counter and nested child states. Decoded membership must match the
+envelope's roles. Structural corruption is rejected before configuration codecs
+and factories; failed construction keeps original input available for retry.
+Without a codec Panels is transient and parent saves skip its child providers.
+Existing DST1, DSL1 and DPG1 frames remain compatible.
+
 ## State and retained instances
 
 `StackOptions::codec` defaults to None for transient navigation. Supply a
@@ -221,9 +274,9 @@ separate context, value and stack crates in this scope.
 | `merged`, `shared_back` | Parent-bounded lifecycle and reentrant Back dispatch |
 | `state`, `framing` | Essenty state adapter and child-state encoding |
 | public `value` | Observable immutable snapshots and subscription guards |
-| public `router::stack`, `router::slot`, `router::pages` | Model APIs, operations, snapshots and codecs |
+| public `router::stack`, `router::slot`, `router::pages`, `router::panels` | Model APIs, operations, snapshots and codecs |
 | private router machinery | Shared scope ownership, transactions and queued events |
-| private model state modules | DST1 stack / DSL1 slot / DPG1 pages envelopes |
+| private model state modules | DST1 stack / DSL1 slot / DPG1 pages / DPN1 panels envelopes |
 
 Dependencies remain the four published `essenty-* 0.1.0` primitives and
 `thiserror`. No Essenty source changes, path/git overrides or additional runtime
@@ -240,6 +293,9 @@ the common types are also available under `router` and `router::slot`.
 [ADR-0007](docs/adr/0007-child-pages-and-destroyed-page-state.md) and the
 [ChildPages design](docs/superpowers/specs/2026-10-09-child-pages-design.md)
 describe stateful navigation policies and page destruction/recreation.
+[ADR-0008](docs/adr/0008-typed-child-panels.md) and the
+[ChildPanels design](docs/superpowers/specs/2026-10-09-child-panels-design.md)
+describe heterogeneous role types and lifecycle modes.
 
 ## Verification (Rust 1.96.0)
 
@@ -252,12 +308,13 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo run --example child_stack
 cargo run --example child_slot
 cargo run --example child_pages
+cargo run --example child_panels
 ```
 
-Verified on 2026-10-09: **220 unit/integration tests and 1 doctest passed**.
-Format, strict Clippy, strict rustdoc and all three runnable examples passed. Library
+Verified on 2026-10-09: **262 unit/integration tests and 1 doctest passed**.
+Format, strict Clippy, strict rustdoc and all four runnable examples passed. Library
 compilation passed all 24 installed targets, including WASM, Apple, Android,
-Linux and Windows. The [ChildPages implementation plan](docs/superpowers/plans/2026-10-09-child-pages.md)
+Linux and Windows. The [ChildPanels implementation plan](docs/superpowers/plans/2026-10-09-child-panels.md)
 records counts, commands, target matrix and review findings.
 
 Regression tests cover restored-state loss, retry after construction failure,
@@ -265,6 +322,9 @@ retained recreation, non-Clone custom nesting, identity/lifecycle ordering,
 Back priority, repeated callback entry, persistence errors and teardown.
 Pages tests also cover lazy creation, state-preserving tombstones, fresh-instance
 recreation under a stable key, custom lifecycle policies and restored selection.
+Panels tests cover all twelve mode/presence combinations, 36 mode transitions,
+typed role identity, hook ordering/reentry, panic recovery, Back modes and strict
+DPN1 restoration. Old DST1, DSL1 and DPG1 fixture bytes remain compatible.
 Compile-target results are recorded in the implementation plan; compilation
 alone does not establish platform runtime behavior.
 

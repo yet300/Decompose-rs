@@ -62,6 +62,7 @@ old membership and Back survive and retries work. Failed tombstone resurrection
 also preserved key/selection/state while ending provisional lifecycle and keeper.
 No concrete correctness findings remained; no fixes followed the final gates.
 
-git diff --check passed. ChildPages remains as completed local changes on
-codex/child-pages; the user's commit request applied to the preceding completed
-ChildSlot stage (e293ab9). No automatic merge, push or publication.
+git diff --check passed. On the user's continuation to ChildPanels, the finished
+ChildPages stage was committed as a1f675b (`feat: implement ChildPages with lazy
+stateful recreation`). codex/child-panels starts at that commit. No merge, push
+or publication.

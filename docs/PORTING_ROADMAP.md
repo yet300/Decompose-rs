@@ -1,14 +1,15 @@
 # Porting Roadmap
 
 > Current delivery (2026-10-09): ComponentContext corrections, observable values
-> and ChildStack/ChildSlot/ChildPages, including Back and explicit-codec persistence, form
+> and ChildStack/ChildSlot/ChildPages/ChildPanels, including Back and explicit-codec persistence, form
 > the current implementation scope.
 > The original phased research below is historical; the user approved the focused
 > stack delivery instead of all nine phases. ADR-0005 supersedes conflicting
 > retention/state assumptions; ADR-0006 records the shared private navigation
 > engine and ChildSlot. ADR-0007 records live/destroyed page state and selected-index
-> navigation. Other navigation families and integrations remain
-> outside scope.
+> navigation. ChildPanels adds typed role factories and lifecycle modes,
+> documented in ADR-0008. Other navigation
+> families and platform integrations remain outside scope.
 
 ## Research identity
 
@@ -153,6 +154,7 @@ COMPONENT CONTEXT: IMPLEMENTED WITH STATE/RETENTION CORRECTIONS (ADR-0005)
 CHILD STACK: IMPLEMENTED (operations, Back, reentrancy, codecs)
 CHILD SLOT: IMPLEMENTED (optional membership, Back, reentrancy, empty/populated persistence)
 CHILD PAGES: IMPLEMENTED (selected-index state, live/destroyed instances, lazy recreation, Back, DPG1 persistence)
+CHILD PANELS: IMPLEMENTED (typed roles, lifecycle modes, independent dismissal, Back and DPN1 persistence)
 OTHER NAVIGATION MODELS / PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
 ESSENTY-RS CHANGES: NONE REQUIRED
 ```

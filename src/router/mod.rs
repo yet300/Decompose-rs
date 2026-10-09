@@ -2,6 +2,7 @@
 mod engine;
 mod navigation;
 pub mod pages;
+pub mod panels;
 pub mod slot;
 pub mod stack;
 use crate::DecomposeError;

@@ -9,6 +9,38 @@ fn root() -> DefaultComponentContext {
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
     DefaultComponentContext::new(lifecycle)
 }
+
+#[test]
+fn dpg1_bytes_match_pre_panels_a1f675b_fixture() {
+    // Literal layout from the a1f675b encoder: one selected u32 configuration,
+    // next-key 1, child/0, and an empty DCS1 child-state frame.
+    const FIXTURE: &[u8] = &[
+        68, 80, 71, 49, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 7, 0, 0, 0, 1,
+        0, 0, 0, 7, 0, 0, 0, 99, 104, 105, 108, 100, 47, 48, 8, 0, 0, 0, 68, 67, 83, 49, 0, 0, 0,
+        0,
+    ];
+    assert_eq!(FIXTURE.len(), 55);
+    let parent = restored_root(
+        std::collections::BTreeMap::from([("DefaultChildPages".into(), FIXTURE.to_vec())]),
+        None,
+    );
+    let value = child_pages(
+        &parent,
+        &PagesNavigation::new(),
+        Pages::default(),
+        persistent(),
+        |_, ctx| ctx,
+    )
+    .unwrap();
+    let pages = value.get();
+    assert_eq!(pages.selected_index, Some(0));
+    assert_eq!(**pages.items[0].configuration(), 7);
+    assert_eq!(pages.items[0].key(), "child/0");
+    assert_eq!(
+        parent.state_keeper().borrow().save().unwrap()["DefaultChildPages"],
+        FIXTURE
+    );
+}
 #[test]
 fn pages_selection_lazy_children_and_numeric_set_items() {
     let parent = root();

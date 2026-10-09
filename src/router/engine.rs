@@ -12,7 +12,8 @@ pub(crate) trait Model<C, T>: 'static {
     type State: Clone + 'static;
     type Snapshot: 'static;
     fn persistent(&self) -> bool;
-    fn configurations<'a>(&self, state: &'a Self::State) -> &'a [Rc<C>];
+    fn configurations(&self, state: &Self::State) -> Vec<Rc<C>>;
+    fn on_state_changed(&self, _state: &Self::State, _old: Option<&Self::State>) {}
     fn validate(&self, state: &Self::State) -> Result<(), NavigationError>;
     fn statuses(&self, state: &Self::State) -> Vec<PageStatus>;
     fn snapshot(&self, children: Vec<PageChild<C, T>>, state: &Self::State) -> Self::Snapshot;
@@ -391,6 +392,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         let statuses = self.model.statuses(&state);
         self.ensure_alive()?;
         let configs = self.model.configurations(&state);
+        let old_state = self.navigation_state.borrow().clone();
         let old = self.items.borrow().clone();
         let mut matched = vec![false; old.len()];
         let mut next = Vec::with_capacity(configs.len());
@@ -521,6 +523,9 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             value.set(snapshot);
         } else {
             *self.state.borrow_mut() = Some(MutableValue::new(snapshot));
+        }
+        if !self.initializing.get() {
+            self.model.on_state_changed(&state, Some(&old_state));
         }
         Ok(())
     }
@@ -800,6 +805,8 @@ where
             })
             .detach(),
     ));
+    let initial_state = engine.navigation_state.borrow().clone();
+    engine.model.on_state_changed(&initial_state, None);
     engine.initializing.set(false);
     engine.ensure_alive()?;
     engine.pump();

@@ -124,8 +124,8 @@ impl<C: 'static> SlotNavigation<C> {
 struct SlotModel<C>(SlotOptions<C>);
 impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
     type State = Vec<Rc<C>>;
-    fn configurations<'a>(&self, state: &'a Self::State) -> &'a [Rc<C>] {
-        state
+    fn configurations(&self, state: &Self::State) -> Vec<Rc<C>> {
+        state.clone()
     }
     fn statuses(&self, state: &Self::State) -> Vec<super::pages::PageStatus> {
         vec![super::pages::PageStatus::Resumed; state.len()]

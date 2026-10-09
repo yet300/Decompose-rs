@@ -169,8 +169,8 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for PagesModel<C> {
     fn persistent(&self) -> bool {
         self.0.codec.is_some()
     }
-    fn configurations<'a>(&self, state: &'a Pages<C>) -> &'a [Rc<C>] {
-        &state.items
+    fn configurations(&self, state: &Pages<C>) -> Vec<Rc<C>> {
+        state.items.clone()
     }
     fn validate(&self, state: &Pages<C>) -> Result<(), NavigationError> {
         state.validate()?;
