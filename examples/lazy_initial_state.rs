@@ -1,10 +1,12 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::stack::{
     StackCodec, StackNavigation, StackOptions, child_stack_with_initial,
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
+    StateStore,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 // Neither the route nor the component implements Clone.
 #[derive(Debug, PartialEq, Eq)]
@@ -50,14 +52,13 @@ fn options() -> StackOptions<Route> {
 
 fn component(_: &Route, context: DefaultComponentContext) -> Component {
     let visits = context
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .consume_bytes("visits")
+        .unwrap()
         .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
         .unwrap_or(1);
     context
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("visits", move || (visits + 1).to_le_bytes().to_vec())
         .unwrap();
     Component { context, visits }
@@ -82,9 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     assert_eq!(initial_calls, 1);
     assert_eq!(stack.get().active.configuration.id, 7);
-    navigation.push(Route { id: 9 });
+    navigation.push_or_panic(Route { id: 9 });
     let before = stack.get();
-    let saved = root.state_keeper().borrow().save()?;
+    let saved = root.state_store().save()?;
     root.lifecycle().destroy()?;
     assert_eq!(before.active.instance.visits, 1);
     assert!(
@@ -97,9 +98,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .is_destroyed()
     );
 
-    let restored_root = DefaultComponentContext::with_state_keeper(
+    let restored_root = DefaultComponentContext::with_state_store(
         resumed(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let restored = child_stack_with_initial(
         &restored_root,

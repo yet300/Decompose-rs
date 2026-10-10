@@ -1,13 +1,12 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::panels::{
     ChildPanelsMode, Panels, PanelsCodec, PanelsNavigation, PanelsOptions, child_panels,
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
+    StateStore,
 };
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::Cell, rc::Rc};
 
 // Every role has its own configuration and component type; none needs Clone.
 #[derive(PartialEq, Eq)]
@@ -59,16 +58,15 @@ fn codec() -> PanelsCodec<MainConfig, DetailsConfig, ExtraConfig> {
 }
 fn details_factory(_: &DetailsConfig, context: DefaultComponentContext) -> DetailsComponent {
     let restored = context
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .consume_bytes("edits")
+        .unwrap()
         .and_then(|bytes| bytes.first().copied())
         .unwrap_or(0);
     let edits = Rc::new(Cell::new(restored));
     let saved_edits = edits.clone();
     context
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("edits", move || vec![saved_edits.get()])
         .unwrap();
     DetailsComponent { context, edits }
@@ -120,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let details = single.details.as_ref().unwrap().instance.clone();
     details.edits.set(23);
 
-    navigation.set_mode(ChildPanelsMode::Triple);
+    navigation.set_mode_or_panic(ChildPanelsMode::Triple);
     assert!(Rc::ptr_eq(
         &single.main.instance,
         &panels.get().main.instance
@@ -131,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     assert_eq!(details.context.lifecycle().state(), LifecycleState::Resumed);
     assert!(!root.back_handler().back()); // Automatic pop is disabled in Triple.
-    navigation.set_mode(ChildPanelsMode::Single);
+    navigation.set_mode_or_panic(ChildPanelsMode::Single);
     assert!(root.back_handler().back()); // Extra is removed before Details.
     assert!(panels.get().extra.is_none());
     assert!(panels.get().details.is_some());
@@ -148,12 +146,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(details.context.lifecycle().state(), LifecycleState::Resumed);
 
-    navigation.set_mode(ChildPanelsMode::Dual);
-    let saved = root.state_keeper().borrow().save()?;
+    navigation.set_mode_or_panic(ChildPanelsMode::Dual);
+    let saved = root.state_store().save()?;
     root.lifecycle().destroy()?;
-    let restored_root = DefaultComponentContext::with_state_keeper(
+    let restored_root = DefaultComponentContext::with_state_store(
         resumed(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let restored = child_panels(
         &restored_root,

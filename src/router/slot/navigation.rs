@@ -13,6 +13,8 @@ pub type SlotEvent<C> = NavigationEvent<Option<Rc<C>>, NavigationResult<C>>;
 /// Generic callbacks use static dispatch; this trait is not object-safe.
 pub trait SlotNavigator<C: 'static> {
     /// Transforms every connected slot. Panics on transition errors.
+    #[deprecated(note = "use try_navigate or navigate_or_panic")]
+    #[track_caller]
     fn navigate(&self, transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static) {
         self.navigate_with(transformer, |result| {
             if let Err(error) = result {
@@ -27,6 +29,8 @@ pub trait SlotNavigator<C: 'static> {
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     );
     /// Activates a configuration; equality preserves the child identity and instance.
+    #[deprecated(note = "use try_activate or activate_or_panic")]
+    #[track_caller]
     fn activate(&self, configuration: C) {
         let configuration = Rc::new(configuration);
         self.navigate(move |_| Some(configuration.clone()));
@@ -41,6 +45,8 @@ pub trait SlotNavigator<C: 'static> {
         self.navigate_with(move |_| Some(configuration.clone()), completion);
     }
     /// Dismisses the active child, if any.
+    #[deprecated(note = "use try_dismiss or dismiss_or_panic")]
+    #[track_caller]
     fn dismiss(&self) {
         self.navigate(|_| None);
     }
@@ -50,6 +56,53 @@ pub trait SlotNavigator<C: 'static> {
             |_| None,
             move |result| completion(result.map(|result| result.old_configuration.is_some())),
         );
+    }
+    /// Fallible counterpart of `navigate`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_navigate(
+        &self,
+        transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| {
+            self.navigate_with(transformer, completion)
+        })
+    }
+    /// Fallible counterpart of `activate`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_activate(
+        &self,
+        configuration: C,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| {
+            self.activate_with(configuration, completion)
+        })
+    }
+    /// Fallible counterpart of `dismiss`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_dismiss(
+        &self,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        self.try_navigate(|_| None)
+    }
+    /// Explicitly panicking compatibility operation. See `try_navigate` for errors.
+    #[track_caller]
+    fn navigate_or_panic(&self, transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static) {
+        self.navigate_with(transformer, |result| {
+            if let Err(error) = result {
+                panic!("slot navigation failed: {error:?}");
+            }
+        });
+    }
+    /// Explicitly panicking compatibility operation. See `try_activate` for errors.
+    #[track_caller]
+    fn activate_or_panic(&self, configuration: C) {
+        let configuration = Rc::new(configuration);
+        self.navigate_or_panic(move |_| Some(configuration.clone()));
+    }
+    /// Explicitly panicking compatibility operation. See `try_dismiss` for errors.
+    #[track_caller]
+    fn dismiss_or_panic(&self) {
+        self.navigate_or_panic(|_| None);
     }
 }
 
@@ -81,6 +134,8 @@ impl<C: 'static> SlotNavigation<C> {
         }
     }
     /// Transforms every connected slot. Panics on transition errors.
+    #[deprecated(note = "use try_navigate or navigate_or_panic")]
+    #[track_caller]
     pub fn navigate(&self, transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static) {
         SlotNavigator::navigate(self, transformer)
     }
@@ -94,6 +149,8 @@ impl<C: 'static> SlotNavigation<C> {
         SlotNavigator::navigate_with(self, transformer, completion)
     }
     /// Activates a configuration; equality preserves the child identity and instance.
+    #[deprecated(note = "use try_activate or activate_or_panic")]
+    #[track_caller]
     pub fn activate(&self, configuration: C) {
         SlotNavigator::activate(self, configuration)
     }
@@ -106,6 +163,8 @@ impl<C: 'static> SlotNavigation<C> {
         SlotNavigator::activate_with(self, configuration, completion)
     }
     /// Dismisses the active child, if any.
+    #[deprecated(note = "use try_dismiss or dismiss_or_panic")]
+    #[track_caller]
     pub fn dismiss(&self) {
         SlotNavigator::dismiss(self)
     }
@@ -120,12 +179,60 @@ impl<C: 'static> SlotNavigator<C> for SlotNavigation<C> {
         transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static,
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     ) {
+        let event = SlotEvent::with_completion(transformer, completion);
+        let abandon = event.clone();
         self.source
-            .navigate(SlotEvent::with_completion(transformer, completion));
+            .navigate_rc_abandonable(Rc::new(event), move || {
+                abandon.complete(Err(NavigationError::ChildUnavailable))
+            });
     }
 }
 impl<C: 'static> NavigationSource<SlotEvent<C>> for SlotNavigation<C> {
     fn subscribe(&self, observer: Rc<dyn Fn(Rc<SlotEvent<C>>)>) -> crate::value::Subscription {
         self.source.subscribe(observer)
+    }
+}
+
+impl<C: 'static> SlotNavigation<C> {
+    /// Fallible counterpart of `navigate`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_navigate(
+        &self,
+        transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        SlotNavigator::try_navigate(self, transformer)
+    }
+    /// Fallible counterpart of `activate`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_activate(
+        &self,
+        configuration: C,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        SlotNavigator::try_activate(self, configuration)
+    }
+    /// Fallible counterpart of `dismiss`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_dismiss(
+        &self,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        SlotNavigator::try_dismiss(self)
+    }
+    /// Explicitly panicking compatibility operation. See `try_navigate` for errors.
+    #[track_caller]
+    pub fn navigate_or_panic(
+        &self,
+        transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static,
+    ) {
+        SlotNavigator::navigate_or_panic(self, transformer)
+    }
+    /// Explicitly panicking compatibility operation. See `try_activate` for errors.
+    #[track_caller]
+    pub fn activate_or_panic(&self, configuration: C) {
+        SlotNavigator::activate_or_panic(self, configuration)
+    }
+    /// Explicitly panicking compatibility operation. See `try_dismiss` for errors.
+    #[track_caller]
+    pub fn dismiss_or_panic(&self) {
+        SlotNavigator::dismiss_or_panic(self)
     }
 }

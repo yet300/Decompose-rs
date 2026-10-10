@@ -1,11 +1,10 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::pages::{Pages, PagesCodec, PagesNavigation, PagesOptions, child_pages};
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
+    StateStore,
 };
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::Cell, rc::Rc};
 
 // Neither configurations nor components implement Clone.
 #[derive(PartialEq, Eq)]
@@ -30,16 +29,15 @@ fn codec() -> PagesCodec<Tab> {
 fn factory(generations: Rc<Cell<usize>>) -> impl Fn(&Tab, DefaultComponentContext) -> TabComponent {
     move |_, context| {
         let restored = context
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .consume_bytes("counter")
+            .unwrap()
             .and_then(|bytes| bytes.first().copied())
             .unwrap_or(0);
         let counter = Rc::new(Cell::new(restored));
         let saved_counter = counter.clone();
         context
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("counter", move || vec![saved_counter.get()])
             .unwrap();
         let generation = generations.get() + 1;
@@ -72,10 +70,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first = first_snapshot.items[0].instance().unwrap().clone();
     first.counter.set(17);
 
-    navigation.select(3);
+    navigation.select_or_panic(3);
     assert!(pages.get().items[0].instance().is_none());
     assert_eq!(first.context.lifecycle().state(), LifecycleState::Destroyed);
-    navigation.select(0);
+    navigation.select_or_panic(0);
     let recreated_snapshot = pages.get();
     let recreated = recreated_snapshot.items[0].instance().unwrap();
     assert_eq!(recreated_snapshot.items[0].key(), first_key);
@@ -88,15 +86,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         recreated.generation,
     );
 
-    navigation.select(3);
+    navigation.select_or_panic(3);
     assert!(root.back_handler().back());
     assert_eq!(pages.get().selected_index, Some(2));
-    navigation.select(3);
-    let saved = root.state_keeper().borrow().save()?;
+    navigation.select_or_panic(3);
+    let saved = root.state_store().save()?;
     root.lifecycle().destroy()?;
-    let restored_root = DefaultComponentContext::with_state_keeper(
+    let restored_root = DefaultComponentContext::with_state_store(
         resumed(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let restored_navigation = PagesNavigation::new();
     let restored_pages = child_pages(
@@ -112,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(restored_pages.get().selected_index, Some(3));
     assert_eq!(restored_pages.get().items.len(), 5);
     assert!(restored_pages.get().items[0].instance().is_none());
-    restored_navigation.select(0);
+    restored_navigation.select_or_panic(0);
     let restored_snapshot = restored_pages.get();
     assert_eq!(restored_snapshot.items[0].key(), first_key);
     assert_eq!(

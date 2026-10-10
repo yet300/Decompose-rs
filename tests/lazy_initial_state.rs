@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::{
     children::NavigationSource, items::*, pages::*, panels::*, slot::*, stack::*,
 };
@@ -190,10 +191,10 @@ struct Snapshot {
 fn restored(saved: BTreeMap<String, Vec<u8>>) -> DefaultComponentContext {
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    DefaultComponentContext::with_all(
+    DefaultComponentContext::with_stores(
         lifecycle,
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        StateStore::from(StateKeeper::with_restored(saved)),
+        InstanceStore::from(InstanceKeeper::new()),
         SharedBack::new(),
     )
 }
@@ -428,7 +429,7 @@ fn every_family_initializes_once_and_restore_suppresses_initialization() {
         )
         .unwrap();
         assert_eq!(calls.get(), 1, "{family:?}");
-        let saved = parent.state_keeper().borrow().save().unwrap();
+        let saved = parent.state_store().save().unwrap();
         let restored_parent = restored(saved.clone());
         let actual = construct(
             family,
@@ -440,7 +441,7 @@ fn every_family_initializes_once_and_restore_suppresses_initialization() {
         .unwrap();
         assert_eq!(actual, expected, "{family:?}");
         assert_eq!(
-            restored_parent.state_keeper().borrow().save().unwrap(),
+            restored_parent.state_store().save().unwrap(),
             saved,
             "{family:?}"
         );
@@ -457,7 +458,7 @@ fn every_family_initializes_once_and_restore_suppresses_initialization() {
             false,
         )
         .unwrap();
-        let transient_parent = restored(transient_parent.state_keeper().borrow().save().unwrap());
+        let transient_parent = restored(transient_parent.state_store().save().unwrap());
         construct(
             family,
             &transient_parent,
@@ -478,7 +479,7 @@ fn empty_and_all_inactive_restoration_is_authoritative() {
     for family in [Family::Slot, Family::Pages, Family::Items] {
         let parent = root();
         let expected = construct(family, &parent, Seed::empty, true, false).unwrap();
-        let parent = restored(parent.state_keeper().borrow().save().unwrap());
+        let parent = restored(parent.state_store().save().unwrap());
         assert_eq!(
             construct(family, &parent, || panic!("empty state reset"), true, false).unwrap(),
             expected
@@ -497,7 +498,7 @@ fn empty_and_all_inactive_restoration_is_authoritative() {
     )
     .unwrap();
     assert_eq!(expected.active, 0);
-    let parent = restored(parent.state_keeper().borrow().save().unwrap());
+    let parent = restored(parent.state_store().save().unwrap());
     assert_eq!(
         construct(
             Family::Items,
@@ -533,7 +534,7 @@ fn panels_membership_and_every_mode_restore_for_both_adapters() {
                     false,
                 )
                 .unwrap();
-                let parent = restored(parent.state_keeper().borrow().save().unwrap());
+                let parent = restored(parent.state_store().save().unwrap());
                 assert_eq!(
                     construct(family, &parent, || panic!("panels reset"), true, false).unwrap(),
                     expected
@@ -580,12 +581,12 @@ fn malformed_and_decoder_error_restore_never_initialize_and_keep_retry_bytes() {
     for family in FAMILIES {
         let parent = root();
         let expected = construct(family, &parent, Seed::populated, true, false).unwrap();
-        let saved = parent.state_keeper().borrow().save().unwrap();
+        let saved = parent.state_store().save().unwrap();
         let parent = restored(saved.clone());
         assert!(
             matches!(construct(family, &parent, || panic!("decoder failure initialized"), true, true), Err(NavigationError::State(message)) if message == "decoder rejected membership")
         );
-        assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(parent.state_store().save().unwrap(), saved);
         assert_eq!(
             construct(family, &parent, || panic!("retry reset"), true, false).unwrap(),
             expected
@@ -606,7 +607,7 @@ fn malformed_and_decoder_error_restore_never_initialize_and_keep_retry_bytes() {
                 ),
                 Err(NavigationError::State(_))
             ));
-            assert_eq!(parent.state_keeper().borrow().save().unwrap(), bad);
+            assert_eq!(parent.state_store().save().unwrap(), bad);
         }
     }
 }
@@ -641,7 +642,7 @@ fn invalid_initial_models_release_registration_and_allow_retry() {
             construct(family, &parent, || seed, true, false).unwrap_err(),
             expected
         );
-        assert!(parent.state_keeper().borrow().save().unwrap().is_empty());
+        assert!(parent.state_store().save().unwrap().is_empty());
         construct(family, &parent, Seed::populated, true, false).unwrap();
     }
 }
@@ -655,8 +656,8 @@ impl Drop for DropProbe {
     fn drop(&mut self) {
         // These mutable borrows prove captures are released outside obstructing
         // state/retention borrows, including when restoration skips the closure.
-        drop(self.parent.state_keeper().borrow_mut());
-        drop(self.parent.instance_keeper().borrow_mut());
+        drop(self.parent.state_store());
+        drop(self.parent.instance_store());
         if self.destroy {
             self.parent.lifecycle().destroy().unwrap();
         } else if !self.parent.lifecycle().state().is_destroyed() {
@@ -702,7 +703,7 @@ fn captured_resources_drop_before_return_on_evaluated_skipped_and_rejected_paths
             let parent = match scenario {
                 "restored" | "malformed" => {
                     construct(family, &parent, Seed::populated, true, false).unwrap();
-                    let mut saved = parent.state_keeper().borrow().save().unwrap();
+                    let mut saved = parent.state_store().save().unwrap();
                     if scenario == "malformed" {
                         for bytes in saved.values_mut() {
                             *bytes = vec![0];
@@ -764,7 +765,7 @@ fn initializer_or_skipped_capture_drop_destroying_parent_cleans_registration() {
             let parent = root();
             let parent = if skip {
                 construct(family, &parent, Seed::populated, true, false).unwrap();
-                restored(parent.state_keeper().borrow().save().unwrap())
+                restored(parent.state_store().save().unwrap())
             } else {
                 parent
             };
@@ -792,8 +793,8 @@ fn initializer_or_skipped_capture_drop_destroying_parent_cleans_registration() {
                 Family::Items => "DefaultChildItems",
                 Family::Panels | Family::Panels2 => "DefaultChildPanels",
             };
-            assert!(!parent.state_keeper().borrow().is_registered(key));
-            assert!(!parent.instance_keeper().borrow().contains(key));
+            assert!(!parent.state_store().is_registered(key).unwrap());
+            assert!(!parent.instance_store().contains(key).unwrap());
         }
     }
 }
@@ -860,7 +861,7 @@ fn initializer_and_cancel_panic_preserve_original_and_retry() {
     }
     let parent = root();
     construct(Family::Stack, &parent, Seed::populated, true, false).unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored(saved.clone());
     let mut source = ReplaySource::<StackEvent<u32>>::new(None);
     source.cancel_panics = true;
@@ -887,19 +888,19 @@ fn initializer_and_cancel_panic_preserve_original_and_retry() {
     assert_eq!(source.cancelled.get(), 1);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildStack")
+            .unwrap()
     );
     assert!(
         !parent
-            .instance_keeper()
-            .borrow()
+            .instance_store()
             .contains("DefaultChildStack")
+            .unwrap()
     );
     // Drop reentry has an independent transient provider, so compare the saved router bytes.
     assert_eq!(
-        parent.state_keeper().borrow().save().unwrap()["DefaultChildStack"],
+        parent.state_store().save().unwrap()["DefaultChildStack"],
         saved["DefaultChildStack"]
     );
     construct(
@@ -939,9 +940,9 @@ fn subscribe_initializer_factory_events_are_fifo_with_completion_after_creation(
             assert!(source.subscribed.get());
             assert!(
                 parent
-                    .state_keeper()
-                    .borrow()
+                    .state_store()
                     .is_registered("DefaultChildStack")
+                    .unwrap()
             );
             log.borrow_mut().push("initial".into());
             source.emit(stack_event(2, &log));
@@ -1019,7 +1020,7 @@ fn decoder_events_share_fifo_without_invoking_initializer() {
         false,
     )
     .unwrap();
-    let parent = restored(parent.state_keeper().borrow().save().unwrap());
+    let parent = restored(parent.state_store().save().unwrap());
     let log: Log = Default::default();
     let source = Rc::new(ReplaySource::new(Some(stack_event(1, &log))));
     let decoder_source = source.clone();
@@ -1093,9 +1094,9 @@ fn panels_initial_hook_precedes_fifo_pump_and_transition_completions() {
             assert!(source.subscribed.get());
             assert!(
                 parent
-                    .state_keeper()
-                    .borrow()
+                    .state_store()
                     .is_registered("DefaultChildPanels")
+                    .unwrap()
             );
             log.borrow_mut().push("initial".into());
             source.emit(panel_event(2, &log));
@@ -1233,7 +1234,7 @@ family_fifo_test!(two_role_panels_construction_emissions_and_completions_are_fif
 fn invalid_decoded_models_suppress_initialization_and_preserve_retry_input() {
     let parent = root();
     construct(Family::Stack, &parent, Seed::populated, true, false).unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored(saved.clone());
     let result = child_stack_with_initial(
         &parent,
@@ -1249,7 +1250,7 @@ fn invalid_decoded_models_suppress_initialization_and_preserve_retry_input() {
         result,
         Err(decompose_rs::router::NavigationError::DuplicateConfiguration)
     ));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     construct(
         Family::Stack,
         &parent,
@@ -1261,7 +1262,7 @@ fn invalid_decoded_models_suppress_initialization_and_preserve_retry_input() {
 
     let parent = root();
     construct(Family::Items, &parent, Seed::populated, true, false).unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored(saved.clone());
     let result = child_items_with_initial(
         &parent,
@@ -1274,7 +1275,7 @@ fn invalid_decoded_models_suppress_initialization_and_preserve_retry_input() {
         |_, ctx| ctx,
     );
     assert!(result.is_err());
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     construct(
         Family::Items,
         &parent,
@@ -1286,7 +1287,7 @@ fn invalid_decoded_models_suppress_initialization_and_preserve_retry_input() {
 
     let parent = root();
     construct(Family::Pages, &parent, Seed::populated, true, false).unwrap();
-    let mut bad = parent.state_keeper().borrow().save().unwrap();
+    let mut bad = parent.state_store().save().unwrap();
     // DPG1 places the u64 selection after magic and the u64 next-key counter.
     bad.get_mut("DefaultChildPages").unwrap()[12..20].copy_from_slice(&99u64.to_le_bytes());
     let parent = restored(bad.clone());
@@ -1303,10 +1304,10 @@ fn invalid_decoded_models_suppress_initialization_and_preserve_retry_input() {
         );
         assert!(
             !parent
-                .state_keeper()
-                .borrow()
+                .state_store()
                 .is_registered("DefaultChildPages")
+                .unwrap()
         );
-        assert_eq!(parent.state_keeper().borrow().save().unwrap(), bad);
+        assert_eq!(parent.state_store().save().unwrap(), bad);
     }
 }

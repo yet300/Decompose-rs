@@ -1,8 +1,8 @@
 use super::NavigationError;
 use std::{collections::BTreeMap, rc::Rc};
 
-type Encode<C> = dyn Fn(&[Rc<C>]) -> Result<Vec<u8>, String>;
-type Decode<C> = dyn Fn(&[u8]) -> Result<Vec<C>, String>;
+type Encode<C> = dyn Fn(&[Rc<C>]) -> Result<Vec<u8>, NavigationError>;
+type Decode<C> = dyn Fn(&[u8]) -> Result<Vec<C>, NavigationError>;
 
 type Policy<C> = dyn Fn(&[Rc<C>]) -> bool;
 /// Explicit serialization of an entire configuration stack, without serde.
@@ -46,6 +46,19 @@ impl<C> StackCodec<C> {
     pub fn new(
         encode: impl Fn(&[Rc<C>]) -> Result<Vec<u8>, String> + 'static,
         decode: impl Fn(&[u8]) -> Result<Vec<C>, String> + 'static,
+    ) -> Self {
+        Self {
+            encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+            decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+            should_save: None,
+            should_restore: None,
+        }
+    }
+    /// Uses typed navigation errors, including `NavigationError::state_source`.
+    /// Callbacks are retained for future saves/restoration and must own captures.
+    pub fn new_fallible(
+        encode: impl Fn(&[Rc<C>]) -> Result<Vec<u8>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Vec<C>, NavigationError> + 'static,
     ) -> Self {
         Self {
             encode: Rc::new(encode),
@@ -99,7 +112,7 @@ pub(crate) fn encode<C>(
             return Err(state_error("duplicate child key in DST1"));
         }
     }
-    let payload = (codec.encode)(configurations).map_err(NavigationError::State)?;
+    let payload = (codec.encode)(configurations)?;
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&next_key.to_le_bytes());
@@ -172,7 +185,7 @@ pub(crate) fn decode<C>(
     if reader.cursor != bytes.len() {
         return Err(state_error("trailing bytes after DST1 envelope"));
     }
-    let configurations = (codec.decode)(payload).map_err(NavigationError::State)?;
+    let configurations = (codec.decode)(payload)?;
     if configurations.is_empty() {
         return Err(NavigationError::EmptyStack);
     }

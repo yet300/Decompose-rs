@@ -1,5 +1,9 @@
 use std::rc::Rc;
 /// Small equality-keyed map. Lookups are linear; keys need neither Hash nor Ord.
+/// Iteration preserves first insertion order; replacing an equal key keeps its
+/// position but replaces its shared handle. Lookup, insertion and removal are
+/// O(n); building from n distinct entries is O(n²). This intentionally supports
+/// Eq-only configurations and deterministic navigation order.
 pub struct ItemMap<C, V> {
     entries: Vec<(Rc<C>, V)>,
 }
@@ -27,6 +31,12 @@ impl<C, V> ItemMap<C, V> {
     pub fn iter(&self) -> impl Iterator<Item = (&Rc<C>, &V)> {
         self.entries.iter().map(|(k, v)| (k, v))
     }
+    /// Payload references in insertion order, without exposing shared handles.
+    pub fn iter_ref(&self) -> impl Iterator<Item = (&C, &V)> {
+        self.entries
+            .iter()
+            .map(|(key, value)| (key.as_ref(), value))
+    }
     /// Configuration handles in insertion order.
     pub fn keys(&self) -> impl Iterator<Item = &Rc<C>> {
         self.entries.iter().map(|(k, _)| k)
@@ -45,6 +55,10 @@ impl<C, V> ItemMap<C, V> {
     }
 }
 impl<C: Eq, V> ItemMap<C, V> {
+    /// Inserts an owned configuration, storing shared ownership internally.
+    pub fn insert_owned(&mut self, key: C, value: V) -> Option<V> {
+        self.insert(Rc::new(key), value)
+    }
     /// Looks up an equal configuration.
     pub fn get(&self, key: &C) -> Option<&V> {
         self.entries

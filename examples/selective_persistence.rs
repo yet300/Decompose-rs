@@ -1,13 +1,13 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 //! Run with `cargo run --example selective_persistence`.
+use decompose_rs::router::stack::{
+    StackCodec, StackNavigation, StackOptions, child_stack_with_initial,
+};
 use decompose_rs::{
-    ComponentContext, DefaultComponentContext, InstanceKeeper, LifecycleRegistry, LifecycleState,
-    SharedBack, StateKeeper,
-    router::stack::{StackCodec, StackNavigation, StackOptions, child_stack_with_initial},
+    ComponentContext, DefaultComponentContext, InstanceKeeper, InstanceStore, LifecycleRegistry,
+    LifecycleState, SharedBack, StateKeeper, StateStore,
 };
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::Cell, rc::Rc};
 
 fn main() {
     let lifecycle = LifecycleRegistry::new();
@@ -32,17 +32,17 @@ fn main() {
         |_, context| context,
     )
     .unwrap();
-    assert!(context.state_keeper().borrow().save().unwrap().is_empty());
+    assert!(context.state_store().save().unwrap().is_empty());
     include_navigation.set(true);
-    let saved = context.state_keeper().borrow().save().unwrap();
+    let saved = context.state_store().save().unwrap();
     assert!(saved.contains_key("DefaultChildStack"));
 
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    let restored = DefaultComponentContext::with_all(
+    let restored = DefaultComponentContext::with_stores(
         lifecycle,
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        StateStore::from(StateKeeper::with_restored(saved)),
+        InstanceStore::from(InstanceKeeper::new()),
         SharedBack::new(),
     );
     context.lifecycle().destroy().unwrap();

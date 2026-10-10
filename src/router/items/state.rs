@@ -1,10 +1,10 @@
 use super::{ActiveLifecycleState, Items, NavigationError};
 use std::{collections::BTreeMap, rc::Rc};
 
-type Encode<C> = dyn Fn(&[Rc<C>]) -> Result<Vec<u8>, String>;
-type Decode<C> = dyn Fn(&[u8]) -> Result<Vec<C>, String>;
-type EncodeState<C> = dyn Fn(&Items<C>) -> Result<Vec<u8>, String>;
-type DecodeState<C> = dyn Fn(&[u8]) -> Result<Items<C>, String>;
+type Encode<C> = dyn Fn(&[Rc<C>]) -> Result<Vec<u8>, NavigationError>;
+type Decode<C> = dyn Fn(&[u8]) -> Result<Vec<C>, NavigationError>;
+type EncodeState<C> = dyn Fn(&Items<C>) -> Result<Vec<u8>, NavigationError>;
+type DecodeState<C> = dyn Fn(&[u8]) -> Result<Items<C>, NavigationError>;
 
 enum Callbacks<C> {
     Configurations {
@@ -76,8 +76,8 @@ impl<C> ItemsCodec<C> {
     ) -> Self {
         Self {
             callbacks: Callbacks::Configurations {
-                encode: Rc::new(encode),
-                decode: Rc::new(decode),
+                encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
             },
             should_save: None,
             should_restore: None,
@@ -92,6 +92,36 @@ impl<C> ItemsCodec<C> {
     pub fn new_state(
         encode: impl Fn(&Items<C>) -> Result<Vec<u8>, String> + 'static,
         decode: impl Fn(&[u8]) -> Result<Items<C>, String> + 'static,
+    ) -> Self {
+        Self {
+            callbacks: Callbacks::State {
+                encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+            },
+            should_save: None,
+            should_restore: None,
+        }
+    }
+    /// Uses typed navigation errors, including `NavigationError::state_source`.
+    /// Callbacks are retained for future saves/restoration and must own captures.
+    pub fn new_fallible(
+        encode: impl Fn(&[Rc<C>]) -> Result<Vec<u8>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Vec<C>, NavigationError> + 'static,
+    ) -> Self {
+        Self {
+            callbacks: Callbacks::Configurations {
+                encode: Rc::new(encode),
+                decode: Rc::new(decode),
+            },
+            should_save: None,
+            should_restore: None,
+        }
+    }
+    /// Uses typed navigation errors, including `NavigationError::state_source`.
+    /// Callbacks are retained for future saves/restoration and must own captures.
+    pub fn new_state_fallible(
+        encode: impl Fn(&Items<C>) -> Result<Vec<u8>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Items<C>, NavigationError> + 'static,
     ) -> Self {
         Self {
             callbacks: Callbacks::State {
@@ -149,8 +179,7 @@ pub(crate) fn encode<C: Eq>(
     let payload = match &codec.callbacks {
         Callbacks::Configurations { encode, .. } => encode(configurations),
         Callbacks::State { encode, .. } => encode(items),
-    }
-    .map_err(NavigationError::State)?;
+    }?;
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&next_key.to_le_bytes());
@@ -240,11 +269,7 @@ pub(crate) fn decode<C: Eq>(
     }
     let configurations = match &codec.callbacks {
         Callbacks::Configurations { decode, .. } => {
-            let items: Vec<_> = decode(payload)
-                .map_err(NavigationError::State)?
-                .into_iter()
-                .map(Rc::new)
-                .collect();
+            let items: Vec<_> = decode(payload)?.into_iter().map(Rc::new).collect();
             let active_items = items
                 .iter()
                 .zip(targets)
@@ -255,7 +280,7 @@ pub(crate) fn decode<C: Eq>(
                 active_items,
             }
         }
-        Callbacks::State { decode, .. } => decode(payload).map_err(NavigationError::State)?,
+        Callbacks::State { decode, .. } => decode(payload)?,
     };
     if configurations.items.len() != children.len() {
         return Err(state_error(

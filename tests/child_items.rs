@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::items::*;
 use decompose_rs::*;
 use std::{
@@ -163,14 +164,14 @@ fn persistent() -> ItemsOptions<u32> {
 }
 fn restored(
     saved: std::collections::BTreeMap<String, Vec<u8>>,
-    instances: Option<SharedInstances>,
+    instances: Option<InstanceStore>,
 ) -> DefaultComponentContext {
     let life = LifecycleRegistry::new();
     life.move_to(LifecycleState::Resumed).unwrap();
-    DefaultComponentContext::with_all(
+    DefaultComponentContext::with_stores(
         life,
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
-        instances.unwrap_or_else(|| Rc::new(RefCell::new(InstanceKeeper::new()))),
+        StateStore::from(StateKeeper::with_restored(saved)),
+        instances.unwrap_or_else(|| InstanceStore::from(InstanceKeeper::new())),
         SharedBack::new(),
     )
 }
@@ -198,7 +199,7 @@ fn dpi1_frozen_fixture_restores_and_saves_exact_bytes() {
     assert_eq!(child.child.key, "child/0");
     assert_eq!(child.lifecycle_state, ActiveLifecycleState::Resumed);
     assert_eq!(
-        parent.state_keeper().borrow().save().unwrap()["DefaultChildItems"],
+        parent.state_store().save().unwrap()["DefaultChildItems"],
         FIXTURE
     );
 }
@@ -215,15 +216,14 @@ fn persistent_live_and_inactive_state_survives_repeated_saves() {
     )
     .unwrap();
     let old = lazy.get_or_create(&0).unwrap();
-    old.state_keeper()
-        .borrow_mut()
+    old.state_store()
         .register("payload", || vec![4, 5])
         .unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
     lazy.set_active_items(|_| ItemMap::new());
     assert!(old.lifecycle().state().is_destroyed());
-    let saved = parent.state_keeper().borrow().save().unwrap();
-    assert_eq!(saved, parent.state_keeper().borrow().save().unwrap());
+    let saved = parent.state_store().save().unwrap();
+    assert_eq!(saved, parent.state_store().save().unwrap());
     let parent = restored(saved, None);
     let lazy = child_items(
         &parent,
@@ -240,7 +240,7 @@ fn persistent_live_and_inactive_state_survives_repeated_saves() {
     assert!(lazy.get().active_items.is_empty());
     let fresh = lazy.get_or_create(&0).unwrap();
     assert_eq!(
-        fresh.state_keeper().borrow_mut().consume_bytes("payload"),
+        fresh.state_store().consume_bytes("payload").unwrap(),
         Some(vec![4, 5])
     );
     assert_eq!(lazy.get().active_items.get(&0).unwrap().child.key, key);
@@ -256,7 +256,7 @@ fn persistent_empty_is_authoritative_over_nonempty_initial() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored(saved, None);
     let lazy = child_items(
         &parent,
@@ -315,36 +315,23 @@ fn deactivate_recreates_keeper_and_component_under_same_key_then_removal_discard
     .unwrap();
     let old = lazy.get_or_create(&0).unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
-    old.state_keeper()
-        .borrow_mut()
-        .register("value", || vec![8])
-        .unwrap();
+    old.state_store().register("value", || vec![8]).unwrap();
     lazy.set_active_items(|_| ItemMap::new());
-    assert!(old.instance_keeper().borrow().is_destroyed());
+    assert!(old.instance_store().is_destroyed().unwrap());
     let fresh = lazy.get_or_create(&0).unwrap();
     assert!(!Rc::ptr_eq(&old, &fresh));
-    assert!(!Rc::ptr_eq(
-        &old.instance_keeper(),
-        &fresh.instance_keeper()
-    ));
+    assert!(!old.instance_store().ptr_eq(&fresh.instance_store()));
     assert_eq!(
-        fresh.state_keeper().borrow_mut().consume_bytes("value"),
+        fresh.state_store().consume_bytes("value").unwrap(),
         Some(vec![8])
     );
     assert_eq!(lazy.get().active_items.get(&0).unwrap().child.key, key);
-    fresh
-        .state_keeper()
-        .borrow_mut()
-        .register("value", || vec![9])
-        .unwrap();
+    fresh.state_store().register("value", || vec![9]).unwrap();
     lazy.set_items(|_| vec![]);
     lazy.set_items(|_| vec![Rc::new(0)]);
     let third = lazy.get_or_create(&0).unwrap();
     assert_ne!(lazy.get().active_items.get(&0).unwrap().child.key, key);
-    assert_eq!(
-        third.state_keeper().borrow_mut().consume_bytes("value"),
-        None
-    );
+    assert_eq!(third.state_store().consume_bytes("value").unwrap(), None);
 }
 #[test]
 fn duplicates_are_rejected_before_factories_initially_and_during_navigation() {
@@ -632,7 +619,7 @@ fn reject_before_codec(bytes: Vec<u8>) {
         .is_err()
     );
     assert_eq!(calls.get(), 0);
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), original);
+    assert_eq!(parent.state_store().save().unwrap(), original);
     assert_eq!(parent.back_handler().handler_count(), 0);
 }
 #[test]
@@ -708,10 +695,7 @@ fn all_four_saved_target_bytes_restore_literal_states() {
             lazy.get().active_items.get(&7).map(|c| c.lifecycle_state),
             expected
         );
-        assert_eq!(
-            parent.state_keeper().borrow().save().unwrap()["DefaultChildItems"],
-            b
-        );
+        assert_eq!(parent.state_store().save().unwrap()["DefaultChildItems"], b);
     }
 }
 #[test]
@@ -751,7 +735,7 @@ fn decode_error_count_mismatch_and_decoded_duplicates_reject_before_factory_with
             )
             .is_err()
         );
-        assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(parent.state_store().save().unwrap(), saved);
         if kind != 2 {
             child_items(
                 &parent,
@@ -784,8 +768,7 @@ fn encoding_failure_surfaces_without_replacing_live_membership() {
     .unwrap();
     assert!(
         parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .save()
             .unwrap_err()
             .to_string()
@@ -880,8 +863,7 @@ fn keeper_type_conflict_rolls_back_original_input() {
         std::collections::BTreeMap::from([("DefaultChildItems".into(), ONE_FRAME.to_vec())]);
     let parent = restored(saved.clone(), None);
     parent
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("DefaultChildItems", || Rc::new(9u32))
         .unwrap();
     assert!(matches!(
@@ -894,11 +876,11 @@ fn keeper_type_conflict_rolls_back_original_input() {
         ),
         Err(NavigationError::Context(_))
     ));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
 }
 #[test]
 fn transient_saves_skip_child_providers_and_reset_retained_instances() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored(Default::default(), Some(instances.clone()));
     let lazy = child_items(
         &parent,
@@ -909,15 +891,13 @@ fn transient_saves_skip_child_providers_and_reset_retained_instances() {
     )
     .unwrap();
     let old = lazy.get_or_create(&0).unwrap();
-    old.instance_keeper()
-        .borrow_mut()
+    old.instance_store()
         .get_or_create("service", || Rc::new(7u32))
         .unwrap();
-    old.state_keeper()
-        .borrow_mut()
+    old.state_store()
         .register("forbidden", || panic!("transient saved child"))
         .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert!(saved.is_empty());
     parent.lifecycle().destroy().unwrap();
     let parent = restored(saved, Some(instances));
@@ -930,19 +910,19 @@ fn transient_saves_skip_child_providers_and_reset_retained_instances() {
     )
     .unwrap();
     assert!(lazy.get().active_items.is_empty());
-    assert!(old.instance_keeper().borrow().is_destroyed());
+    assert!(old.instance_store().is_destroyed().unwrap());
     assert!(
         !lazy
             .get_or_create(&0)
             .unwrap()
-            .instance_keeper()
-            .borrow()
+            .instance_store()
             .contains("service")
+            .unwrap()
     );
 }
 #[test]
 fn external_retention_survives_parent_recreation_only_for_live_restored_entries() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored(Default::default(), Some(instances.clone()));
     let lazy = child_items(
         &parent,
@@ -960,17 +940,16 @@ fn external_retention_survives_parent_recreation_only_for_live_restored_entries(
     .unwrap();
     let old = lazy.get_or_create(&0).unwrap();
     let service = old
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("service", || Rc::new(7u32))
         .unwrap();
     lazy.set_active_items(|mut m| {
         m.remove(&1);
         m
     });
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
-    assert!(!old.instance_keeper().borrow().is_destroyed());
+    assert!(!old.instance_store().is_destroyed().unwrap());
     let parent = restored(saved, Some(instances));
     let lazy = child_items(
         &parent,
@@ -982,8 +961,7 @@ fn external_retention_survives_parent_recreation_only_for_live_restored_entries(
     .unwrap();
     let fresh = lazy.get_or_create(&0).unwrap();
     let retained = fresh
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("service", || Rc::new(99u32))
         .unwrap();
     assert!(Rc::ptr_eq(&service, &retained));
@@ -1007,8 +985,7 @@ fn coherent_save_freezes_targets_membership_keys_and_counter_before_provider_nav
     let flag = once.clone();
     lazy.get_or_create(&0)
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("navigate", move || {
             if flag.replace(false) {
                 source.set_items(|_| vec![]);
@@ -1016,7 +993,7 @@ fn coherent_save_freezes_targets_membership_keys_and_counter_before_provider_nav
             vec![3]
         })
         .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert!(lazy.get().items.is_empty());
     let parent = restored(saved, None);
     let lazy = child_items(
@@ -1459,7 +1436,7 @@ fn local_factory_panic_releases_prepared_scopes_and_allows_lazy_retry() {
         ItemsOptions::default(),
         move |c, ctx| {
             out.borrow_mut()
-                .push((ctx.lifecycle(), ctx.instance_keeper()));
+                .push((ctx.lifecycle(), ctx.instance_store()));
             if *c == 1 && once.replace(false) {
                 panic!("factory panic")
             }
@@ -1478,7 +1455,7 @@ fn local_factory_panic_releases_prepared_scopes_and_allows_lazy_retry() {
     );
     for (life, keeper) in capture.borrow().iter() {
         assert!(life.state().is_destroyed());
-        assert!(keeper.borrow().is_destroyed());
+        assert!(keeper.is_destroyed().unwrap());
     }
     assert!(lazy.get().active_items.is_empty());
     assert_eq!(
@@ -1500,7 +1477,7 @@ fn initial_factory_panic_restores_original_input_and_allows_constructor_retry() 
             Items::default(),
             persistent(),
             move |_, ctx| {
-                *out.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_keeper()));
+                *out.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_store()));
                 panic!("initial factory")
             }
         )))
@@ -1509,8 +1486,8 @@ fn initial_factory_panic_restores_original_input_and_allows_constructor_retry() 
     let binding = captured.borrow();
     let (life, keeper) = binding.as_ref().unwrap();
     assert!(life.state().is_destroyed());
-    assert!(keeper.borrow().is_destroyed());
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert!(keeper.is_destroyed().unwrap());
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     assert_eq!(parent.back_handler().handler_count(), 0);
     child_items(
         &parent,
@@ -1541,7 +1518,7 @@ fn failed_initial_queued_navigation_rolls_back_original_input() {
         )))
         .is_err()
     );
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     assert_eq!(parent.back_handler().handler_count(), 0);
     child_items(&parent, &nav, Items::default(), persistent(), |_, ctx| ctx).unwrap();
 }
@@ -1573,7 +1550,7 @@ fn parent_destroy_during_factory_or_initial_resume_is_typed_and_retryable_input(
             ),
             Err(NavigationError::Destroyed)
         ));
-        assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(parent.state_store().save().unwrap(), saved);
         assert_eq!(parent.back_handler().handler_count(), 0);
     }
 }
@@ -1885,11 +1862,11 @@ fn nonclone_custom_context_service_survives_nested_items_and_mixed_routers() {
         fn lifecycle(&self) -> LifecycleRegistry {
             self.base.lifecycle()
         }
-        fn state_keeper(&self) -> SharedKeeper {
-            self.base.state_keeper()
+        fn state_store(&self) -> StateStore {
+            self.base.state_store()
         }
-        fn instance_keeper(&self) -> SharedInstances {
-            self.base.instance_keeper()
+        fn instance_store(&self) -> InstanceStore {
+            self.base.instance_store()
         }
         fn back_handler(&self) -> SharedBack {
             self.base.back_handler()
@@ -2033,14 +2010,13 @@ fn nested_mixed_routers_restore_after_items_deactivation_and_process_death() {
     old.items
         .get_or_create(&30)
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("value", || vec![55])
         .unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
     lazy.set_active_items(|_| ItemMap::new());
     assert!(old.ctx.lifecycle().state().is_destroyed());
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
     let parent = restored(saved, None);
     let lazy = child_items(
@@ -2060,9 +2036,9 @@ fn nested_mixed_routers_restore_after_items_deactivation_and_process_death() {
             .items
             .get_or_create(&30)
             .unwrap()
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("value"),
+            .state_store()
+            .consume_bytes("value")
+            .unwrap(),
         Some(vec![55])
     );
     assert_eq!(
@@ -2181,23 +2157,17 @@ fn removal_of_inactive_member_discards_tombstone_key_and_saved_state() {
     .unwrap();
     let old = lazy.get_or_create(&0).unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
-    old.state_keeper()
-        .borrow_mut()
-        .register("saved", || vec![7])
-        .unwrap();
+    old.state_store().register("saved", || vec![7]).unwrap();
     lazy.set_active_items(|_| ItemMap::new());
     lazy.set_items(|_| vec![]);
     lazy.set_items(|_| vec![Rc::new(0)]);
     let fresh = lazy.get_or_create(&0).unwrap();
     assert_ne!(lazy.get().active_items.get(&0).unwrap().child.key, key);
-    assert_eq!(
-        fresh.state_keeper().borrow_mut().consume_bytes("saved"),
-        None
-    );
+    assert_eq!(fresh.state_store().consume_bytes("saved").unwrap(), None);
 }
 #[test]
 fn restoration_of_earlier_membership_discards_newer_retained_scope() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored(Default::default(), Some(instances.clone()));
     let lazy = child_items(
         &parent,
@@ -2207,12 +2177,12 @@ fn restoration_of_earlier_membership_discards_newer_retained_scope() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     lazy.set_items(|mut v| {
         v.push(Rc::new(1));
         v
     });
-    let newer = lazy.get_or_create(&1).unwrap().instance_keeper();
+    let newer = lazy.get_or_create(&1).unwrap().instance_store();
     parent.lifecycle().destroy().unwrap();
     let parent = restored(saved, Some(instances));
     let lazy = child_items(
@@ -2223,16 +2193,13 @@ fn restoration_of_earlier_membership_discards_newer_retained_scope() {
         |_, ctx| ctx,
     )
     .unwrap();
-    assert!(newer.borrow().is_destroyed());
+    assert!(newer.is_destroyed().unwrap());
     assert_eq!(lazy.get().items.len(), 1);
     lazy.set_items(|mut v| {
         v.push(Rc::new(2));
         v
     });
-    assert!(!Rc::ptr_eq(
-        &newer,
-        &lazy.get_or_create(&2).unwrap().instance_keeper()
-    ));
+    assert!(!newer.ptr_eq(&lazy.get_or_create(&2).unwrap().instance_store()));
 }
 #[test]
 fn lifecycle_deactivation_cannot_reenable_created_or_inactive_back_bridge() {
@@ -2330,10 +2297,7 @@ fn reactivated_equal_configuration_uses_current_payload_with_stable_key_and_save
                     payload: "probe",
                 })
                 .unwrap();
-            old.state_keeper()
-                .borrow_mut()
-                .register("saved", || vec![7])
-                .unwrap();
+            old.state_store().register("saved", || vec![7]).unwrap();
             let key = lazy
                 .get()
                 .active_items
@@ -2390,7 +2354,7 @@ fn reactivated_equal_configuration_uses_current_payload_with_stable_key_and_save
                 key
             );
             assert_eq!(
-                fresh.state_keeper().borrow_mut().consume_bytes("saved"),
+                fresh.state_store().consume_bytes("saved").unwrap(),
                 Some(vec![7])
             );
         } else {
@@ -2588,16 +2552,10 @@ fn lazy_fetch_rejects_destroyed_or_exclusively_borrowed_child_keeper() {
     .unwrap();
     let old = lazy.get_or_create(&0).unwrap();
     let snapshot = lazy.get();
-    let keeper = old.instance_keeper();
-    let borrowed = keeper.borrow_mut();
-    assert!(matches!(
-        lazy.get_or_create(&0),
-        Err(NavigationError::ChildUnavailable)
-    ));
+    let keeper = old.instance_store();
     assert!(Rc::ptr_eq(&snapshot, &lazy.get()));
-    drop(borrowed);
     assert!(Rc::ptr_eq(&old, &lazy.get_or_create(&0).unwrap()));
-    keeper.borrow_mut().destroy_all();
+    keeper.destroy_all().unwrap();
     assert!(matches!(
         lazy.get_or_create(&0),
         Err(NavigationError::ChildUnavailable)

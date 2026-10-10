@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::NavigationError;
 use decompose_rs::router::panels::*;
 use decompose_rs::*;
@@ -238,14 +239,14 @@ fn initial_hook_has_registered_provider_and_back_and_navigation_hooks_precede_co
     let out = order.clone();
     let source = nav.clone();
     let back = parent.back_handler();
-    let keeper = parent.state_keeper();
+    let keeper = parent.state_store();
     let options = PanelsOptions {
         handle_back_button: true,
         on_state_changed: Some(Rc::new(move |p: &Panels<u32, u32, u32>, old| {
             out.borrow_mut()
                 .push(if old.is_none() { "initial" } else { "hook" });
-            assert!(keeper.borrow().is_registered("DefaultChildPanels"));
-            assert!(keeper.borrow().save().unwrap().is_empty());
+            assert!(keeper.is_registered("DefaultChildPanels").unwrap());
+            assert!(keeper.save().unwrap().is_empty());
             if old.is_none() {
                 assert!(back.back());
                 source.activate_details(3);
@@ -348,14 +349,14 @@ fn persistent() -> PanelsOptions<u32, u32, u32> {
 }
 fn restored_root(
     saved: std::collections::BTreeMap<String, Vec<u8>>,
-    instances: Option<SharedInstances>,
+    instances: Option<InstanceStore>,
 ) -> DefaultComponentContext {
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    DefaultComponentContext::with_all(
+    DefaultComponentContext::with_stores(
         lifecycle,
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
-        instances.unwrap_or_else(|| Rc::new(RefCell::new(InstanceKeeper::new()))),
+        StateStore::from(StateKeeper::with_restored(saved)),
+        instances.unwrap_or_else(|| InstanceStore::from(InstanceKeeper::new())),
         SharedBack::new(),
     )
 }
@@ -378,11 +379,10 @@ fn whole_membership_codec_restores_mode_keys_and_nested_state() {
         .as_ref()
         .unwrap()
         .instance
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("count", || vec![23])
         .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert_eq!(&saved["DefaultChildPanels"][..4], b"DPN1");
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, None);
@@ -410,9 +410,9 @@ fn whole_membership_codec_restores_mode_keys_and_nested_state() {
             .as_ref()
             .unwrap()
             .instance
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("count"),
+            .state_store()
+            .consume_bytes("count")
+            .unwrap(),
         Some(vec![23])
     );
 }
@@ -442,7 +442,7 @@ fn two_role_codec_adapter_and_transient_save_skips_child_providers() {
         |_, c| c,
     )
     .unwrap();
-    assert!(!parent.state_keeper().borrow().save().unwrap().is_empty());
+    assert!(!parent.state_store().save().unwrap().is_empty());
     assert!(value.get().extra.is_none());
     let parent = root();
     let value = child_panels_without_extra(
@@ -458,11 +458,10 @@ fn two_role_codec_adapter_and_transient_save_skips_child_providers() {
         .get()
         .main
         .instance
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("panic", || panic!("transient provider called"))
         .unwrap();
-    assert!(parent.state_keeper().borrow().save().unwrap().is_empty());
+    assert!(parent.state_store().save().unwrap().is_empty());
 }
 
 type PanelView = decompose_rs::value::Value<
@@ -609,7 +608,7 @@ fn parent_lifecycle_bounds_every_resumed_panel_and_back_bridge() {
         before.extra.as_ref().unwrap(),
     ] {
         assert!(c.instance.lifecycle().state().is_destroyed());
-        assert!(c.instance.instance_keeper().borrow().is_destroyed());
+        assert!(c.instance.instance_store().is_destroyed().unwrap());
     }
     assert_eq!(parent.back_handler().handler_count(), 0);
     nav.set_panels(4, Some(5), Some(6));
@@ -789,13 +788,13 @@ fn constructor_hook_panic_restores_input_and_cleans_new_scopes() {
         initial(true, true, ChildPanelsMode::Triple),
         persistent(),
     );
-    let saved = original.state_keeper().borrow().save().unwrap();
+    let saved = original.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     let captured = Rc::new(RefCell::new(Vec::new()));
     let factory = || {
         let out = captured.clone();
         move |_: &u32, c: DefaultComponentContext| {
-            out.borrow_mut().push((c.lifecycle(), c.instance_keeper()));
+            out.borrow_mut().push((c.lifecycle(), c.instance_store()));
             c
         }
     };
@@ -816,10 +815,10 @@ fn constructor_hook_panic_restores_input_and_cleans_new_scopes() {
     }));
     for (l, i) in captured.borrow().iter() {
         assert!(l.state().is_destroyed());
-        assert!(i.borrow().is_destroyed());
+        assert!(i.is_destroyed().unwrap());
     }
     assert_eq!(parent.back_handler().handler_count(), 0);
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     let value = build(
         &parent,
         &PanelsNavigation::new(),
@@ -832,7 +831,7 @@ fn constructor_hook_panic_restores_input_and_cleans_new_scopes() {
 
 #[test]
 fn existing_retained_instance_identity_survives_hook_failure_and_retry() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored_root(Default::default(), Some(instances.clone()));
     let value = build(
         &parent,
@@ -841,14 +840,11 @@ fn existing_retained_instance_identity_survives_hook_failure_and_retry() {
         persistent(),
     );
     let old = value.get();
-    let scope = old.main.instance.instance_keeper();
-    let service = scope
-        .borrow_mut()
-        .get_or_create("service", || Rc::new(23))
-        .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let scope = old.main.instance.instance_store();
+    let service = scope.get_or_create("service", || Rc::new(23)).unwrap();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
-    assert!(!scope.borrow().is_destroyed());
+    assert!(!scope.is_destroyed().unwrap());
     let parent = restored_root(saved.clone(), Some(instances));
     assert!(panic_result(|| {
         let _ = child_panels(
@@ -864,22 +860,16 @@ fn existing_retained_instance_identity_survives_hook_failure_and_retry() {
             |_, c| c,
         );
     }));
-    assert!(!scope.borrow().is_destroyed());
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert!(!scope.is_destroyed().unwrap());
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     let value = build(
         &parent,
         &PanelsNavigation::new(),
         Panels::new(99),
         persistent(),
     );
-    assert!(Rc::ptr_eq(
-        &scope,
-        &value.get().main.instance.instance_keeper()
-    ));
-    let restored = scope
-        .borrow_mut()
-        .get_or_create("service", || Rc::new(99))
-        .unwrap();
+    assert!(scope.ptr_eq(&value.get().main.instance.instance_store()));
+    let restored = scope.get_or_create("service", || Rc::new(99)).unwrap();
     assert!(Rc::ptr_eq(&service, &restored));
 }
 
@@ -898,7 +888,7 @@ fn new_scope_factory_failure_preserves_committed_children_and_cleans_provisional
         |_, c| c,
         move |e, c| {
             if *e == 2 {
-                *out.borrow_mut() = Some((c.lifecycle(), c.instance_keeper()));
+                *out.borrow_mut() = Some((c.lifecycle(), c.instance_store()));
                 panic!("factory")
             }
             c
@@ -914,7 +904,7 @@ fn new_scope_factory_failure_preserves_committed_children_and_cleans_provisional
     assert!(value.get().extra.is_none());
     let (l, i) = captured.borrow().as_ref().unwrap().clone();
     assert!(l.state().is_destroyed());
-    assert!(i.borrow().is_destroyed());
+    assert!(i.is_destroyed().unwrap());
     nav.activate_extra(3);
     assert_eq!(value.get().extra.as_ref().unwrap().key, "child/1");
 }
@@ -976,7 +966,7 @@ fn provider_reservation_precedes_decoder_factory_and_initial_hook() {
         initial(false, false, ChildPanelsMode::Single),
         persistent(),
     );
-    let parent = restored_root(original.state_keeper().borrow().save().unwrap(), None);
+    let parent = restored_root(original.state_store().save().unwrap(), None);
     let count = Rc::new(Cell::new(0));
     let probe = Rc::new({
         let parent = parent.clone();
@@ -1038,11 +1028,10 @@ fn retained_type_conflict_returns_input_without_factory() {
         initial(true, true, ChildPanelsMode::Triple),
         persistent(),
     );
-    let saved = original.state_keeper().borrow().save().unwrap();
+    let saved = original.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     parent
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("DefaultChildPanels", || 23u32)
         .unwrap();
     assert!(matches!(
@@ -1057,7 +1046,7 @@ fn retained_type_conflict_returns_input_without_factory() {
         ),
         Err(NavigationError::Context(_))
     ));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
 }
 
 #[test]
@@ -1069,7 +1058,7 @@ fn codec_errors_preserve_input_and_serialize_errors_propagate() {
         initial(true, true, ChildPanelsMode::Triple),
         persistent(),
     );
-    let saved = original.state_keeper().borrow().save().unwrap();
+    let saved = original.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     let options = PanelsOptions {
         codec: Some(PanelsCodec::new(
@@ -1088,7 +1077,7 @@ fn codec_errors_preserve_input_and_serialize_errors_propagate() {
         |_, _| panic!("factory"),
     );
     assert!(matches!(result,Err(NavigationError::State(ref e)) if e=="decode"));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     let parent = root();
     let options = PanelsOptions {
         codec: Some(PanelsCodec::new(
@@ -1103,7 +1092,7 @@ fn codec_errors_preserve_input_and_serialize_errors_propagate() {
         initial(false, false, ChildPanelsMode::Single),
         options,
     );
-    assert!(parent.state_keeper().borrow().save().is_err());
+    assert!(parent.state_store().save().is_err());
 }
 
 #[test]
@@ -1123,8 +1112,7 @@ fn save_captures_membership_mode_keys_and_counter_before_provider_reentry() {
         .get()
         .main
         .instance
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("navigate", move || {
             if flag.replace(false) {
                 source.set_panels(9, None, None);
@@ -1133,7 +1121,7 @@ fn save_captures_membership_mode_keys_and_counter_before_provider_reentry() {
             vec![23]
         })
         .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert_eq!(*value.get().main.configuration, 9);
     let parent = restored_root(saved, None);
     let nav = PanelsNavigation::new();
@@ -1203,11 +1191,11 @@ fn custom_nonclone_context_services_reach_all_three_factories() {
         fn lifecycle(&self) -> LifecycleRegistry {
             self.delegate.lifecycle()
         }
-        fn state_keeper(&self) -> SharedKeeper {
-            self.delegate.state_keeper()
+        fn state_store(&self) -> StateStore {
+            self.delegate.state_store()
         }
-        fn instance_keeper(&self) -> SharedInstances {
-            self.delegate.instance_keeper()
+        fn instance_store(&self) -> InstanceStore {
+            self.delegate.instance_store()
         }
         fn back_handler(&self) -> SharedBack {
             self.delegate.back_handler()
@@ -1303,10 +1291,12 @@ fn every_mode_to_mode_transition_preserves_every_present_role_identity() {
             nav.set_mode(to);
             let p = value.get();
             assert!(Rc::ptr_eq(&old.main.instance, &p.main.instance));
-            assert!(Rc::ptr_eq(
-                &old.main.instance.instance_keeper(),
-                &p.main.instance.instance_keeper()
-            ));
+            assert!(
+                old.main
+                    .instance
+                    .instance_store()
+                    .ptr_eq(&p.main.instance.instance_store())
+            );
             assert_eq!(old.main.key, p.main.key);
             if d {
                 let (a, b) = (old.details.as_ref().unwrap(), p.details.as_ref().unwrap());
@@ -1357,7 +1347,7 @@ fn lifecycle_callback_panic_cleans_fresh_scopes_and_next_navigation_reconciles()
             c
         },
         move |_, c| {
-            *out.borrow_mut() = Some((c.lifecycle(), c.instance_keeper()));
+            *out.borrow_mut() = Some((c.lifecycle(), c.instance_store()));
             c
         },
         |_, c| c,
@@ -1368,7 +1358,7 @@ fn lifecycle_callback_panic_cleans_fresh_scopes_and_next_navigation_reconciles()
     assert!(value.get().details.is_none());
     let (l, i) = captured.borrow().as_ref().unwrap().clone();
     assert!(l.state().is_destroyed());
-    assert!(i.borrow().is_destroyed());
+    assert!(i.is_destroyed().unwrap());
     nav.activate_details(3);
     assert_eq!(*value.get().details.as_ref().unwrap().configuration, 3);
     assert_eq!(
@@ -1386,13 +1376,13 @@ fn initial_factory_failure_returns_restored_state_and_cleans_all_fresh_scopes() 
         initial(true, true, ChildPanelsMode::Triple),
         persistent(),
     );
-    let saved = original.state_keeper().borrow().save().unwrap();
+    let saved = original.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     let scopes = Rc::new(RefCell::new(Vec::new()));
     let factory = |fail: bool| {
         let out = scopes.clone();
         move |_: &u32, c: DefaultComponentContext| {
-            out.borrow_mut().push((c.lifecycle(), c.instance_keeper()));
+            out.borrow_mut().push((c.lifecycle(), c.instance_store()));
             assert!(!fail, "factory");
             c
         }
@@ -1410,9 +1400,9 @@ fn initial_factory_failure_returns_restored_state_and_cleans_all_fresh_scopes() 
     }));
     for (l, i) in scopes.borrow().iter() {
         assert!(l.state().is_destroyed());
-        assert!(i.borrow().is_destroyed());
+        assert!(i.is_destroyed().unwrap());
     }
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     assert_eq!(parent.back_handler().handler_count(), 0);
     assert!(
         build(
@@ -1436,7 +1426,7 @@ fn malformed_restoration_returns_exact_input_and_allows_same_key_retry() {
         initial(true, true, ChildPanelsMode::Triple),
         persistent(),
     );
-    let saved = original.state_keeper().borrow().save().unwrap();
+    let saved = original.state_store().save().unwrap();
     let mut invalid = saved.clone();
     invalid.get_mut("DefaultChildPanels").unwrap()[12] = 3;
     let parent = restored_root(invalid.clone(), None);
@@ -1452,12 +1442,12 @@ fn malformed_restoration_returns_exact_input_and_allows_same_key_retry() {
         ),
         Err(NavigationError::State(_))
     ));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), invalid);
+    assert_eq!(parent.state_store().save().unwrap(), invalid);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildPanels")
+            .unwrap()
     );
     let value = build(
         &parent,
@@ -1477,7 +1467,7 @@ fn next_key_exhaustion_reports_error_before_factory_and_keeps_current_state() {
         initial(true, true, ChildPanelsMode::Triple),
         persistent(),
     );
-    let mut saved = original.state_keeper().borrow().save().unwrap();
+    let mut saved = original.state_store().save().unwrap();
     saved.get_mut("DefaultChildPanels").unwrap()[4..12].copy_from_slice(&u64::MAX.to_le_bytes());
     let parent = restored_root(saved, None);
     let nav = PanelsNavigation::new();
@@ -1534,7 +1524,7 @@ fn initial_hook_parent_destroy_returns_destroyed_without_pumping_queued_events()
         Err(NavigationError::Destroyed)
     ));
     assert_eq!(parent.back_handler().handler_count(), 0);
-    assert!(parent.state_keeper().borrow().save().unwrap().is_empty());
+    assert!(parent.state_store().save().unwrap().is_empty());
 }
 
 #[test]
@@ -1613,7 +1603,7 @@ fn panels_restore_nested_stack_slot_and_pages_after_process_death() {
     .unwrap();
     value.get().main.instance.slot_nav.activate(99);
     let key = value.get().main.key.clone();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, None);
     let value = child_panels(
@@ -1701,7 +1691,7 @@ fn two_role_adapter_restores_authoritative_membership_and_mode() {
     nav.activate_details(2);
     nav.set_mode(ChildPanelsMode::Dual);
     let before = value.get();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, None);
     let value = child_panels_without_extra(
@@ -1734,7 +1724,7 @@ fn parent_destroy_during_factory_returns_destroyed_and_restored_input() {
         initial(true, true, ChildPanelsMode::Triple),
         persistent(),
     );
-    let saved = original.state_keeper().borrow().save().unwrap();
+    let saved = original.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     let life = parent.lifecycle();
     let result = child_panels(
@@ -1750,6 +1740,6 @@ fn parent_destroy_during_factory_returns_destroyed_and_restored_input() {
         |_, c| c,
     );
     assert!(matches!(result, Err(NavigationError::Destroyed)));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     assert_eq!(parent.back_handler().handler_count(), 0);
 }

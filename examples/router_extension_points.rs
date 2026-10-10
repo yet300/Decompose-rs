@@ -52,7 +52,7 @@ impl StackNavigator<Route> for AuditedNavigation {
 }
 
 fn open_details<N: StackNavigator<Route>>(navigation: &N) {
-    navigation.push_new(Route::Details(7));
+    navigation.push_new_or_panic(Route::Details(7));
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(*stack.get().active.configuration, Route::Details(7));
     context.lifecycle().destroy()?;
     assert_eq!(navigation.connections.get(), 0);
-    navigation.push(Route::Settings); // No connected receiver: discarded.
+    navigation.push_or_panic(Route::Settings); // No connected receiver: discarded.
     assert_eq!(*navigation.depths.borrow(), vec![1, 2]);
     println!("custom source through dyn NavigationSource: connected and cancelled");
     println!("generic navigator helpers, per-receiver completion and Back verified");

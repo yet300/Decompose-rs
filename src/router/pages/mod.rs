@@ -103,12 +103,29 @@ pub struct PagesOptions<C> {
     /// Optional lifecycle policy; defaults to selected and direct neighbours.
     pub page_status: Option<Rc<PageStatusPolicy<C>>>,
 }
+impl<C> PagesOptions<C> {
+    /// Deterministic, transient options with duplicates disabled. Reads no globals.
+    pub fn new() -> Self {
+        Self::with_config(&crate::DecomposeConfig::default())
+    }
+    /// Captures duplicate defaults from explicit configuration. Other option fields
+    /// retain their standard defaults and can be overridden after construction.
+    pub fn with_config(config: &crate::DecomposeConfig) -> Self {
+        Self {
+            key: "DefaultChildPages".into(),
+            handle_back_button: false,
+            allow_duplicates: config.duplicate_configurations_enabled,
+            codec: None,
+            page_status: None,
+        }
+    }
+}
 impl<C> Default for PagesOptions<C> {
     fn default() -> Self {
         Self {
             key: "DefaultChildPages".into(),
             handle_back_button: false,
-            allow_duplicates: crate::DecomposeSettings::current().duplicate_configurations_enabled,
+            allow_duplicates: false,
             codec: None,
             page_status: None,
         }

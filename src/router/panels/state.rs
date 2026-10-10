@@ -6,10 +6,10 @@ use std::{
     rc::Rc,
 };
 
-type Encode<MC, DC, EC> = dyn Fn(&MC, Option<&DC>, Option<&EC>) -> Result<Vec<u8>, String>;
-type Decode<MC, DC, EC> = dyn Fn(&[u8]) -> Result<(MC, Option<DC>, Option<EC>), String>;
-type EncodeState<MC, DC, EC> = dyn Fn(&Panels<MC, DC, EC>) -> Result<Vec<u8>, String>;
-type DecodeState<MC, DC, EC> = dyn Fn(&[u8]) -> Result<Panels<MC, DC, EC>, String>;
+type Encode<MC, DC, EC> = dyn Fn(&MC, Option<&DC>, Option<&EC>) -> Result<Vec<u8>, NavigationError>;
+type Decode<MC, DC, EC> = dyn Fn(&[u8]) -> Result<(MC, Option<DC>, Option<EC>), NavigationError>;
+type EncodeState<MC, DC, EC> = dyn Fn(&Panels<MC, DC, EC>) -> Result<Vec<u8>, NavigationError>;
+type DecodeState<MC, DC, EC> = dyn Fn(&[u8]) -> Result<Panels<MC, DC, EC>, NavigationError>;
 enum Callbacks<MC, DC, EC> {
     Configurations {
         encode: Rc<Encode<MC, DC, EC>>,
@@ -83,8 +83,10 @@ impl<MC, DC, EC> PanelsCodec<MC, DC, EC> {
     ) -> Self {
         Self {
             callbacks: Callbacks::Configurations {
-                encode: Rc::new(encode),
-                decode: Rc::new(decode),
+                encode: Rc::new(move |main, details, extra| {
+                    encode(main, details, extra).map_err(NavigationError::State)
+                }),
+                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
             },
             should_save: None,
             should_restore: None,
@@ -102,6 +104,36 @@ impl<MC, DC, EC> PanelsCodec<MC, DC, EC> {
     ) -> Self {
         Self {
             callbacks: Callbacks::State {
+                encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+            },
+            should_save: None,
+            should_restore: None,
+        }
+    }
+    /// Uses typed navigation errors, including `NavigationError::state_source`.
+    /// Callbacks are retained for future saves/restoration and must own captures.
+    pub fn new_fallible(
+        encode: impl Fn(&MC, Option<&DC>, Option<&EC>) -> Result<Vec<u8>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<(MC, Option<DC>, Option<EC>), NavigationError> + 'static,
+    ) -> Self {
+        Self {
+            callbacks: Callbacks::Configurations {
+                encode: Rc::new(encode),
+                decode: Rc::new(decode),
+            },
+            should_save: None,
+            should_restore: None,
+        }
+    }
+    /// Uses typed navigation errors, including `NavigationError::state_source`.
+    /// Callbacks are retained for future saves/restoration and must own captures.
+    pub fn new_state_fallible(
+        encode: impl Fn(&Panels<MC, DC, EC>) -> Result<Vec<u8>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Panels<MC, DC, EC>, NavigationError> + 'static,
+    ) -> Self {
+        Self {
+            callbacks: Callbacks::State {
                 encode: Rc::new(encode),
                 decode: Rc::new(decode),
             },
@@ -111,6 +143,22 @@ impl<MC, DC, EC> PanelsCodec<MC, DC, EC> {
     }
 }
 impl<MC, DC> PanelsCodec<MC, DC, Infallible> {
+    /// Main/Details callbacks with typed errors and no Extra type argument.
+    /// Stored callbacks must own their captures for future save/restore calls.
+    pub fn without_extra_fallible(
+        encode: impl Fn(&MC, Option<&DC>) -> Result<Vec<u8>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<(MC, Option<DC>), NavigationError> + 'static,
+    ) -> Self {
+        Self::new_fallible(
+            move |main, details, extra| {
+                if let Some(never) = extra {
+                    match *never {}
+                }
+                encode(main, details)
+            },
+            move |bytes| decode(bytes).map(|(main, details)| (main, details, None)),
+        )
+    }
     /// Adapts Main/Details callbacks with Extra uninhabited by type.
     pub fn without_extra(
         encode: impl Fn(&MC, Option<&DC>) -> Result<Vec<u8>, String> + 'static,
@@ -183,8 +231,7 @@ pub(super) fn encode<MC, DC, EC>(
             encode(&p.main, p.details.as_deref(), p.extra.as_deref())
         }
         Callbacks::State { encode, .. } => encode(p),
-    }
-    .map_err(NavigationError::State)?;
+    }?;
     let mut out = MAGIC.to_vec();
     out.extend_from_slice(&next.to_le_bytes());
     out.push(match p.mode {
@@ -270,7 +317,7 @@ pub(super) fn decode<MC, DC, EC>(
     // Structural validation, including every nested frame, precedes user decoding.
     let configurations = match &codec.callbacks {
         Callbacks::Configurations { decode, .. } => {
-            let (main, details, extra) = decode(payload).map_err(NavigationError::State)?;
+            let (main, details, extra) = decode(payload)?;
             Panels {
                 main: Rc::new(main),
                 details: details.map(Rc::new),
@@ -278,7 +325,7 @@ pub(super) fn decode<MC, DC, EC>(
                 mode,
             }
         }
-        Callbacks::State { decode, .. } => decode(payload).map_err(NavigationError::State)?,
+        Callbacks::State { decode, .. } => decode(payload)?,
     };
     if configurations.details.is_some() != (flags & 1 != 0)
         || configurations.extra.is_some() != (flags & 2 != 0)

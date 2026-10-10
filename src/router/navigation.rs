@@ -1,6 +1,87 @@
 use super::NavigationError;
 use crate::{router::children::NavigationSource, value::Subscription};
 use std::rc::Rc;
+type ReceiverResults<R> = Rc<std::cell::RefCell<Option<Vec<Result<R, NavigationError>>>>>;
+
+/// Completed receiver results, or accepted FIFO work whose completion is deferred.
+/// A broadcast can update several routers; it is not an all-or-nothing transaction.
+#[must_use = "inspect navigation errors and retain any pending receipt"]
+pub enum NavigationOutcome<R> {
+    /// All completion callbacks have been released. No receivers yields an empty vector.
+    Completed(Vec<R>),
+    /// Work has been accepted exactly once. Do not resubmit it; inspect the receipt
+    /// after the enclosing dispatch/notification finishes.
+    Pending(NavigationReceipt<R>),
+}
+
+/// Owned completion observation for deferred synchronous navigation.
+/// Dropping this receipt does not cancel an accepted event. No runtime is needed.
+/// A custom receiver retaining an event also retains its completion capability,
+/// so the receipt remains pending until that capability is released.
+#[must_use = "dropping a receipt discards eventual results, not the accepted event"]
+pub struct NavigationReceipt<R> {
+    results: ReceiverResults<R>,
+    pending: std::rc::Weak<()>,
+}
+
+impl<R> NavigationReceipt<R> {
+    /// Whether a receiver/event still owns a completion callback.
+    pub fn is_pending(&self) -> bool {
+        self.pending.strong_count() != 0
+    }
+
+    /// Takes results once all callbacks are released. Returns `None` while
+    /// pending or after results have been taken. Returns the first receiver error;
+    /// successful receivers have already committed and are not rolled back.
+    pub fn take_results(&self) -> Option<Result<Vec<R>, NavigationError>> {
+        if self.is_pending() {
+            return None;
+        }
+        self.results
+            .borrow_mut()
+            .take()
+            .map(|results| results.into_iter().collect())
+    }
+}
+
+impl<R> std::fmt::Debug for NavigationReceipt<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NavigationReceipt")
+            .field("pending", &self.is_pending())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R> std::fmt::Debug for NavigationOutcome<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed(results) => f.debug_tuple("Completed").field(&results.len()).finish(),
+            Self::Pending(receipt) => f.debug_tuple("Pending").field(receipt).finish(),
+        }
+    }
+}
+
+pub(crate) fn collect_results<R: 'static>(
+    dispatch: impl FnOnce(Box<dyn Fn(Result<R, NavigationError>)>),
+) -> Result<NavigationOutcome<R>, NavigationError> {
+    let results = Rc::new(std::cell::RefCell::new(Some(Vec::new())));
+    let output = results.clone();
+    let capability = Rc::new(());
+    let receipt = NavigationReceipt {
+        results,
+        pending: Rc::downgrade(&capability),
+    };
+    dispatch(Box::new(move |result| {
+        let _keep_alive = &capability;
+        if let Some(results) = output.borrow_mut().as_mut() {
+            results.push(result);
+        }
+    }));
+    match receipt.take_results() {
+        Some(result) => result.map(NavigationOutcome::Completed),
+        None => Ok(NavigationOutcome::Pending(receipt)),
+    }
+}
 
 /// A shared state transformation and per-receiver completion callback.
 ///
@@ -19,6 +100,15 @@ impl<S, R> Clone for NavigationEvent<S, R> {
     }
 }
 impl<S, R> NavigationEvent<S, R> {
+    /// Creates an event that edits owned receiver state through `&mut S`.
+    /// Each receiver owns its input; no payload Clone or shared mutable borrow
+    /// is needed. The edit is retained with the event for possible FIFO delivery.
+    pub fn modify(edit: impl Fn(&mut S) + 'static) -> Self {
+        Self::new(move |mut state| {
+            edit(&mut state);
+            state
+        })
+    }
     /// Creates an event with no completion action, including on errors.
     pub fn new(transformer: impl Fn(S) -> S + 'static) -> Self {
         Self::with_completion(transformer, |_| {})

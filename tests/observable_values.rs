@@ -1,3 +1,4 @@
+#![allow(clippy::redundant_clone)]
 use decompose_rs::value::{MutableValue, ObserveLifecycleMode, Subscription, Value};
 use decompose_rs::{LifecycleRegistry, LifecycleState};
 use std::cell::{Cell, RefCell};
@@ -12,10 +13,14 @@ fn identity_cas_rejects_equal_payload_and_emits_same_snapshot() {
     let calls = Rc::new(Cell::new(0));
     let count = calls.clone();
     let _token = value.value().subscribe(move |_| count.set(count.get() + 1));
-    assert!(!value.compare_and_set(&Rc::new(Payload(1)), Rc::new(Payload(2))));
+    assert!(
+        value
+            .compare_exchange(&Rc::new(Payload(1)), Rc::new(Payload(2)))
+            .is_err()
+    );
     assert_eq!(calls.get(), 1);
     assert!(Rc::ptr_eq(&value.get(), &initial));
-    assert!(value.compare_and_set(&initial, initial.clone()));
+    assert!(value.compare_exchange(&initial, initial.clone()).is_ok());
     assert_eq!(calls.get(), 2);
     assert_eq!(value.get().0, 1);
 }
@@ -26,7 +31,7 @@ fn update_retries_stale_snapshot_and_returns_exact_committed_identity() {
     let writer = value.clone();
     let attempts = Cell::new(0);
     let committed = Rc::new(11);
-    let returned = value.update_and_get(|old| {
+    let returned = value.update_rc_and_get(|old| {
         attempts.set(attempts.get() + 1);
         if *old == 0 {
             writer.set(10);
@@ -44,11 +49,14 @@ fn update_retries_stale_snapshot_and_returns_exact_committed_identity() {
         }
     });
     let next = Rc::new(12);
-    assert!(Rc::ptr_eq(&value.update_and_get(|_| next.clone()), &next));
+    assert!(Rc::ptr_eq(
+        &value.update_rc_and_get(|_| next.clone()),
+        &next
+    ));
     assert_eq!(*value.get(), 13);
     let old = value.get();
-    assert!(Rc::ptr_eq(&value.get_and_update(|_| Rc::new(14)), &old));
-    value.update(|old| Rc::new(*old + 1));
+    assert!(Rc::ptr_eq(&value.get_and_update_rc(|_| Rc::new(14)), &old));
+    value.update_rc(|old| Rc::new(*old + 1));
     assert_eq!(*value.get(), 15);
 }
 
@@ -57,14 +65,14 @@ fn transformer_panic_keeps_reentrant_effects_and_no_payload_bounds() {
     struct Payload(i32);
     let value = MutableValue::new(Payload(0));
     assert!(
-        catch_unwind(AssertUnwindSafe(|| value.update(|_| {
+        catch_unwind(AssertUnwindSafe(|| value.update_rc(|_| {
             value.set(Payload(7));
             panic!("transformer");
         })))
         .is_err()
     );
     assert_eq!(value.get().0, 7);
-    value.update(|old| Rc::new(Payload(old.0 + 1)));
+    value.update_rc(|old| Rc::new(Payload(old.0 + 1)));
     assert_eq!(value.get().0, 8);
 }
 
@@ -382,7 +390,7 @@ fn replaced_mapped_payload_drops_without_a_cache_borrow() {
         OnDrop(Some(Box::new(move || {
             output.set(output.get() + 1);
             if initial {
-                writer.update(|old| Rc::new(*old + 1));
+                writer.update_rc(|old| Rc::new(*old + 1));
             }
         })))
     });
@@ -404,10 +412,14 @@ fn rejected_cas_and_discarded_update_candidates_drop_outside_source_borrow() {
         writer.set(OnDrop(None));
         output.set(output.get() + 1);
     }))));
-    assert!(!value.compare_and_set(&Rc::new(OnDrop(None)), rejected));
+    assert!(
+        value
+            .compare_exchange(&Rc::new(OnDrop(None)), rejected)
+            .is_err()
+    );
     assert_eq!(count.get(), 1);
     let mut attempts = 0;
-    value.update(|_| {
+    value.update_rc(|_| {
         attempts += 1;
         if attempts == 1 {
             value.set(OnDrop(None));
@@ -437,7 +449,7 @@ fn mapped_reentrant_observation_and_updates_deliver_newer_cache() {
     let out = seen.clone();
     let mapped = value.value().map(move |input| {
         if *input == 1 {
-            writer.update(|_| Rc::new(2));
+            writer.update_rc(|_| Rc::new(2));
             let mapped = reader.borrow().as_ref().unwrap().clone();
             assert_eq!(*mapped.get(), 20);
             let out = out.clone();

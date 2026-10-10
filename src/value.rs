@@ -1,4 +1,10 @@
 //! Synchronous, single-threaded observable state with shared snapshots.
+//!
+//! Use [`Value::get_cloned`] for owned/Copy payloads and [`Value::with`] for
+//! immediate borrowed reads. Both release internal borrows before user code.
+//! [`MutableValue::modify`] edits a cloned payload and publishes a new snapshot;
+//! existing snapshots remain immutable. Stored observers/mappers need owned
+//! captures because the source can outlive the registration call.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -57,9 +63,39 @@ impl<T> Value<T> {
             ValueSource::Derived(source) => source.get(),
         }
     }
+
+    /// Clones the current payload (copies it when `T: Copy`).
+    pub fn get_cloned(&self) -> T
+    where
+        T: Clone,
+    {
+        self.with(Clone::clone)
+    }
+
+    /// Reads one snapshot through a short-lived reference. The callback may
+    /// borrow stack data or reenter the source; no `RefCell` guard is held.
+    pub fn with<R>(&self, read: impl FnOnce(&T) -> R) -> R {
+        read(&self.get())
+    }
 }
 
 impl<T: 'static> Value<T> {
+    /// Observes payload references with the same immediate replay as `subscribe`.
+    /// The stored callback must own its captures; the payload reference is
+    /// valid only for each invocation.
+    pub fn subscribe_ref(&self, callback: impl Fn(&T) + 'static) -> Subscription {
+        self.subscribe(move |snapshot| callback(&snapshot))
+    }
+
+    /// Observes owned payloads, cloning once per delivery (including replay).
+    /// The callback is retained by the source and must own its captures.
+    pub fn subscribe_cloned(&self, callback: impl Fn(T) + 'static) -> Subscription
+    where
+        T: Clone,
+    {
+        self.subscribe_ref(move |value| callback(value.clone()))
+    }
+
     /// Registers an observer and synchronously replays the latest snapshot.
     ///
     /// Replay repeats if the callback changes the source, until it catches up.
@@ -190,6 +226,35 @@ impl<T> MutableValue<T> {
         self.source.current.borrow().clone()
     }
 
+    /// Clones the current payload, without requiring an explicit `Rc` dereference.
+    pub fn get_cloned(&self) -> T
+    where
+        T: Clone,
+    {
+        self.with(Clone::clone)
+    }
+
+    /// Reads an immutable snapshot without holding an internal borrow while
+    /// invoking user code. The callback may borrow local data.
+    pub fn with<R>(&self, read: impl FnOnce(&T) -> R) -> R {
+        read(&self.get())
+    }
+
+    /// Edits a cloned payload, publishing a new immutable snapshot on success.
+    /// Retries if the callback or `Clone` reentrantly changes the source. The
+    /// callback may borrow stack data and must tolerate repeated invocation.
+    /// A callback panic leaves its uncommitted edit unpublished.
+    pub fn modify(&self, mut edit: impl FnMut(&mut T))
+    where
+        T: Clone,
+    {
+        self.update_pair(|previous| {
+            let mut next = (*previous).clone();
+            edit(&mut next);
+            Rc::new(next)
+        });
+    }
+
     /// Replaces the current payload and notifies observers.
     pub fn set(&self, value: T) {
         self.set_rc(Rc::new(value));
@@ -206,36 +271,41 @@ impl<T> MutableValue<T> {
         self.emit(previous);
     }
 
-    /// Commits `new` only if `expected` is the current `Rc` identity.
-    ///
-    /// A successful same-reference assignment still notifies observers.
-    pub fn compare_and_set(&self, expected: &Rc<T>, new: Rc<T>) -> bool {
+    /// Exchanges snapshots by identity, returning the predecessor on success
+    /// or the current snapshot on failure. Synchronous and single-threaded;
+    /// notifications may reenter after the exchange has committed.
+    pub fn compare_exchange(&self, expected: &Rc<T>, new: Rc<T>) -> Result<Rc<T>, Rc<T>> {
+        let previous = self.exchange(expected, new)?;
+        self.emit(previous.clone());
+        Ok(previous)
+    }
+
+    fn exchange(&self, expected: &Rc<T>, new: Rc<T>) -> Result<Rc<T>, Rc<T>> {
         let previous = {
             let mut current = self.source.current.borrow_mut();
             if !Rc::ptr_eq(&current, expected) {
-                return false;
+                return Err(current.clone());
             }
             std::mem::replace(&mut *current, new)
         };
-        self.emit(previous);
-        true
+        Ok(previous)
     }
 
-    /// Updates from a snapshot, retrying after reentrant mutation.
-    /// The transformer may run more than once, and receives shared snapshots.
-    pub fn update(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) {
+    /// Transforms shared snapshots, retrying reentrant writes. The borrowed
+    /// callback may run more than once; payloads need neither Clone nor Eq.
+    pub fn update_rc(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) {
         self.update_pair(transformer);
     }
 
-    /// Returns the exact successfully installed snapshot, even if an observer
-    /// replaces it before this method returns. The transformer may be retried.
-    pub fn update_and_get(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) -> Rc<T> {
+    /// Returns the exact committed snapshot, even if notification replaces it.
+    /// The borrowed transformer may be retried after reentrant writes.
+    pub fn update_rc_and_get(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) -> Rc<T> {
         self.update_pair(transformer).1
     }
 
-    /// Returns the predecessor of the successful update. The transformer may
-    /// run repeatedly if it reentrantly changes the source.
-    pub fn get_and_update(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) -> Rc<T> {
+    /// Returns the predecessor of the successful commit. The borrowed
+    /// transformer retries if it reentrantly changes the current identity.
+    pub fn get_and_update_rc(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) -> Rc<T> {
         self.update_pair(transformer).0
     }
 
@@ -243,8 +313,12 @@ impl<T> MutableValue<T> {
         loop {
             let previous = self.get();
             let next = transformer(previous.clone());
-            if self.compare_and_set(&previous, next.clone()) {
-                return (previous, next);
+            match self.exchange(&previous, next.clone()) {
+                Ok(_) => {
+                    self.emit(previous.clone());
+                    return (previous, next);
+                }
+                Err(_) => continue,
             }
         }
     }
@@ -334,6 +408,8 @@ impl Subscription {
     /// when the observer needs to refer back to its source.
     /// A lifecycle registration instead retains its binding until an explicit
     /// lifecycle destruction; dropping external handles does not release it.
+    /// This is leak-by-design when destruction never arrives or captures form
+    /// a strong ownership cycle. Prefer retaining the RAII token.
     pub fn detach(self) {
         let cancellation = self.cancellation.borrow_mut().take();
         let detachment = self.detachment.borrow_mut().take();

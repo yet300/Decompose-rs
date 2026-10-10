@@ -36,9 +36,13 @@
 //! for attribution. This project has no official upstream affiliation.
 //! [`StateSnapshot`] supports owned memory-only navigation recreation;
 //! standard codecs can skip saves and decline validated restoration.
-//! [`DecomposeSettings`] controls defaults and typed diagnostics on the current
-//! thread; [`TestComponentContext`] supplies a public lifecycle/recreation harness.
+//! [`DecomposeConfig`] carries explicit duplicate policy and diagnostics;
+//! [`TestComponentContext`] supplies a public lifecycle/recreation harness.
 //! `docs/COMPATIBILITY.md` records Rust adaptations and excluded integrations.
+
+// Router compatibility forwarding uses deprecated panicking aliases until
+// their callers migrate to try_* / *_or_panic.
+#![allow(deprecated)]
 
 mod child;
 mod context;
@@ -55,9 +59,10 @@ pub mod value;
 
 pub use context::{
     ComponentContext, ContextFactory, ContextParts, DEFAULT_BACK_PRIORITY, DefaultComponentContext,
-    MANUAL_DESTROY_PANIC_MESSAGE, SharedInstances, SharedKeeper,
+    InstanceAccessError, InstanceStore, MANUAL_DESTROY_PANIC_MESSAGE, StateAccessError, StateStore,
 };
-pub use error::{DecomposeError, DispatchInProgress};
+pub(crate) use context::{SharedInstances, SharedKeeper};
+pub use error::{DecomposeError, DispatchInProgress, ErrorSource};
 pub use essenty_back_handler::{BackError, BackEvent, BackHandle, BackPhase, GesturePosition};
 pub use essenty_instance_keeper::{InstanceKeeper, InstanceKeeperError};
 pub use essenty_lifecycle::{LifecycleError, LifecycleRegistry, LifecycleState};
@@ -67,5 +72,5 @@ pub use shared_back::SharedBack;
 pub use state::{StateKeeper, StateSnapshot};
 pub mod settings;
 pub mod test_utils;
-pub use settings::{DecomposeDiagnostic, DecomposeSettings, DiagnosticOperation};
+pub use settings::{DecomposeConfig, DecomposeDiagnostic, DiagnosticOperation};
 pub use test_utils::TestComponentContext;

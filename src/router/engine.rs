@@ -316,6 +316,7 @@ impl Drop for Construction {
 
 struct Engine<Ctx, C, T, M: Model<C, T>> {
     parent: LifecycleRegistry,
+    config: Option<crate::DecomposeConfig>,
     parent_state: Weak<RefCell<StateKeeper>>,
     back: SharedBack,
     retained: Rc<RetainedNavigation>,
@@ -714,7 +715,14 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                 self.0.set(false);
                 if std::thread::panicking() {
                     let abandoned = std::mem::take(&mut *self.1.borrow_mut());
-                    drop(abandoned);
+                    // Abandoned FIFO work must report failure so pending
+                    // receipts observe Err instead of an empty Ok. User
+                    // completions may panic; never abort an active unwind.
+                    for queued in abandoned {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            (queued.event.completion)(Err(NavigationError::ChildUnavailable));
+                        }));
+                    }
                 }
             }
         }
@@ -736,7 +744,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                 new_stack: self.clone_navigation_state(),
             });
             if diagnose && let Err(error) = &result {
-                report_navigation_error(operation, &self.key, error);
+                report_navigation_error(self.config.as_ref(), operation, &self.key, error);
             }
             (event.completion)(result);
             if self.destroyed.get() {
@@ -885,7 +893,12 @@ where
     let diagnostic_key = key.clone();
     let result = build_with_subscriber_inner(context, subscribe, initial, key, model, factory);
     if let Err(error) = &result {
-        report_navigation_error(DiagnosticOperation::Construction, &diagnostic_key, error);
+        report_navigation_error(
+            context.configuration().as_ref(),
+            DiagnosticOperation::Construction,
+            &diagnostic_key,
+            error,
+        );
     }
     result
 }
@@ -907,7 +920,7 @@ where
     if context.lifecycle().state().is_destroyed() {
         return Err(NavigationError::Destroyed);
     }
-    let parent_state = context.state_keeper();
+    let parent_state = context.state_store().inner;
     if parent_state.borrow().is_registered(&key) {
         return Err(DecomposeError::DuplicateKey { key }.into());
     }
@@ -928,7 +941,7 @@ where
     let restored_bytes = parent_state.borrow_mut().consume_bytes(&key);
     let restored_memory = parent_state.borrow_mut().consume_memory(&key);
     let memory_navigation = parent_state.borrow().memory_navigation(&key);
-    let instances = context.instance_keeper();
+    let instances = context.instance_store().inner;
     let mut construction = Construction {
         state: parent_state.clone(),
         instances: instances.clone(),
@@ -1064,6 +1077,7 @@ where
         parent_state: Rc::downgrade(&parent_state),
         back: context.back_handler(),
         retained,
+        config: context.configuration(),
         context_factory: context.context_factory(),
         child_factory: Rc::new(factory),
         key,
@@ -1146,7 +1160,12 @@ where
         .borrow_mut()
         .replace_reserved(&engine.key, move || {
             provider.save().map_err(|error| {
-                report_navigation_error(DiagnosticOperation::Save, &provider.key, &error);
+                report_navigation_error(
+                    provider.config.as_ref(),
+                    DiagnosticOperation::Save,
+                    &provider.key,
+                    &error,
+                );
                 error.to_string()
             })
         })
@@ -1156,7 +1175,12 @@ where
         .borrow_mut()
         .add_snapshot_provider(&engine.key, move || {
             provider.save_snapshot().map_err(|error| {
-                report_navigation_error(DiagnosticOperation::Save, &provider.key, &error);
+                report_navigation_error(
+                    provider.config.as_ref(),
+                    DiagnosticOperation::Save,
+                    &provider.key,
+                    &error,
+                );
                 error.to_string()
             })
         });

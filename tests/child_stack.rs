@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::stack::*;
 use decompose_rs::*;
 use std::{cell::RefCell, rc::Rc};
@@ -41,9 +42,9 @@ fn stack_preserves_survivors_and_destroys_removed_snapshots() {
         second
             .active
             .instance
-            .instance_keeper()
-            .borrow()
+            .instance_store()
             .is_destroyed()
+            .unwrap()
     );
 }
 
@@ -173,9 +174,9 @@ fn codec() -> StackCodec<u32> {
 
 #[test]
 fn persistent_stack_restores_order_child_state_keys_and_retained_instances() {
-    let retained = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let retained = InstanceStore::from(InstanceKeeper::new());
     let old_root =
-        DefaultComponentContext::with_instance_keeper(root().lifecycle(), retained.clone());
+        DefaultComponentContext::with_instance_store(root().lifecycle(), retained.clone());
     let navigation = StackNavigation::new();
     let options = StackOptions {
         codec: Some(codec()),
@@ -186,22 +187,20 @@ fn persistent_stack_restores_order_child_state_keys_and_retained_instances() {
     let service = before
         .active
         .instance
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("service", || 5u32)
         .unwrap();
     before
         .active
         .instance
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("counter", || vec![9])
         .unwrap();
-    let saved = old_root.state_keeper().borrow().save().unwrap();
+    let saved = old_root.state_store().save().unwrap();
     old_root.lifecycle().destroy().unwrap();
-    let restored = DefaultComponentContext::with_all(
+    let restored = DefaultComponentContext::with_stores(
         root().lifecycle(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved.clone()))),
+        StateStore::from(StateKeeper::with_restored(saved.clone())),
         retained.clone(),
         SharedBack::new(),
     );
@@ -230,8 +229,7 @@ fn persistent_stack_restores_order_child_state_keys_and_retained_instances() {
             .get()
             .active
             .instance
-            .instance_keeper()
-            .borrow_mut()
+            .instance_store()
             .get_or_create("service", || 99u32)
             .unwrap()
     ));
@@ -240,16 +238,16 @@ fn persistent_stack_restores_order_child_state_keys_and_retained_instances() {
             .get()
             .active
             .instance
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("counter"),
+            .state_store()
+            .consume_bytes("counter")
+            .unwrap(),
         Some(vec![9])
     );
     nav.push(3);
     assert_ne!(after.get().active.key, before.active.key);
-    let fresh = DefaultComponentContext::with_state_keeper(
+    let fresh = DefaultComponentContext::with_state_store(
         root().lifecycle(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let options = StackOptions {
         codec: Some(codec()),
@@ -269,8 +267,7 @@ fn persistent_stack_restores_order_child_state_keys_and_retained_instances() {
             .get()
             .active
             .instance
-            .instance_keeper()
-            .borrow_mut()
+            .instance_store()
             .get_or_create("service", || 99u32)
             .unwrap()
     ));
@@ -291,11 +288,11 @@ fn corrupt_saved_key_counter_is_rejected_without_consuming_state() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let mut saved = root.state_keeper().borrow().save().unwrap();
+    let mut saved = root.state_store().save().unwrap();
     saved.get_mut("DefaultChildStack").unwrap()[4..12].copy_from_slice(&0u64.to_le_bytes());
-    let restored = DefaultComponentContext::with_state_keeper(
+    let restored = DefaultComponentContext::with_state_store(
         self::root().lifecycle(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved.clone()))),
+        StateStore::from(StateKeeper::with_restored(saved.clone())),
     );
     let options = StackOptions {
         codec: Some(codec()),
@@ -311,8 +308,8 @@ fn corrupt_saved_key_counter_is_rejected_without_consuming_state() {
         )
         .is_err()
     );
-    assert_eq!(restored.state_keeper().borrow().save().unwrap(), saved);
-    assert!(restored.instance_keeper().borrow().is_empty());
+    assert_eq!(restored.state_store().save().unwrap(), saved);
+    assert!(restored.instance_store().is_empty().unwrap());
 }
 
 #[test]
@@ -375,10 +372,10 @@ fn factory_panic_during_initialization_rolls_back_restored_bytes_and_observers()
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = root.state_keeper().borrow().save().unwrap();
-    let restored = DefaultComponentContext::with_state_keeper(
+    let saved = root.state_store().save().unwrap();
+    let restored = DefaultComponentContext::with_state_store(
         self::root().lifecycle(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved.clone()))),
+        StateStore::from(StateKeeper::with_restored(saved.clone())),
     );
     let before = restored.lifecycle().subscriber_count();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -395,8 +392,8 @@ fn factory_panic_during_initialization_rolls_back_restored_bytes_and_observers()
         )
     }));
     assert!(outcome.is_err());
-    assert_eq!(restored.state_keeper().borrow().save().unwrap(), saved);
-    assert!(restored.instance_keeper().borrow().is_empty());
+    assert_eq!(restored.state_store().save().unwrap(), saved);
+    assert!(restored.instance_store().is_empty().unwrap());
     assert_eq!(restored.lifecycle().subscriber_count(), before);
     assert_eq!(restored.back_handler().handler_count(), 0);
 }
@@ -420,8 +417,10 @@ fn codec_failure_surfaces_as_statekeeper_encode_error() {
     )
     .unwrap();
     assert!(matches!(
-        root.state_keeper().borrow().save(),
-        Err(StateKeeperError::Encode { .. })
+        root.state_store().save(),
+        Err(decompose_rs::StateAccessError::Keeper(
+            StateKeeperError::Encode { .. }
+        ))
     ));
 }
 
@@ -496,8 +495,7 @@ fn panic_in_later_factory_releases_prepared_retained_services() {
             }
             if *config == 2 {
                 let drops = peer.clone();
-                ctx.instance_keeper()
-                    .borrow_mut()
+                ctx.instance_store()
                     .get_or_create("service", || Service(drops))
                     .unwrap();
             }
@@ -581,21 +579,21 @@ fn stack_key_is_reserved_before_a_factory_can_create_another_stack() {
 
 #[test]
 fn earlier_saved_snapshot_does_not_reuse_a_removed_childs_retained_scope() {
-    let retained = Rc::new(RefCell::new(InstanceKeeper::new()));
-    let root = DefaultComponentContext::with_instance_keeper(root().lifecycle(), retained.clone());
+    let retained = InstanceStore::from(InstanceKeeper::new());
+    let root = DefaultComponentContext::with_instance_store(root().lifecycle(), retained.clone());
     let nav = StackNavigation::new();
     let options = StackOptions {
         codec: Some(codec()),
         ..StackOptions::default()
     };
     let stack = child_stack(&root, &nav, vec![1u32], options, |_, ctx| ctx).unwrap();
-    let saved = root.state_keeper().borrow().save().unwrap();
+    let saved = root.state_store().save().unwrap();
     nav.push(2);
-    let removed = stack.get().active.instance.instance_keeper();
+    let removed = stack.get().active.instance.instance_store();
     root.lifecycle().destroy().unwrap();
-    let restored = DefaultComponentContext::with_all(
+    let restored = DefaultComponentContext::with_stores(
         self::root().lifecycle(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
         retained,
         SharedBack::new(),
     );
@@ -605,12 +603,9 @@ fn earlier_saved_snapshot_does_not_reuse_a_removed_childs_retained_scope() {
         ..StackOptions::default()
     };
     let stack = child_stack(&restored, &nav, vec![99], options, |_, ctx| ctx).unwrap();
-    assert!(removed.borrow().is_destroyed());
+    assert!(removed.is_destroyed().unwrap());
     nav.push(3);
-    assert!(!Rc::ptr_eq(
-        &removed,
-        &stack.get().active.instance.instance_keeper()
-    ));
+    assert!(!removed.ptr_eq(&stack.get().active.instance.instance_store()));
 }
 
 #[test]
@@ -631,9 +626,9 @@ fn destroying_parent_in_initial_factory_aborts_construction() {
     assert_eq!(root.back_handler().handler_count(), 0);
     assert!(
         !root
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildStack")
+            .unwrap()
     );
 }
 
@@ -661,13 +656,13 @@ fn back_enabled_state_is_ready_when_a_value_observer_runs() {
 
 #[test]
 fn parent_destroyed_while_old_active_pauses_releases_uncommitted_children() {
-    let root = DefaultComponentContext::with_instance_keeper(
+    let root = DefaultComponentContext::with_instance_store(
         root().lifecycle(),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let nav = StackNavigation::new();
     let parent = root.lifecycle();
-    let created = Rc::new(RefCell::new(None::<SharedInstances>));
+    let created = Rc::new(RefCell::new(None::<InstanceStore>));
     let peer = created.clone();
     let stack = child_stack(
         &root,
@@ -682,7 +677,7 @@ fn parent_destroyed_while_old_active_pauses_releases_uncommitted_children() {
                     .do_on_pause(move || parent.destroy().unwrap())
                     .detach();
             } else {
-                *peer.borrow_mut() = Some(ctx.instance_keeper());
+                *peer.borrow_mut() = Some(ctx.instance_store());
             }
             ctx
         },
@@ -701,7 +696,7 @@ fn parent_destroyed_while_old_active_pauses_releases_uncommitted_children() {
         &*outcome.borrow(),
         Some(Err(NavigationError::Destroyed))
     ));
-    assert!(created.borrow().as_ref().unwrap().borrow().is_destroyed());
+    assert!(created.borrow().as_ref().unwrap().is_destroyed().unwrap());
     assert_eq!(*stack.get().active.configuration, 1);
     assert_eq!(root.back_handler().handler_count(), 0);
 }
@@ -727,9 +722,9 @@ fn initial_resume_destroying_parent_is_a_construction_error() {
     assert!(matches!(result, Err(NavigationError::Destroyed)));
     assert!(
         !root
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildStack")
+            .unwrap()
     );
     assert_eq!(root.back_handler().handler_count(), 0);
 }
@@ -758,11 +753,11 @@ fn panicking_navigation_queued_by_initial_factory_rolls_back_constructor() {
     assert!(outcome.is_err());
     assert!(
         !root
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildStack")
+            .unwrap()
     );
-    assert!(root.instance_keeper().borrow().is_empty());
+    assert!(root.instance_store().is_empty().unwrap());
     assert_eq!(root.back_handler().handler_count(), 0);
 }
 
@@ -776,11 +771,11 @@ fn custom_nonclone_context_and_configuration_work_through_three_stacks() {
         fn lifecycle(&self) -> LifecycleRegistry {
             self.base.lifecycle()
         }
-        fn state_keeper(&self) -> SharedKeeper {
-            self.base.state_keeper()
+        fn state_store(&self) -> StateStore {
+            self.base.state_store()
         }
-        fn instance_keeper(&self) -> SharedInstances {
-            self.base.instance_keeper()
+        fn instance_store(&self) -> InstanceStore {
+            self.base.instance_store()
         }
         fn back_handler(&self) -> SharedBack {
             self.base.back_handler()
@@ -876,8 +871,7 @@ fn saves_use_one_membership_snapshot_even_when_a_provider_navigates() {
         if *config == 1 {
             let nav = source.clone();
             let once = once.clone();
-            ctx.state_keeper()
-                .borrow_mut()
+            ctx.state_store()
                 .register("state", move || {
                     if once.replace(false) {
                         nav.replace_current(2);
@@ -890,11 +884,11 @@ fn saves_use_one_membership_snapshot_even_when_a_provider_navigates() {
     })
     .unwrap();
     let original_key = stack.get().active.key.clone();
-    let saved = root.state_keeper().borrow().save().unwrap();
+    let saved = root.state_store().save().unwrap();
     assert_eq!(*stack.get().active.configuration, 2);
-    let restored = DefaultComponentContext::with_state_keeper(
+    let restored = DefaultComponentContext::with_state_store(
         self::root().lifecycle(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let options = StackOptions {
         codec: Some(codec()),
@@ -915,9 +909,9 @@ fn saves_use_one_membership_snapshot_even_when_a_provider_navigates() {
             .get()
             .active
             .instance
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("state"),
+            .state_store()
+            .consume_bytes("state")
+            .unwrap(),
         Some(vec![11])
     );
 }
@@ -954,7 +948,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
     let navigation = StackNavigation::new();
     let calls = Rc::new(std::cell::Cell::new(0));
     let count = calls.clone();
-    let prepared = Rc::new(RefCell::new(None::<SharedInstances>));
+    let prepared = Rc::new(RefCell::new(None::<InstanceStore>));
     let captured = prepared.clone();
     let stack = child_stack(
         &parent,
@@ -970,7 +964,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
                     .detach();
             }
             if *configuration == 2 {
-                *captured.borrow_mut() = Some(context.instance_keeper());
+                *captured.borrow_mut() = Some(context.instance_store());
                 if !outgoing_destroy {
                     let _ = context
                         .lifecycle()
@@ -990,7 +984,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
         .is_err()
     );
     assert!(old.instance.lifecycle().state().is_destroyed());
-    assert!(prepared.borrow().as_ref().unwrap().borrow().is_destroyed());
+    assert!(prepared.borrow().as_ref().unwrap().is_destroyed().unwrap());
     let completed = Rc::new(std::cell::Cell::new(false));
     let done = completed.clone();
     navigation.navigate_with(
@@ -1009,8 +1003,8 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
     assert!(!Rc::ptr_eq(&old.instance, &retried.instance));
     assert_ne!(old.key, retried.key);
     assert_eq!(calls.get(), 3);
-    assert!(old.instance.instance_keeper().borrow().is_destroyed());
-    assert!(!retried.instance.instance_keeper().borrow().is_destroyed());
+    assert!(old.instance.instance_store().is_destroyed().unwrap());
+    assert!(!retried.instance.instance_store().is_destroyed().unwrap());
     navigation.replace_current(1);
     assert!(Rc::ptr_eq(&retried.instance, &stack.get().active.instance));
     assert_eq!(calls.get(), 3);

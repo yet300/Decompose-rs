@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::{
     router::{items::*, pages::*, panels::*, slot::*, stack::*},
     *,
@@ -69,19 +70,17 @@ impl Policy {
         if self.fail_factory.get() {
             panic!("factory failure");
         }
-        let nested = ctx.state_keeper().borrow_mut().consume_bytes("nested");
+        let nested = ctx.state_store().consume_bytes("nested").unwrap();
         let calls = self.child_saves.clone();
         let n = *c;
-        ctx.state_keeper()
-            .borrow_mut()
+        ctx.state_store()
             .register("nested", move || {
                 calls.set(calls.get() + 1);
                 vec![n]
             })
             .unwrap();
         let retained = ctx
-            .instance_keeper()
-            .borrow_mut()
+            .instance_store()
             .get_or_create("retained", || *c)
             .unwrap();
         Component {
@@ -100,12 +99,12 @@ struct Snapshot {
     members: Vec<u8>,
     live: Vec<(String, Rc<Component>)>,
 }
-fn root(saved: BTreeMap<String, Vec<u8>>, instances: SharedInstances) -> DefaultComponentContext {
+fn root(saved: BTreeMap<String, Vec<u8>>, instances: InstanceStore) -> DefaultComponentContext {
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    DefaultComponentContext::with_all(
+    DefaultComponentContext::with_stores(
         lifecycle,
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
         instances,
         SharedBack::new(),
     )
@@ -113,7 +112,7 @@ fn root(saved: BTreeMap<String, Vec<u8>>, instances: SharedInstances) -> Default
 fn fresh() -> DefaultComponentContext {
     root(
         Default::default(),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     )
 }
 fn encode(c: &[Rc<u8>]) -> Result<Vec<u8>, String> {
@@ -313,22 +312,13 @@ fn all_families_skip_each_save_before_child_providers_and_resume_saving() {
         let policy = Policy::default();
         build(family, &p, || vec![7, 8, 9], &policy).unwrap();
         policy.save.set(false);
-        assert!(
-            p.state_keeper().borrow().save().unwrap().is_empty(),
-            "{family:?}"
-        );
+        assert!(p.state_store().save().unwrap().is_empty(), "{family:?}");
         assert_eq!(policy.child_saves.get(), 0, "{family:?}");
         policy.save.set(true);
-        assert!(
-            p.state_keeper()
-                .borrow()
-                .save()
-                .unwrap()
-                .contains_key(family.key())
-        );
+        assert!(p.state_store().save().unwrap().contains_key(family.key()));
         assert!(policy.child_saves.get() > 0);
         policy.save.set(false);
-        assert!(p.state_keeper().borrow().save().unwrap().is_empty());
+        assert!(p.state_store().save().unwrap().is_empty());
         assert_eq!(policy.saves.get(), 3);
     }
 }
@@ -339,8 +329,8 @@ fn accepted_restore_is_lazy_and_preserves_nested_state_keys_and_retention() {
         let p = fresh();
         let policy = Policy::default();
         let old = build(family, &p, || vec![7, 8, 9], &policy).unwrap();
-        let saved = p.state_keeper().borrow().save().unwrap();
-        let instances = p.instance_keeper();
+        let saved = p.state_store().save().unwrap();
+        let instances = p.instance_store();
         p.lifecycle().destroy().unwrap();
         let recreated = root(saved, instances);
         let new = build(
@@ -366,8 +356,8 @@ fn declined_restore_uses_initializer_and_discards_nested_state_and_retention() {
         let p = fresh();
         let policy = Policy::default();
         let old = build(family, &p, || vec![7, 8, 9], &policy).unwrap();
-        let saved = p.state_keeper().borrow().save().unwrap();
-        let instances = p.instance_keeper();
+        let saved = p.state_store().save().unwrap();
+        let instances = p.instance_store();
         p.lifecycle().destroy().unwrap();
         policy.restore.set(false);
         let recreated = root(saved, instances);
@@ -386,7 +376,7 @@ fn declined_restore_uses_initializer_and_discards_nested_state_and_retention() {
         for ((_, old), (_, new)) in old.live.iter().zip(&new.live) {
             assert_eq!(new.nested, None);
             assert!(!Rc::ptr_eq(&old.retained, &new.retained));
-            assert!(old.context.instance_keeper().borrow().is_destroyed());
+            assert!(old.context.instance_store().is_destroyed().unwrap());
         }
     }
 }
@@ -397,12 +387,12 @@ fn corrupt_envelopes_never_reach_decline_and_preserve_retry_input() {
         let p = fresh();
         let policy = Policy::default();
         build(family, &p, || vec![7, 8, 9], &policy).unwrap();
-        let saved = p.state_keeper().borrow().save().unwrap();
+        let saved = p.state_store().save().unwrap();
         let bytes = &saved[family.key()];
         policy.restore.set(false);
         for n in 0..bytes.len() {
             let bad = BTreeMap::from([(family.key().to_owned(), bytes[..n].to_vec())]);
-            let p = root(bad.clone(), Rc::new(RefCell::new(InstanceKeeper::new())));
+            let p = root(bad.clone(), InstanceStore::from(InstanceKeeper::new()));
             assert!(
                 build(
                     family,
@@ -413,8 +403,8 @@ fn corrupt_envelopes_never_reach_decline_and_preserve_retry_input() {
                 .is_err(),
                 "{family:?}, prefix {n}"
             );
-            assert_eq!(p.state_keeper().borrow().save().unwrap(), bad);
-            assert!(!p.state_keeper().borrow().is_registered(family.key()));
+            assert_eq!(p.state_store().save().unwrap(), bad);
+            assert!(!p.state_store().is_registered(family.key()).unwrap());
         }
         assert_eq!(policy.restores.get(), 0);
     }
@@ -426,15 +416,15 @@ fn declined_factory_panic_rolls_back_consumed_state_for_accepted_retry() {
         let p = fresh();
         let policy = Policy::default();
         let old = build(family, &p, || vec![7, 8, 9], &policy).unwrap();
-        let saved = p.state_keeper().borrow().save().unwrap();
-        let instances = p.instance_keeper();
+        let saved = p.state_store().save().unwrap();
+        let instances = p.instance_store();
         p.lifecycle().destroy().unwrap();
         let p = root(saved.clone(), instances);
         policy.restore.set(false);
         policy.fail_factory.set(true);
         assert!(catch_unwind(AssertUnwindSafe(|| build(family, &p, || vec![1], &policy))).is_err());
-        assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
-        assert!(!p.state_keeper().borrow().is_registered(family.key()));
+        assert_eq!(p.state_store().save().unwrap(), saved);
+        assert!(!p.state_store().is_registered(family.key()).unwrap());
         policy.restore.set(true);
         policy.fail_factory.set(false);
         let retry = build(family, &p, || panic!("retry initialized"), &policy).unwrap();
@@ -453,7 +443,7 @@ fn declining_restore_cannot_hide_invalid_decoded_configuration_or_child_key() {
         let p = fresh();
         let policy = Policy::default();
         build(family, &p, || vec![7, 8, 9], &policy).unwrap();
-        let mut saved = p.state_keeper().borrow().save().unwrap();
+        let mut saved = p.state_store().save().unwrap();
         let bytes = saved.get_mut(family.key()).unwrap();
         let payload_start = if matches!(family, Family::Pages) {
             24
@@ -462,7 +452,7 @@ fn declining_restore_cannot_hide_invalid_decoded_configuration_or_child_key() {
         };
         bytes[payload_start..payload_start + 3].copy_from_slice(&[7, 7, 7]);
         policy.restore.set(false);
-        let p = root(saved.clone(), Rc::new(RefCell::new(InstanceKeeper::new())));
+        let p = root(saved.clone(), InstanceStore::from(InstanceKeeper::new()));
         assert!(matches!(
             build(
                 family,
@@ -473,21 +463,21 @@ fn declining_restore_cannot_hide_invalid_decoded_configuration_or_child_key() {
             Err(decompose_rs::router::NavigationError::DuplicateConfiguration)
         ));
         assert_eq!(policy.restores.get(), 0);
-        assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(p.state_store().save().unwrap(), saved);
     }
     for family in FAMILIES {
         let p = fresh();
         let policy = Policy::default();
         build(family, &p, || vec![7, 8, 9], &policy).unwrap();
-        let mut saved = p.state_keeper().borrow().save().unwrap();
+        let mut saved = p.state_store().save().unwrap();
         let bytes = saved.get_mut(family.key()).unwrap();
         let key = bytes.windows(7).position(|b| b == b"child/0").unwrap();
         bytes[key + 6] = b'9';
         policy.restore.set(false);
-        let p = root(saved.clone(), Rc::new(RefCell::new(InstanceKeeper::new())));
+        let p = root(saved.clone(), InstanceStore::from(InstanceKeeper::new()));
         assert!(build(family, &p, || panic!("invalid key initialized"), &policy).is_err());
         assert_eq!(policy.restores.get(), 0);
-        assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(p.state_store().save().unwrap(), saved);
     }
 }
 
@@ -507,7 +497,7 @@ fn skip_precedes_fallible_configuration_encoder() {
         |_, ctx| ctx,
     )
     .unwrap();
-    assert!(p.state_keeper().borrow().save().unwrap().is_empty());
+    assert!(p.state_store().save().unwrap().is_empty());
 }
 
 #[test]
@@ -515,8 +505,8 @@ fn restore_codec_error_is_not_a_decline() {
     let p = fresh();
     let policy = Policy::default();
     build(Family::Stack, &p, || vec![1], &policy).unwrap();
-    let saved = p.state_keeper().borrow().save().unwrap();
-    let p = root(saved.clone(), Rc::new(RefCell::new(InstanceKeeper::new())));
+    let saved = p.state_store().save().unwrap();
+    let p = root(saved.clone(), InstanceStore::from(InstanceKeeper::new()));
     let calls = Rc::new(Cell::new(0));
     let out = calls.clone();
     let result = child_stack_with_initial(
@@ -540,7 +530,7 @@ fn restore_codec_error_is_not_a_decline() {
         matches!(result, Err(decompose_rs::router::NavigationError::State(message)) if message == "decode failed")
     );
     assert_eq!(calls.get(), 0);
-    assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(p.state_store().save().unwrap(), saved);
 }
 
 #[test]
@@ -548,8 +538,8 @@ fn restore_predicate_navigation_is_queued_after_the_lazy_initial_state() {
     let p = fresh();
     let policy = Policy::default();
     build(Family::Stack, &p, || vec![1], &policy).unwrap();
-    let saved = p.state_keeper().borrow().save().unwrap();
-    let p = root(saved, Rc::new(RefCell::new(InstanceKeeper::new())));
+    let saved = p.state_store().save().unwrap();
+    let p = root(saved, InstanceStore::from(InstanceKeeper::new()));
     let nav = StackNavigation::new();
     let reentrant = nav.clone();
     let seen = Rc::new(RefCell::new(Vec::new()));
@@ -669,7 +659,7 @@ fn predicates_receive_the_complete_family_metadata_and_clones_keep_policy() {
         |_, ctx| ctx,
     )
     .unwrap();
-    assert!(p.state_keeper().borrow().save().unwrap().is_empty());
+    assert!(p.state_store().save().unwrap().is_empty());
 }
 
 #[test]
@@ -695,8 +685,8 @@ fn absent_and_empty_states_have_distinct_initializer_and_restore_paths() {
         let policy = Policy::default();
         let p = fresh();
         build(family, &p, Vec::new, &policy).unwrap();
-        let saved = p.state_keeper().borrow().save().unwrap();
-        let p = root(saved.clone(), Rc::new(RefCell::new(InstanceKeeper::new())));
+        let saved = p.state_store().save().unwrap();
+        let p = root(saved.clone(), InstanceStore::from(InstanceKeeper::new()));
         assert!(
             build(family, &p, || panic!("empty restore initialized"), &policy)
                 .unwrap()
@@ -704,7 +694,7 @@ fn absent_and_empty_states_have_distinct_initializer_and_restore_paths() {
                 .is_empty()
         );
         policy.restore.set(false);
-        let p = root(saved, Rc::new(RefCell::new(InstanceKeeper::new())));
+        let p = root(saved, InstanceStore::from(InstanceKeeper::new()));
         assert_eq!(build(family, &p, || vec![9], &policy).unwrap().members, [9]);
     }
 }

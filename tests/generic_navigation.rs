@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::children::*;
 use decompose_rs::*;
 use std::{
@@ -188,14 +189,14 @@ fn codec() -> NavStateCodec<State> {
 }
 fn restored(
     saved: std::collections::BTreeMap<String, Vec<u8>>,
-    instances: Option<SharedInstances>,
+    instances: Option<InstanceStore>,
 ) -> DefaultComponentContext {
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    DefaultComponentContext::with_all(
+    DefaultComponentContext::with_stores(
         lifecycle,
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
-        instances.unwrap_or_else(|| Rc::new(RefCell::new(InstanceKeeper::new()))),
+        StateStore::from(StateKeeper::with_restored(saved)),
+        instances.unwrap_or_else(|| InstanceStore::from(InstanceKeeper::new())),
         SharedBack::new(),
     )
 }
@@ -228,11 +229,10 @@ fn dch1_literal_roundtrip_skips_initial_and_restores_child_state_and_tombstone()
     value.get()[0]
         .instance()
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("counter", || vec![42])
         .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let bytes = &saved["DefaultChildren"];
     assert_eq!(&bytes[..4], b"DCH1");
     assert_eq!(&bytes[4..12], &2u64.to_le_bytes());
@@ -256,9 +256,9 @@ fn dch1_literal_roundtrip_skips_initial_and_restores_child_state_and_tombstone()
         value.get()[0]
             .instance()
             .unwrap()
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("counter"),
+            .state_store()
+            .consume_bytes("counter")
+            .unwrap(),
         Some(vec![42])
     );
     source.navigate(vec![
@@ -285,11 +285,10 @@ fn codec_decline_calls_initial_and_discards_saved_child_state() {
     value.get()[0]
         .instance()
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("old", || vec![1])
         .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored(saved, None);
     let options = ChildrenOptions {
         codec: Some(NavStateCodec::new(|_| Ok(None), |_| Ok(None))),
@@ -309,15 +308,14 @@ fn codec_decline_calls_initial_and_discards_saved_child_state() {
         value.get()[0]
             .instance()
             .unwrap()
-            .state_keeper()
-            .borrow()
-            .pending_count(),
+            .state_store()
+            .pending_count()
+            .unwrap(),
         0
     );
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .save()
             .unwrap()
             .contains_key("DefaultChildren")
@@ -337,7 +335,7 @@ fn corrupt_envelope_is_rejected_before_user_decoder_and_reservation_rolls_back()
         |_, ctx| ctx,
     )
     .unwrap();
-    let good = parent.state_keeper().borrow().save().unwrap();
+    let good = parent.state_store().save().unwrap();
     for kind in 0..6 {
         let mut saved = good.clone();
         let bytes = saved.get_mut("DefaultChildren").unwrap();
@@ -378,7 +376,7 @@ fn corrupt_envelope_is_rejected_before_user_decoder_and_reservation_rolls_back()
             "mutation {kind}"
         );
         assert_eq!(calls.get(), 0, "mutation {kind}");
-        assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(parent.state_store().save().unwrap(), saved);
         assert_eq!(parent.back_handler().handler_count(), 0);
     }
 }
@@ -404,14 +402,12 @@ fn absent_or_encode_none_codec_never_queries_child_providers() {
         value.get()[0]
             .instance()
             .unwrap()
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("panic", || panic!("child must not be queried"))
             .unwrap();
         assert!(
             !parent
-                .state_keeper()
-                .borrow()
+                .state_store()
                 .save()
                 .unwrap()
                 .contains_key("DefaultChildren")
@@ -616,11 +612,11 @@ impl ComponentContext for NonCloneContext {
     fn lifecycle(&self) -> LifecycleRegistry {
         self.base.lifecycle()
     }
-    fn state_keeper(&self) -> SharedKeeper {
-        self.base.state_keeper()
+    fn state_store(&self) -> StateStore {
+        self.base.state_store()
     }
-    fn instance_keeper(&self) -> SharedInstances {
-        self.base.instance_keeper()
+    fn instance_store(&self) -> InstanceStore {
+        self.base.instance_store()
     }
     fn back_handler(&self) -> SharedBack {
         self.base.back_handler()
@@ -812,9 +808,9 @@ fn state_hook_initial_registration_publication_completion_and_unchanged_transiti
         on_state_changed: Some(Rc::new(move |n: &State, old| {
             assert!(
                 parent_hook
-                    .state_keeper()
-                    .borrow()
+                    .state_store()
                     .is_registered("DefaultChildren")
+                    .unwrap()
             );
             assert_eq!(parent_hook.back_handler().handler_count(), 2);
             if old.is_some() {
@@ -1109,9 +1105,9 @@ fn parent_destroy_during_runtime_factory_completes_error_once_and_ends_held_snap
     assert_eq!(parent.back_handler().handler_count(), 0);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildren")
+            .unwrap()
     );
     source.navigate(vec![entry(3, ChildStatus::Resumed)]);
     assert_eq!(error.borrow().len(), 1);
@@ -1133,21 +1129,14 @@ fn tombstone_saved_state_survives_resurrection_and_removal_forgets_identity() {
     .unwrap();
     let before = value.get()[0].instance().unwrap().clone();
     let key = value.get()[0].key().to_owned();
-    before
-        .state_keeper()
-        .borrow_mut()
-        .register("saved", || vec![42])
-        .unwrap();
+    before.state_store().register("saved", || vec![42]).unwrap();
     source.navigate(vec![entry(1, ChildStatus::Destroyed)]);
-    assert!(before.instance_keeper().borrow().is_destroyed());
+    assert!(before.instance_store().is_destroyed().unwrap());
     source.navigate(vec![entry(1, ChildStatus::Started)]);
     let after = value.get()[0].instance().unwrap().clone();
-    assert!(!Rc::ptr_eq(
-        &before.instance_keeper(),
-        &after.instance_keeper()
-    ));
+    assert!(!before.instance_store().ptr_eq(&after.instance_store()));
     assert_eq!(
-        after.state_keeper().borrow_mut().consume_bytes("saved"),
+        after.state_store().consume_bytes("saved").unwrap(),
         Some(vec![42])
     );
     assert_eq!(value.get()[0].key(), key);
@@ -1158,16 +1147,16 @@ fn tombstone_saved_state_survives_resurrection_and_removal_forgets_identity() {
         value.get()[0]
             .instance()
             .unwrap()
-            .state_keeper()
-            .borrow()
-            .pending_count(),
+            .state_store()
+            .pending_count()
+            .unwrap(),
         0
     );
 }
 #[test]
 fn parent_recreation_reuses_live_instance_keeper_but_restored_tombstone_releases_it() {
     for tombstone in [false, true] {
-        let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+        let instances = InstanceStore::from(InstanceKeeper::new());
         let parent = restored(Default::default(), Some(instances.clone()));
         let value = children(
             &parent,
@@ -1181,13 +1170,12 @@ fn parent_recreation_reuses_live_instance_keeper_but_restored_tombstone_releases
         .unwrap();
         let before = value.get()[0].instance().unwrap().clone();
         let kept = before
-            .instance_keeper()
-            .borrow_mut()
+            .instance_store()
             .get_or_create("counter", || 42u8)
             .unwrap();
-        let mut saved = parent.state_keeper().borrow().save().unwrap();
+        let mut saved = parent.state_store().save().unwrap();
         parent.lifecycle().destroy().unwrap();
-        assert!(!before.instance_keeper().borrow().is_destroyed());
+        assert!(!before.instance_store().is_destroyed().unwrap());
         if tombstone {
             saved.get_mut("DefaultChildren").unwrap()[17] = 3;
         }
@@ -1204,19 +1192,15 @@ fn parent_recreation_reuses_live_instance_keeper_but_restored_tombstone_releases
         .unwrap();
         if tombstone {
             assert!(value.get()[0].instance().is_none());
-            assert!(before.instance_keeper().borrow().is_destroyed());
+            assert!(before.instance_store().is_destroyed().unwrap());
         } else {
             let after = value.get()[0].instance().unwrap().clone();
             assert!(!Rc::ptr_eq(&before, &after));
-            assert!(Rc::ptr_eq(
-                &before.instance_keeper(),
-                &after.instance_keeper()
-            ));
+            assert!(before.instance_store().ptr_eq(&after.instance_store()));
             assert!(Rc::ptr_eq(
                 &kept,
                 &after
-                    .instance_keeper()
-                    .borrow_mut()
+                    .instance_store()
                     .get_or_create("counter", || 99u8)
                     .unwrap()
             ));
@@ -1269,7 +1253,7 @@ fn full_framing_key_uniqueness_and_nested_state_are_checked_before_declining_dec
             )
             .is_err()
         );
-        assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(parent.state_store().save().unwrap(), saved);
     }
 }
 #[test]
@@ -1309,8 +1293,8 @@ fn restored_state_child_count_duplicates_and_codec_errors_precede_factories_and_
                 Err(NavigationError::DuplicateConfiguration)
             ));
         }
-        assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
-        assert_eq!(parent.instance_keeper().borrow().len(), 0);
+        assert_eq!(parent.state_store().save().unwrap(), saved);
+        assert_eq!(parent.instance_store().len().unwrap(), 0);
         assert_eq!(parent.back_handler().handler_count(), 0);
     }
     let parent = root();
@@ -1334,14 +1318,12 @@ fn restored_state_child_count_duplicates_and_codec_errors_precede_factories_and_
     value.get()[0]
         .instance()
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("panic", || panic!("encode error precedes providers"))
         .unwrap();
     assert!(
         parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .save()
             .unwrap_err()
             .to_string()
@@ -1390,8 +1372,7 @@ fn reentrant_codec_and_child_provider_saves_freeze_state_items_keys_and_counter(
         value.get()[0]
             .instance()
             .unwrap()
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("nested", move || {
                 if !in_codec {
                     child_source.navigate(vec![]);
@@ -1399,7 +1380,7 @@ fn reentrant_codec_and_child_provider_saves_freeze_state_items_keys_and_counter(
                 vec![42]
             })
             .unwrap();
-        let saved = parent.state_keeper().borrow().save().unwrap();
+        let saved = parent.state_store().save().unwrap();
         assert!(value.get().is_empty());
         let parent = restored(saved, None);
         let value = children(
@@ -1418,9 +1399,9 @@ fn reentrant_codec_and_child_provider_saves_freeze_state_items_keys_and_counter(
             value.get()[0]
                 .instance()
                 .unwrap()
-                .state_keeper()
-                .borrow_mut()
-                .consume_bytes("nested"),
+                .state_store()
+                .consume_bytes("nested")
+                .unwrap(),
             Some(vec![42])
         );
     }
@@ -1548,7 +1529,7 @@ impl NavState<u8> for DropState {
 fn previous_state_drop_can_save_coherent_committed_children_without_engine_borrow() {
     let parent = root();
     let source = SimpleNavigation::<u8>::new();
-    let keeper = parent.state_keeper();
+    let keeper = parent.state_store();
     let saved = Rc::new(RefCell::new(None));
     let output = saved.clone();
     let armed = Rc::new(Cell::new(false));
@@ -1556,7 +1537,7 @@ fn previous_state_drop_can_save_coherent_committed_children_without_engine_borro
         records: vec![entry(1, ChildStatus::Resumed)],
         armed: armed.clone(),
         callback: Rc::new(move || {
-            *output.borrow_mut() = Some(keeper.borrow().save().unwrap());
+            *output.borrow_mut() = Some(keeper.save().unwrap());
         }),
     };
     let options = ChildrenOptions {
@@ -1688,7 +1669,7 @@ fn previous_state_drop_panic_keeps_committed_scopes_and_next_navigation_repairs_
         move |_, ctx| {
             output
                 .borrow_mut()
-                .push((ctx.lifecycle(), ctx.instance_keeper()));
+                .push((ctx.lifecycle(), ctx.instance_store()));
             ctx
         },
     )
@@ -1698,7 +1679,7 @@ fn previous_state_drop_panic_keeps_committed_scopes_and_next_navigation_repairs_
     assert_eq!(created.borrow().len(), 2);
     assert!(created.borrow()[0].0.state().is_destroyed());
     assert_eq!(created.borrow()[1].0.state(), LifecycleState::Resumed);
-    assert!(!created.borrow()[1].1.borrow().is_destroyed());
+    assert!(!created.borrow()[1].1.is_destroyed().unwrap());
     assert_eq!(**value.get()[0].configuration(), 1);
     source.navigate(2);
     assert_eq!(created.borrow().len(), 2);
@@ -1760,7 +1741,7 @@ fn navigation_state_clone_can_emit_navigation_during_external_save_without_borro
     )
     .unwrap();
     armed.set(true);
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert_eq!(**value.get()[0].configuration(), 2);
     let parent2 = restored(saved, None);
     let value2 = children(
@@ -1809,9 +1790,9 @@ fn custom_source_cancellation_panic_propagates_after_parent_cleanup_completes() 
     assert_eq!(parent.back_handler().handler_count(), 0);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildren")
+            .unwrap()
     );
     for child in old.iter() {
         assert!(child.instance().unwrap().lifecycle().state().is_destroyed());
@@ -1861,9 +1842,9 @@ fn child_and_custom_source_cleanup_panics_preserve_first_panic_and_finish_other_
     assert_eq!(parent.back_handler().handler_count(), 0);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildren")
+            .unwrap()
     );
     for child in old.iter() {
         assert!(child.instance().unwrap().lifecycle().state().is_destroyed());
@@ -1889,7 +1870,7 @@ fn initial_hook_unwind_preserves_original_panic_when_source_cancellation_also_pa
             |n, _| n,
             |_, c| c,
             move |_, ctx| {
-                *output.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_keeper()));
+                *output.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_store()));
                 ctx
             },
         )
@@ -1903,9 +1884,9 @@ fn initial_hook_unwind_preserves_original_panic_when_source_cancellation_also_pa
     assert_eq!(parent.back_handler().handler_count(), 0);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildren")
+            .unwrap()
     );
     assert!(captured.borrow().as_ref().unwrap().0.state().is_destroyed());
     assert!(
@@ -1914,10 +1895,10 @@ fn initial_hook_unwind_preserves_original_panic_when_source_cancellation_also_pa
             .as_ref()
             .unwrap()
             .1
-            .borrow()
             .is_destroyed()
+            .unwrap()
     );
-    assert_eq!(parent.instance_keeper().borrow().len(), 0);
+    assert_eq!(parent.instance_store().len().unwrap(), 0);
 }
 
 #[test]
@@ -1953,14 +1934,14 @@ fn construction_cancel_panic_restores_consumed_bytes_and_removes_fresh_retention
         .unwrap();
     assert!(parent.back_handler().back());
     assert!(panic_seen.get());
-    assert_eq!(parent.instance_keeper().borrow().len(), 0);
+    assert_eq!(parent.instance_store().len().unwrap(), 0);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildren")
+            .unwrap()
     );
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     assert_eq!(parent.back_handler().handler_count(), 1);
     let retried = children(
         &parent,
@@ -1976,7 +1957,7 @@ fn construction_cancel_panic_restores_consumed_bytes_and_removes_fresh_retention
 }
 #[test]
 fn construction_cancel_panic_preserves_existing_retained_scope_and_restored_input() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored(Default::default(), Some(instances.clone()));
     let value = children(
         &parent,
@@ -1988,12 +1969,9 @@ fn construction_cancel_panic_preserves_existing_retained_scope_and_restored_inpu
         |_, ctx| ctx,
     )
     .unwrap();
-    let child_instances = value.get()[0].instance().unwrap().instance_keeper();
-    let sentinel = child_instances
-        .borrow_mut()
-        .get_or_create("sentinel", || 42u8)
-        .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let child_instances = value.get()[0].instance().unwrap().instance_store();
+    let sentinel = child_instances.get_or_create("sentinel", || 42u8).unwrap();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
     let parent = restored(saved.clone(), Some(instances.clone()));
     let nested = parent.clone();
@@ -2018,9 +1996,9 @@ fn construction_cancel_panic_preserves_existing_retained_scope_and_restored_inpu
         })
         .unwrap();
     assert!(parent.back_handler().back());
-    assert_eq!(parent.instance_keeper().borrow().len(), 1);
-    assert!(!child_instances.borrow().is_destroyed());
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.instance_store().len().unwrap(), 1);
+    assert!(!child_instances.is_destroyed().unwrap());
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     let retry = children(
         &parent,
         &SimpleNavigation::<State>::new(),
@@ -2031,12 +2009,11 @@ fn construction_cancel_panic_preserves_existing_retained_scope_and_restored_inpu
         |_, ctx| ctx,
     )
     .unwrap();
-    let restored_instances = retry.get()[0].instance().unwrap().instance_keeper();
-    assert!(Rc::ptr_eq(&child_instances, &restored_instances));
+    let restored_instances = retry.get()[0].instance().unwrap().instance_store();
+    assert!(child_instances.ptr_eq(&restored_instances));
     assert!(Rc::ptr_eq(
         &sentinel,
         &restored_instances
-            .borrow_mut()
             .get_or_create("sentinel", || 99u8)
             .unwrap()
     ));
@@ -2132,11 +2109,11 @@ fn pre_engine_panics_preserve_original_unwind_when_source_cancellation_panics() 
     assert_eq!(panicked.downcast_ref::<&str>().copied(), Some(expected));
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildren")
+            .unwrap()
     );
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
-    assert_eq!(parent.instance_keeper().borrow().len(), 0);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
+    assert_eq!(parent.instance_store().len().unwrap(), 0);
     assert_eq!(parent.back_handler().handler_count(), 0);
 }

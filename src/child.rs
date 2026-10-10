@@ -37,9 +37,10 @@ use essenty_instance_keeper::InstanceKeeper;
 use essenty_lifecycle::{LifecycleRegistry, LifecycleState};
 use essenty_state_keeper::StateKeeperError;
 
+#[cfg(test)]
+use crate::context::ContextFactory;
 use crate::context::{
-    ChildKey, ContextFactory, ContextParts, MANUAL_DESTROY_PANIC_MESSAGE, SharedInstances,
-    SharedKeeper,
+    ChildKey, ContextParts, MANUAL_DESTROY_PANIC_MESSAGE, SharedInstances, SharedKeeper,
 };
 use crate::error::DecomposeError;
 use crate::framing;
@@ -154,7 +155,7 @@ pub(crate) fn build_child<C>(
     key: ChildKey,
     manual: Option<&LifecycleRegistry>,
     priority: i32,
-    factory: ContextFactory<C>,
+    factory: impl FnOnce(ContextParts) -> C,
 ) -> Result<C, DecomposeError> {
     let key_str = key.as_str().to_owned();
 
@@ -489,8 +490,8 @@ mod tests {
     fn fixed_child_registers_all_three_namespaces() {
         let parent = TestContext::new();
         let _child = parent.child_context("c").unwrap();
-        assert!(parent.state_keeper().borrow().is_registered("c"));
-        assert!(parent.instance_keeper().borrow().contains("c"));
+        assert!(parent.state_store().is_registered("c").unwrap());
+        assert!(parent.instance_store().contains("c").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 1);
         // Fixed-child retention belongs to the InstanceKeeper, not lifecycle.
         assert_eq!(parent.lifecycle().subscriber_count(), 0);
@@ -514,8 +515,7 @@ mod tests {
     fn duplicate_rejection_leaves_restored_bytes_consumable() {
         let parent = TestContext::new();
         parent
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("k", || b"live".to_vec())
             .unwrap();
         let saved = BTreeMap::from([("k".to_owned(), b"stale".to_vec())]);
@@ -523,8 +523,7 @@ mod tests {
         // Provider registered (e.g. by an earlier sibling scope in the same
         // recreation generation): duplicate check fires BEFORE consume.
         parent
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("k", || b"live".to_vec())
             .unwrap();
         let err = parent.child_context("k").unwrap_err();
@@ -534,8 +533,8 @@ mod tests {
                 key: "k".to_owned()
             }
         );
-        assert!(parent.state_keeper().borrow().has_consumable("k"));
-        assert!(!parent.instance_keeper().borrow().contains("k"));
+        assert!(parent.state_store().has_consumable("k").unwrap());
+        assert!(!parent.instance_store().contains("k").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 0);
     }
 
@@ -587,7 +586,7 @@ mod tests {
         assert_eq!(message, Some(MANUAL_DESTROY_PANIC_MESSAGE));
         assert!(manual.state().is_destroyed());
         // Functional cleanup ran before the panic: provider released.
-        assert!(!parent.state_keeper().borrow().is_registered("m"));
+        assert!(!parent.state_store().is_registered("m").unwrap());
         // Second destroy is silent (no observers left to panic).
         assert!(manual.destroy().is_err());
     }
@@ -603,9 +602,9 @@ mod tests {
             .child_context_with_lifecycle("m", &manual)
             .unwrap_err();
         assert_eq!(err, DecomposeError::ChildLifecycleDestroyed);
-        assert_eq!(parent.state_keeper().borrow().provider_count(), 0);
-        assert!(parent.state_keeper().borrow().has_consumable("m"));
-        assert!(!parent.instance_keeper().borrow().contains("m"));
+        assert_eq!(parent.state_store().provider_count().unwrap(), 0);
+        assert!(parent.state_store().has_consumable("m").unwrap());
+        assert!(!parent.instance_store().contains("m").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 0);
         assert_eq!(parent.lifecycle().subscriber_count(), 0);
     }
@@ -617,23 +616,19 @@ mod tests {
         let parent = TestContext::new();
         let child = parent.child_context("c").unwrap();
         child
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("inner", || b"value-bytes".to_vec())
             .unwrap();
         let saved = parent.save_bytes();
         assert!(saved.contains_key("c"));
 
         let parent2 = parent.recreate(false, saved);
-        assert!(parent2.state_keeper().borrow().has_consumable("c"));
+        assert!(parent2.state_store().has_consumable("c").unwrap());
         let child2 = parent2.child_context("c").unwrap();
-        let restored = child2.state_keeper().borrow_mut().consume_bytes("inner");
+        let restored = child2.state_store().consume_bytes("inner").unwrap();
         assert_eq!(restored, Some(b"value-bytes".to_vec()));
         // Single-shot consume: second read is empty.
-        assert_eq!(
-            child2.state_keeper().borrow_mut().consume_bytes("inner"),
-            None
-        );
+        assert_eq!(child2.state_store().consume_bytes("inner").unwrap(), None);
     }
 
     #[test]
@@ -641,11 +636,11 @@ mod tests {
         let parent = TestContext::new();
         let manual = manual();
         let _child = parent.child_context_with_lifecycle("m", &manual).unwrap();
-        assert!(parent.state_keeper().borrow().is_registered("m"));
+        assert!(parent.state_store().is_registered("m").unwrap());
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             manual.destroy().unwrap();
         }));
-        assert!(!parent.state_keeper().borrow().is_registered("m"));
+        assert!(!parent.state_store().is_registered("m").unwrap());
         // Destroyed-lifecycle child is never saved afterwards.
         let saved = parent.save_bytes();
         assert!(!saved.contains_key("m"));
@@ -657,8 +652,7 @@ mod tests {
         let child = parent.child_context("c").unwrap();
         let grandchild = child.child_context("g").unwrap();
         grandchild
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("v", || vec![7, 7, 7])
             .unwrap();
         let saved = parent.save_bytes();
@@ -673,14 +667,8 @@ mod tests {
         let parent = TestContext::new();
         let a = parent.child_context("a").unwrap();
         let b = parent.child_context("b").unwrap();
-        a.state_keeper()
-            .borrow_mut()
-            .register("inner", || b"A".to_vec())
-            .unwrap();
-        b.state_keeper()
-            .borrow_mut()
-            .register("inner", || b"B".to_vec())
-            .unwrap();
+        a.state_store().register("inner", || b"A".to_vec()).unwrap();
+        b.state_store().register("inner", || b"B".to_vec()).unwrap();
         let saved = parent.save_bytes();
         let fa = crate::framing::decode(&saved["a"]).unwrap();
         let fb = crate::framing::decode(&saved["b"]).unwrap();
@@ -698,7 +686,7 @@ mod tests {
             DecomposeError::StateKeeper(essenty_state_keeper::StateKeeperError::Decode { .. })
         ));
         assert!(err.to_string().contains('k'));
-        assert!(!parent.state_keeper().borrow().is_registered("k"));
+        assert!(!parent.state_store().is_registered("k").unwrap());
     }
 
     // -- Instance namespace ------------------------------------------------
@@ -707,26 +695,25 @@ mod tests {
     fn instance_identity_across_config_change_fresh_on_death() {
         let parent = TestContext::new();
         let child = parent.child_context("c").unwrap();
-        let scope_before = child.instance_keeper();
-        child
-            .instance_keeper()
-            .borrow_mut()
-            .put("v", 42u32)
-            .unwrap();
+        let scope_before = child.instance_store().inner;
+        child.instance_store().put("v", 42u32).unwrap();
         let saved = parent.save_bytes();
 
         // Config change retains the scope AND the value identity.
         let retained = parent.recreate(true, saved.clone());
         let child_cfg = retained.child_context("c").unwrap();
-        assert!(Rc::ptr_eq(&child_cfg.instance_keeper(), &scope_before));
-        let value: Option<Rc<u32>> = child_cfg.instance_keeper().borrow().get("v").unwrap();
+        assert!(Rc::ptr_eq(&child_cfg.instance_store().inner, &scope_before));
+        let value: Option<Rc<u32>> = child_cfg.instance_store().get("v").unwrap();
         assert_eq!(*value.unwrap(), 42);
 
         // Process death replaces the scope.
         let reborn = parent.recreate(false, saved);
         let child_death = reborn.child_context("c").unwrap();
-        assert!(!Rc::ptr_eq(&child_death.instance_keeper(), &scope_before));
-        assert!(child_death.instance_keeper().borrow().is_empty());
+        assert!(!Rc::ptr_eq(
+            &child_death.instance_store().inner,
+            &scope_before
+        ));
+        assert!(child_death.instance_store().is_empty().unwrap());
     }
 
     #[test]
@@ -735,7 +722,7 @@ mod tests {
         let parent = DefaultComponentContext::new(LifecycleRegistry::new());
         let child = parent.child_context("c").unwrap();
         parent.lifecycle().destroy().unwrap();
-        assert!(child.instance_keeper().borrow().is_destroyed());
+        assert!(child.instance_store().is_destroyed().unwrap());
 
         // Manual child under a default root also ends with the owned keeper.
         let parent = DefaultComponentContext::new(LifecycleRegistry::new());
@@ -744,7 +731,7 @@ mod tests {
         assert_eq!(child.lifecycle().state(), LifecycleState::Initialized);
         parent.lifecycle().destroy().unwrap();
         assert_eq!(child.lifecycle().state(), LifecycleState::Destroyed);
-        assert!(child.instance_keeper().borrow().is_destroyed());
+        assert!(child.instance_store().is_destroyed().unwrap());
     }
 
     #[test]
@@ -752,11 +739,11 @@ mod tests {
         let parent = TestContext::new();
         let manual = manual();
         let _child = parent.child_context_with_lifecycle("m", &manual).unwrap();
-        assert!(parent.instance_keeper().borrow().contains("m"));
+        assert!(parent.instance_store().contains("m").unwrap());
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             manual.destroy().unwrap();
         }));
-        assert!(!parent.instance_keeper().borrow().contains("m"));
+        assert!(!parent.instance_store().contains("m").unwrap());
     }
 
     #[test]
@@ -765,13 +752,13 @@ mod tests {
         // parent *lifecycle*. Keeper end surfaces Destroyed (with rollback of
         // the state registration that preceded it).
         let parent = TestContext::new();
-        parent.instance_keeper().borrow_mut().destroy_all();
+        parent.instance_store().destroy_all().unwrap();
         let err = parent.child_context("k").unwrap_err();
         assert_eq!(
             err,
             DecomposeError::InstanceKeeper(InstanceKeeperError::Destroyed)
         );
-        assert!(!parent.state_keeper().borrow().is_registered("k"));
+        assert!(!parent.state_store().is_registered("k").unwrap());
     }
 
     #[test]
@@ -782,7 +769,7 @@ mod tests {
         parent.lifecycle().destroy().unwrap();
         let fixed = parent.child_context("f").unwrap();
         assert_eq!(fixed.lifecycle().state(), LifecycleState::Destroyed);
-        assert!(parent.state_keeper().borrow().is_registered("f"));
+        assert!(parent.state_store().is_registered("f").unwrap());
         assert!(parent.save_bytes().contains_key("f"));
 
         let manual = LifecycleRegistry::new();
@@ -797,8 +784,7 @@ mod tests {
     fn type_mismatch_leaves_value_and_rolls_back_state() {
         let parent = TestContext::new();
         parent
-            .instance_keeper()
-            .borrow_mut()
+            .instance_store()
             .put("k", "foreign".to_owned())
             .unwrap();
         let err = parent.child_context("k").unwrap_err();
@@ -807,9 +793,9 @@ mod tests {
             DecomposeError::InstanceKeeper(InstanceKeeperError::TypeMismatch("k".to_owned()))
         );
         // Retained value intact; state registration rolled back.
-        let kept: Option<Rc<String>> = parent.instance_keeper().borrow().get("k").unwrap();
+        let kept: Option<Rc<String>> = parent.instance_store().get("k").unwrap();
         assert_eq!(kept.unwrap().as_str(), "foreign");
-        assert!(!parent.state_keeper().borrow().is_registered("k"));
+        assert!(!parent.state_store().is_registered("k").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 0);
     }
 
@@ -1112,11 +1098,7 @@ mod tests {
         // Usable without borrow panics: shares the now-Created lifecycle and
         // restores/saves through the parent.
         assert_eq!(child.lifecycle().state(), LifecycleState::Created);
-        child
-            .state_keeper()
-            .borrow_mut()
-            .register("v", || b"x".to_vec())
-            .unwrap();
+        child.state_store().register("v", || b"x".to_vec()).unwrap();
         assert!(parent.save_bytes().contains_key("lazy"));
     }
 
@@ -1138,8 +1120,8 @@ mod tests {
             Some(DecomposeError::BackDispatchInProgress)
         );
         // No partial child scope survived the rejection.
-        assert!(!parent.state_keeper().borrow().is_registered("x"));
-        assert!(!parent.instance_keeper().borrow().contains("x"));
+        assert!(!parent.state_store().is_registered("x").unwrap());
+        assert!(!parent.instance_store().contains("x").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 1);
         assert_eq!(parent.lifecycle().subscriber_count(), 0);
     }
@@ -1152,16 +1134,15 @@ mod tests {
         let child = parent.child_context("c").unwrap();
         let child_lifecycle = child.lifecycle();
         child
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("v", || b"kept".to_vec())
             .unwrap();
         drop(child);
         // Lifetime is parent-held, not view-held: provider, bridge, and
         // instance retention are all live with zero external child handles.
-        assert!(parent.state_keeper().borrow().is_registered("c"));
+        assert!(parent.state_store().is_registered("c").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 1);
-        assert!(parent.instance_keeper().borrow().contains("c"));
+        assert!(parent.instance_store().contains("c").unwrap());
         let saved = parent.save_bytes();
         let frame = crate::framing::decode(&saved["c"]).unwrap();
         assert_eq!(frame["v"], b"kept");
@@ -1169,7 +1150,7 @@ mod tests {
         let parent2 = parent.recreate(false, saved);
         let child2 = parent2.child_context("c").unwrap();
         assert_eq!(
-            child2.state_keeper().borrow_mut().consume_bytes("v"),
+            child2.state_store().consume_bytes("v").unwrap(),
             Some(b"kept".to_vec())
         );
         let _ = child_lifecycle;
@@ -1203,11 +1184,11 @@ mod tests {
         fn lifecycle(&self) -> LifecycleRegistry {
             self.delegate.lifecycle()
         }
-        fn state_keeper(&self) -> SharedKeeper {
-            self.delegate.state_keeper()
+        fn state_store(&self) -> crate::StateStore {
+            self.delegate.state_store()
         }
-        fn instance_keeper(&self) -> SharedInstances {
-            self.delegate.instance_keeper()
+        fn instance_store(&self) -> crate::InstanceStore {
+            self.delegate.instance_store()
         }
         fn back_handler(&self) -> SharedBack {
             self.delegate.back_handler()
@@ -1227,8 +1208,8 @@ mod tests {
         }));
         assert!(result.is_err());
         // Only attempt-created resources were removed.
-        assert!(!parent.state_keeper().borrow().is_registered("k"));
-        assert!(!parent.instance_keeper().borrow().contains("k"));
+        assert!(!parent.state_store().is_registered("k").unwrap());
+        assert!(!parent.instance_store().contains("k").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 0);
         assert_eq!(parent.lifecycle().subscriber_count(), 0);
     }
@@ -1239,23 +1220,21 @@ mod tests {
             delegate: TestContext::new(),
         };
         // Simulate a retained scope from an unrestored recreation generation.
-        let retained: SharedInstances = parent
-            .instance_keeper()
-            .borrow_mut()
+        let retained = parent
+            .instance_store()
             .get_or_create("k", || RefCell::new(InstanceKeeper::new()))
             .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             parent.child_context("k").unwrap();
         }));
         assert!(result.is_err());
-        assert!(parent.instance_keeper().borrow().contains("k"));
-        let current: SharedInstances = parent
-            .instance_keeper()
-            .borrow_mut()
+        assert!(parent.instance_store().contains("k").unwrap());
+        let current = parent
+            .instance_store()
             .get_or_create("k", || RefCell::new(InstanceKeeper::new()))
             .unwrap();
         assert!(Rc::ptr_eq(&current, &retained));
-        assert!(!parent.state_keeper().borrow().is_registered("k"));
+        assert!(!parent.state_store().is_registered("k").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 0);
     }
 
@@ -1268,7 +1247,7 @@ mod tests {
         let (subs, handlers, providers) = (
             parent.lifecycle().subscriber_count(),
             parent.back_handler().handler_count(),
-            parent.state_keeper().borrow().provider_count(),
+            parent.state_store().provider_count().unwrap(),
         );
         assert_eq!((subs, handlers, providers), (1, 1, 1));
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1276,8 +1255,8 @@ mod tests {
         }));
         assert_eq!(parent.lifecycle().subscriber_count(), 0);
         assert_eq!(parent.back_handler().handler_count(), 0);
-        assert_eq!(parent.state_keeper().borrow().provider_count(), 0);
-        assert!(!parent.instance_keeper().borrow().contains("m"));
+        assert_eq!(parent.state_store().provider_count().unwrap(), 0);
+        assert!(!parent.instance_store().contains("m").unwrap());
         assert_eq!(child.lifecycle().state(), LifecycleState::Destroyed);
     }
 
@@ -1335,8 +1314,7 @@ mod tests {
         let parent = TestContext::new();
         let child = parent.child_context("c").unwrap();
         child
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("good", || b"v1".to_vec())
             .unwrap();
         let healthy = parent.save_bytes();
@@ -1345,9 +1323,8 @@ mod tests {
         // A nested codec failure: only producible through a failing user
         // codec inside the child scope.
         child
-            .state_keeper()
-            .borrow_mut()
-            .register_value("bad", || 1u32, |_| Err("boom".to_owned()))
+            .state_store()
+            .register_fallible("bad", || Err("boom".to_owned()))
             .unwrap();
         let failed = parent.save_bytes();
         // The previous good frame is preserved verbatim — never replaced by
@@ -1362,9 +1339,8 @@ mod tests {
         let parent2 = TestContext::new();
         let child2 = parent2.child_context("c").unwrap();
         child2
-            .state_keeper()
-            .borrow_mut()
-            .register_value("bad", || 1u32, |_| Err("boom".to_owned()))
+            .state_store()
+            .register_fallible("bad", || Err("boom".to_owned()))
             .unwrap();
         let saved = parent2.save_bytes();
         assert!(
@@ -1378,15 +1354,14 @@ mod tests {
         let parent = TestContext::new();
         let child = parent.child_context("c").unwrap();
         child
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("good", || b"v1".to_vec())
             .unwrap();
         let healthy = parent.save_bytes();
 
         // Hold the child keeper borrow across the parent save: the provider
         // cannot borrow, must not panic, and must not emit an empty frame.
-        let keeper = child.state_keeper();
+        let keeper = child.raw_state_keeper();
         let _guard = keeper.borrow_mut();
         let conflicted = parent.save_bytes();
         assert_eq!(conflicted.get("c"), healthy.get("c"));
@@ -1395,8 +1370,7 @@ mod tests {
 
         // Transient conflict cleared: the next save stores fresh state.
         child
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("fresh", || b"v2".to_vec())
             .unwrap();
         let recovered = parent.save_bytes();
@@ -1421,8 +1395,8 @@ mod tests {
         assert!(result.is_err());
 
         // Parent resources restored …
-        assert_eq!(parent.state_keeper().borrow().provider_count(), 0);
-        assert!(!parent.instance_keeper().borrow().contains("k"));
+        assert_eq!(parent.state_store().provider_count().unwrap(), 0);
+        assert!(!parent.instance_store().contains("k").unwrap());
         assert_eq!(parent.back_handler().handler_count(), 0);
         assert_eq!(parent.lifecycle().subscriber_count(), 0);
         // … and no hook survives on the caller-owned manual lifecycle.
@@ -1459,14 +1433,14 @@ mod tests {
     fn fixed_retention_ends_with_external_keeper_not_old_lifecycle() {
         let lifecycle = LifecycleRegistry::new();
         lifecycle.create().unwrap();
-        let external: SharedInstances = Rc::new(RefCell::new(InstanceKeeper::new()));
+        let external = crate::InstanceStore::from(InstanceKeeper::new());
         let parent =
-            DefaultComponentContext::with_instance_keeper(lifecycle.clone(), external.clone());
+            DefaultComponentContext::with_instance_store(lifecycle.clone(), external.clone());
         let child = parent.child_context("c").unwrap();
         lifecycle.destroy().unwrap();
-        assert!(!child.instance_keeper().borrow().is_destroyed());
-        assert!(external.borrow().contains("c"));
-        external.borrow_mut().destroy_all();
-        assert!(child.instance_keeper().borrow().is_destroyed());
+        assert!(!child.instance_store().is_destroyed().unwrap());
+        assert!(external.contains("c").unwrap());
+        external.destroy_all().unwrap();
+        assert!(child.instance_store().is_destroyed().unwrap());
     }
 }

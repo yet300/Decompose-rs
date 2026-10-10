@@ -3,7 +3,7 @@ pub mod children;
 mod engine;
 pub mod items;
 mod navigation;
-pub use navigation::NavigationEvent;
+pub use navigation::{NavigationEvent, NavigationOutcome, NavigationReceipt};
 pub mod pages;
 pub mod panels;
 pub mod slot;
@@ -60,7 +60,18 @@ pub enum NavigationError {
     /// Saved bytes or user codec could not be processed.
     #[error("navigation state: {0}")]
     State(String),
+    /// Application codec failure with the original typed cause preserved.
+    /// Legacy string codecs continue producing `State`.
+    #[error("navigation state: {0}")]
+    StateSource(#[source] crate::ErrorSource),
     /// Context primitive could not be constructed.
     #[error(transparent)]
     Context(#[from] DecomposeError),
+}
+
+impl NavigationError {
+    /// Preserves an owned codec error for Result delivery and diagnostics.
+    pub fn state_source(error: impl std::error::Error + 'static) -> Self {
+        Self::StateSource(crate::ErrorSource::new(error))
+    }
 }

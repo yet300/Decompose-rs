@@ -35,11 +35,29 @@ pub struct ChildrenOptions<E, N> {
     /// Optional conditional automatic Back handling at priority zero.
     pub back_transformer: Option<Rc<BackTransformer<N>>>,
 }
+impl<E, N> ChildrenOptions<E, N> {
+    /// Deterministic, transient options with duplicates disabled. Reads no globals.
+    pub fn new() -> Self {
+        Self::with_config(&crate::DecomposeConfig::default())
+    }
+    /// Captures duplicate defaults from explicit configuration. Other option fields
+    /// retain their standard defaults and can be overridden after construction.
+    pub fn with_config(config: &crate::DecomposeConfig) -> Self {
+        Self {
+            key: "DefaultChildren".into(),
+            allow_duplicates: config.duplicate_configurations_enabled,
+            codec: None,
+            on_state_changed: None,
+            on_event_complete: None,
+            back_transformer: None,
+        }
+    }
+}
 impl<E, N> Default for ChildrenOptions<E, N> {
     fn default() -> Self {
         Self {
             key: "DefaultChildren".into(),
-            allow_duplicates: crate::DecomposeSettings::current().duplicate_configurations_enabled,
+            allow_duplicates: false,
             codec: None,
             on_state_changed: None,
             on_event_complete: None,

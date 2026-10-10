@@ -1,7 +1,7 @@
 use super::{NavState, NavigationError};
 use std::{collections::BTreeMap, rc::Rc};
-type Encode<N> = dyn Fn(&N) -> Result<Option<Vec<u8>>, String>;
-type Decode<N> = dyn Fn(&[u8]) -> Result<Option<N>, String>;
+type Encode<N> = dyn Fn(&N) -> Result<Option<Vec<u8>>, NavigationError>;
+type Decode<N> = dyn Fn(&[u8]) -> Result<Option<N>, NavigationError>;
 /// Optional whole-navigation-state serialization, without a serde requirement.
 ///
 /// Encoding `None` omits persistence. Decoding `None` explicitly declines a
@@ -16,6 +16,17 @@ impl<N> NavStateCodec<N> {
     pub fn new(
         encode: impl Fn(&N) -> Result<Option<Vec<u8>>, String> + 'static,
         decode: impl Fn(&[u8]) -> Result<Option<N>, String> + 'static,
+    ) -> Self {
+        Self {
+            encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+            decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+        }
+    }
+    /// Uses typed navigation errors, including `NavigationError::state_source`.
+    /// Callbacks are retained for future saves/restoration and must own captures.
+    pub fn new_fallible(
+        encode: impl Fn(&N) -> Result<Option<Vec<u8>>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Option<N>, NavigationError> + 'static,
     ) -> Self {
         Self {
             encode: Rc::new(encode),
@@ -34,7 +45,7 @@ impl<N> Clone for NavStateCodec<N> {
 
 impl<N> NavStateCodec<N> {
     pub(crate) fn encode_payload(&self, state: &N) -> Result<Option<Vec<u8>>, NavigationError> {
-        (self.encode)(state).map_err(NavigationError::State)
+        (self.encode)(state)
     }
 }
 fn error(message: impl Into<String>) -> NavigationError {
@@ -135,7 +146,7 @@ pub(crate) fn decode<C, N: NavState<C>>(
     if reader.cursor != bytes.len() {
         return Err(error("trailing bytes after DCH1 envelope"));
     }
-    let Some(configurations) = (codec.decode)(payload).map_err(NavigationError::State)? else {
+    let Some(configurations) = (codec.decode)(payload)? else {
         return Ok(None);
     };
     if configurations.children().len() != count {

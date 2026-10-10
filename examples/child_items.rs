@@ -1,13 +1,12 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::items::{
     ActiveLifecycleState, ItemMap, Items, ItemsCodec, ItemsNavigation, ItemsOptions, child_items,
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
+    StateStore,
 };
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::Cell, rc::Rc};
 
 // Neither configuration nor component needs Clone or Hash.
 #[derive(PartialEq, Eq)]
@@ -32,16 +31,15 @@ fn factory(generations: Rc<Cell<usize>>) -> impl Fn(&RowId, DefaultComponentCont
     move |_, context| {
         generations.set(generations.get() + 1);
         let restored = context
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .consume_bytes("edits")
+            .unwrap()
             .and_then(|bytes| bytes.first().copied())
             .unwrap_or(0);
         let edits = Rc::new(Cell::new(restored));
         let saved_edits = edits.clone();
         context
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("edits", move || vec![saved_edits.get()])
             .unwrap();
         Row {
@@ -80,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .key
         .clone();
     first.edits.set(17);
-    items.set_active_items(|mut active| {
+    items.set_active_items_or_panic(|mut active| {
         active.remove(&RowId(2));
         active
     });
@@ -98,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // A viewport can request several independent live states. Row 2 becomes inactive.
-    items.set_active_items(|_| {
+    items.set_active_items_or_panic(|_| {
         ItemMap::from_owned([
             (RowId(3), ActiveLifecycleState::Started),
             (RowId(4), ActiveLifecycleState::Resumed),
@@ -108,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(row3.context.lifecycle().state(), LifecycleState::Started);
     let row4 = items.get_or_create(&RowId(4))?;
     assert_eq!(row4.context.lifecycle().state(), LifecycleState::Resumed);
-    navigation.set_items(|mut configurations| {
+    navigation.set_items_or_panic(|mut configurations| {
         configurations.rotate_left(2);
         configurations
     });
@@ -127,11 +125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ActiveLifecycleState::Resumed
     );
 
-    let saved = root.state_keeper().borrow().save()?;
+    let saved = root.state_store().save()?;
     root.lifecycle().destroy()?;
-    let restored_root = DefaultComponentContext::with_state_keeper(
+    let restored_root = DefaultComponentContext::with_state_store(
         resumed(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let restored = child_items(
         &restored_root,

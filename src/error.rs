@@ -20,6 +20,39 @@ use essenty_instance_keeper::InstanceKeeperError;
 use essenty_state_keeper::StateKeeperError;
 use thiserror::Error;
 
+/// Shared typed error source for the single-threaded diagnostic/error surface.
+/// Cloning preserves the original error object. Equality compares source identity,
+/// since arbitrary application errors need not implement `Eq` or `Clone`.
+#[derive(Debug, Clone)]
+pub struct ErrorSource(std::rc::Rc<dyn std::error::Error>);
+impl ErrorSource {
+    /// Owns an error for later Result/diagnostic delivery. `'static` is required
+    /// because queued operations and diagnostic clones may outlive this call.
+    pub fn new(error: impl std::error::Error + 'static) -> Self {
+        Self(std::rc::Rc::new(error))
+    }
+    /// The original application error, suitable for downcasting.
+    pub fn as_error(&self) -> &(dyn std::error::Error + 'static) {
+        self.0.as_ref()
+    }
+}
+impl PartialEq for ErrorSource {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ErrorSource {}
+impl std::fmt::Display for ErrorSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for ErrorSource {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.as_error())
+    }
+}
+
 /// Error returned when a new back callback is registered while that same
 /// dispatcher is dispatching.
 ///

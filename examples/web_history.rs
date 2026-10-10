@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let binding = HistoryController::attach(Rc::new(web), backend.clone())?
         .with_lifecycle(&context.lifecycle());
-    navigation.push(2);
+    navigation.push_or_panic(2);
     assert_eq!(backend.entries()[1].url, "/screen/2?draft=a%20b");
     backend.go(-1, Box::new(|result| result.unwrap()));
     assert_eq!(*stack.get().active.configuration, 1);

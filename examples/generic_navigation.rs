@@ -1,14 +1,13 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::children::{
     ChildItem, ChildNavState, ChildStatus, ChildrenOptions, NavState, NavStateCodec,
     SimpleNavigation, children,
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
+    StateStore,
 };
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::Cell, rc::Rc};
 
 // Configurations, events, components and custom output do not need Clone.
 #[derive(PartialEq, Eq)]
@@ -139,16 +138,15 @@ fn factory(generations: Rc<Cell<usize>>) -> impl Fn(&PhotoId, DefaultComponentCo
     move |_, context| {
         generations.set(generations.get() + 1);
         let restored = context
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .consume_bytes("edits")
+            .unwrap()
             .and_then(|bytes| bytes.first().copied())
             .unwrap_or(0);
         let edits = Rc::new(Cell::new(restored));
         let saved = edits.clone();
         context
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("edits", move || vec![saved.get()])
             .unwrap();
         Photo {
@@ -201,12 +199,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     root.lifecycle().move_to(LifecycleState::Started)?;
     assert_eq!(second.context.lifecycle().state(), LifecycleState::Started);
     navigation.navigate(Event::Hide(2));
-    let saved = root.state_keeper().borrow().save()?;
+    let saved = root.state_store().save()?;
     root.lifecycle().destroy()?;
 
-    let restored_root = DefaultComponentContext::with_state_keeper(
+    let restored_root = DefaultComponentContext::with_state_store(
         resumed(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let restored_navigation = SimpleNavigation::<Event>::new();
     let restored = children(

@@ -1,11 +1,13 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::{
     slot::{SlotCodec, SlotNavigation, SlotOptions, child_slot},
     stack::{StackNavigation, StackOptions, child_stack},
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
+    StateStore,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 // Neither routes nor dialogs need Clone.
 #[derive(Debug, PartialEq, Eq)]
@@ -68,12 +70,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|child| &child.configuration.title)
         );
     });
-    screens.push(Screen::Details(7));
-    dialogs.activate(Dialog {
+    screens.push_or_panic(Screen::Details(7));
+    dialogs.activate_or_panic(Dialog {
         title: "Unsaved changes".into(),
     });
     let previous = slot.get();
-    dialogs.activate(Dialog {
+    dialogs.activate_or_panic(Dialog {
         title: "Unsaved changes".into(),
     });
     assert!(Rc::ptr_eq(
@@ -99,12 +101,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(stack.get().items().count(), 1);
 
     // A persistent empty slot overrides a nonempty initial configuration on restore.
-    let saved = root.state_keeper().borrow().save()?;
+    let saved = root.state_store().save()?;
     assert!(saved.contains_key("dialog"));
     root.lifecycle().destroy()?;
-    let restored = DefaultComponentContext::with_state_keeper(
+    let restored = DefaultComponentContext::with_state_store(
         resumed(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let restored_slot = child_slot(
         &restored,

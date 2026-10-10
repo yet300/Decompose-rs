@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::stack::*;
 use decompose_rs::router::{children::*, items::*, pages::*, panels::*, slot::*};
 use decompose_rs::*;
@@ -7,25 +8,25 @@ use std::{
 };
 
 fn recreate(parent: &DefaultComponentContext) -> DefaultComponentContext {
-    let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+    let snapshot = parent.state_store().save_snapshot().unwrap();
     parent.lifecycle().destroy().unwrap();
     root(
         StateKeeper::from_snapshot(snapshot),
-        parent.instance_keeper(),
+        parent.instance_store(),
     )
 }
 fn memory_root(key: &str) -> DefaultComponentContext {
     let mut state = StateKeeper::new();
     state.enable_memory_navigation(key).unwrap();
-    root(state, Rc::new(RefCell::new(InstanceKeeper::new())))
+    root(state, InstanceStore::from(InstanceKeeper::new()))
 }
 
-fn root(state: StateKeeper, instances: SharedInstances) -> DefaultComponentContext {
+fn root(state: StateKeeper, instances: InstanceStore) -> DefaultComponentContext {
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    DefaultComponentContext::with_all(
+    DefaultComponentContext::with_stores(
         lifecycle,
-        Rc::new(RefCell::new(state)),
+        StateStore::from(state),
         instances,
         SharedBack::new(),
     )
@@ -36,7 +37,7 @@ struct Route(u32); // deliberately no Clone or codec
 
 #[test]
 fn memory_recreation_keeps_identity_nested_bytes_and_retained_instances_but_disk_resets() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let mut keeper = StateKeeper::new();
     keeper
         .enable_memory_navigation("DefaultChildStack")
@@ -49,13 +50,9 @@ fn memory_recreation_keeps_identity_nested_bytes_and_retained_instances_but_disk
         vec![Route(1)],
         StackOptions::default(),
         |_, ctx| {
-            ctx.state_keeper()
-                .borrow_mut()
-                .register("nested", || vec![7])
-                .unwrap();
+            ctx.state_store().register("nested", || vec![7]).unwrap();
             let retained = ctx
-                .instance_keeper()
-                .borrow_mut()
+                .instance_store()
                 .get_or_create("retained", || 42u32)
                 .unwrap();
             (ctx, retained)
@@ -64,12 +61,11 @@ fn memory_recreation_keeps_identity_nested_bytes_and_retained_instances_but_disk
     .unwrap();
     navigation.push(Route(2));
     let saved_child = stack.get().active.clone();
-    let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+    let snapshot = parent.state_store().save_snapshot().unwrap();
     assert!(!snapshot.persistent().contains_key("DefaultChildStack"));
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .save()
             .unwrap()
             .contains_key("DefaultChildStack")
@@ -83,12 +79,11 @@ fn memory_recreation_keeps_identity_nested_bytes_and_retained_instances_but_disk
         StackOptions::default(),
         |_, ctx| {
             assert_eq!(
-                ctx.state_keeper().borrow_mut().consume_bytes("nested"),
+                ctx.state_store().consume_bytes("nested").unwrap(),
                 Some(vec![7])
             );
             let retained = ctx
-                .instance_keeper()
-                .borrow_mut()
+                .instance_store()
                 .get_or_create("retained", || 0u32)
                 .unwrap();
             (ctx, retained)
@@ -106,7 +101,7 @@ fn memory_recreation_keeps_identity_nested_bytes_and_retained_instances_but_disk
     ));
     let disk = root(
         StateKeeper::with_restored(snapshot.into_persistent()),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let disk_stack = child_stack(
         &disk,
@@ -125,7 +120,7 @@ fn failed_creation_returns_memory_snapshot_and_cancels_source() {
     keeper
         .enable_memory_navigation("DefaultChildStack")
         .unwrap();
-    let parent = root(keeper, Rc::new(RefCell::new(InstanceKeeper::new())));
+    let parent = root(keeper, InstanceStore::from(InstanceKeeper::new()));
     child_stack(
         &parent,
         &StackNavigation::new(),
@@ -134,11 +129,11 @@ fn failed_creation_returns_memory_snapshot_and_cancels_source() {
         |_, _| (),
     )
     .unwrap();
-    let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+    let snapshot = parent.state_store().save_snapshot().unwrap();
     parent.lifecycle().destroy().unwrap();
     let next = root(
         StateKeeper::from_snapshot(snapshot),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let source = StackNavigation::<Route>::new();
     let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -152,9 +147,9 @@ fn failed_creation_returns_memory_snapshot_and_cancels_source() {
     }));
     assert!(failed.is_err());
     assert!(
-        next.state_keeper()
-            .borrow()
+        next.state_store()
             .has_consumable("DefaultChildStack")
+            .unwrap()
     );
     let restored = child_stack_with_initial(
         &next,
@@ -171,12 +166,11 @@ fn failed_creation_returns_memory_snapshot_and_cancels_source() {
 fn memory_router_inside_fixed_child_context_restores_through_root_snapshot() {
     let parent = root(
         StateKeeper::new(),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let child = parent.child_context("fixed").unwrap();
     child
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .enable_memory_navigation("DefaultChildStack")
         .unwrap();
     let nav = StackNavigation::new();
@@ -189,11 +183,11 @@ fn memory_router_inside_fixed_child_context_restores_through_root_snapshot() {
     )
     .unwrap();
     nav.push(Route(7));
-    let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+    let snapshot = parent.state_store().save_snapshot().unwrap();
     parent.lifecycle().destroy().unwrap();
     let next = root(
         StateKeeper::from_snapshot(snapshot),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let child = next.child_context("fixed").unwrap();
     let restored = child_stack_with_initial(
@@ -252,8 +246,7 @@ fn pages_preserve_destroyed_entries_and_nested_memory_until_resurrection() {
         },
         |route, ctx| {
             let nested_nav = StackNavigation::new();
-            ctx.state_keeper()
-                .borrow_mut()
+            ctx.state_store()
                 .enable_memory_navigation("DefaultChildStack")
                 .unwrap();
             let nested = child_stack_with_initial(
@@ -289,8 +282,7 @@ fn pages_preserve_destroyed_entries_and_nested_memory_until_resurrection() {
         },
         |route, ctx| {
             let nested_nav = StackNavigation::new();
-            ctx.state_keeper()
-                .borrow_mut()
+            ctx.state_store()
                 .enable_memory_navigation("DefaultChildStack")
                 .unwrap();
             let nested = child_stack_with_initial(
@@ -326,8 +318,7 @@ fn pages_preserve_destroyed_entries_and_nested_memory_until_resurrection() {
 fn panels_mode_and_roles_and_items_activation_restore_without_codecs() {
     let parent = memory_root(&PanelsOptions::<Route, Route>::default().key);
     parent
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .enable_memory_navigation(&ItemsOptions::<Route>::default().key)
         .unwrap();
     let panels_nav = PanelsNavigation::<Route, Route>::new();
@@ -454,7 +445,7 @@ fn type_mismatch_is_typed_and_returns_consumed_snapshot() {
         |_, _| (),
     );
     assert!(matches!(failed, Err(NavigationError::State(_))));
-    assert!(next.state_keeper().borrow().has_consumable("router"));
+    assert!(next.state_store().has_consumable("router").unwrap());
     let restored = child_stack_with_initial(
         &next,
         &StackNavigation::<Route>::new(),
@@ -473,41 +464,40 @@ fn type_mismatch_is_typed_and_returns_consumed_snapshot() {
 fn snapshot_calls_each_nested_provider_once_and_bytes_agree_with_memory() {
     let parent = root(
         StateKeeper::new(),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let child = parent.child_context("fixed").unwrap();
     let calls = Rc::new(Cell::new(0u8));
     let count = calls.clone();
     child
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("counter", move || {
             count.set(count.get() + 1);
             vec![count.get()]
         })
         .unwrap();
-    let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+    let snapshot = parent.state_store().save_snapshot().unwrap();
     assert_eq!(calls.get(), 1);
     let byte_parent = root(
         StateKeeper::with_restored(snapshot.persistent().clone()),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let memory_parent = root(
         StateKeeper::from_snapshot(snapshot),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let bytes = byte_parent
         .child_context("fixed")
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
-        .consume_bytes("counter");
+        .state_store()
+        .consume_bytes("counter")
+        .unwrap();
     let memory = memory_parent
         .child_context("fixed")
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
-        .consume_bytes("counter");
+        .state_store()
+        .consume_bytes("counter")
+        .unwrap();
     assert_eq!(bytes, memory);
 }
 
@@ -523,7 +513,7 @@ fn dropping_snapshot_and_ended_provider_releases_memory_configuration() {
     )
     .unwrap();
     let weak = Rc::downgrade(&value.get().active.configuration);
-    let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+    let snapshot = parent.state_store().save_snapshot().unwrap();
     parent.lifecycle().destroy().unwrap();
     drop(value);
     drop(parent);
@@ -570,7 +560,7 @@ fn memory_selection_bypasses_byte_codec_callbacks_and_predicates() {
 fn skipped_outer_codec_does_not_save_nested_memory_providers() {
     let parent = root(
         StateKeeper::new(),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let calls = Rc::new(Cell::new(0));
     let out = calls.clone();
@@ -586,8 +576,7 @@ fn skipped_outer_codec_does_not_save_nested_memory_providers() {
             ..StackOptions::default()
         },
         move |_, ctx| {
-            ctx.state_keeper()
-                .borrow_mut()
+            ctx.state_store()
                 .enable_memory_navigation("nested")
                 .unwrap();
             let count = out.clone();
@@ -602,8 +591,7 @@ fn skipped_outer_codec_does_not_save_nested_memory_providers() {
                 move |_, nested| {
                     let count = count.clone();
                     nested
-                        .state_keeper()
-                        .borrow_mut()
+                        .state_store()
                         .register("count", move || {
                             count.set(count.get() + 1);
                             vec![1]
@@ -615,7 +603,7 @@ fn skipped_outer_codec_does_not_save_nested_memory_providers() {
         },
     )
     .unwrap();
-    let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+    let snapshot = parent.state_store().save_snapshot().unwrap();
     assert!(!snapshot.persistent().contains_key("DefaultChildStack"));
     assert_eq!(snapshot.memory_count(), 0);
     assert_eq!(calls.get(), 0);
@@ -635,14 +623,14 @@ fn snapshot_during_restored_construction_preserves_provisional_memory_input() {
     let next = recreate(&parent);
     let saved = Rc::new(RefCell::new(None));
     let output = saved.clone();
-    let keeper = next.state_keeper();
+    let keeper = next.state_store();
     child_stack_with_initial(
         &next,
         &StackNavigation::<Route>::new(),
         || panic!("initializer"),
         StackOptions::default(),
         move |_, _| {
-            *output.borrow_mut() = Some(keeper.borrow().save_snapshot().unwrap());
+            *output.borrow_mut() = Some(keeper.save_snapshot().unwrap());
         },
     )
     .unwrap();
@@ -650,7 +638,7 @@ fn snapshot_during_restored_construction_preserves_provisional_memory_input() {
     assert_eq!(provisional.memory_count(), 1);
     let retry = root(
         StateKeeper::from_snapshot(provisional),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let value = child_stack_with_initial(
         &retry,
@@ -668,7 +656,7 @@ fn successful_fixed_child_snapshot_refreshes_last_good_durable_frame() {
     for seed_byte_cache in [false, true] {
         let parent = root(
             StateKeeper::new(),
-            Rc::new(RefCell::new(InstanceKeeper::new())),
+            InstanceStore::from(InstanceKeeper::new()),
         );
         let child = parent.child_context("fixed").unwrap();
         let fail = Rc::new(Cell::new(false));
@@ -678,42 +666,37 @@ fn successful_fixed_child_snapshot_refreshes_last_good_durable_frame() {
         let failure = fail.clone();
         let count = calls.clone();
         child
-            .state_keeper()
-            .borrow_mut()
-            .register_value(
-                "value",
-                move || output.get(),
-                move |value| {
-                    count.set(count.get() + 1);
-                    if failure.get() {
-                        Err("nested encode failed".into())
-                    } else {
-                        Ok(vec![*value])
-                    }
-                },
-            )
+            .state_store()
+            .register_fallible("value", move || {
+                count.set(count.get() + 1);
+                if failure.get() {
+                    Err("nested encode failed".into())
+                } else {
+                    Ok(vec![output.get()])
+                }
+            })
             .unwrap();
         if seed_byte_cache {
-            parent.state_keeper().borrow().save().unwrap();
+            parent.state_store().save().unwrap();
         }
         value.set(2);
         let before = calls.get();
-        let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+        let snapshot = parent.state_store().save_snapshot().unwrap();
         assert_eq!(calls.get(), before + 1);
         fail.set(true);
-        let saved = parent.state_keeper().borrow().save().unwrap();
+        let saved = parent.state_store().save().unwrap();
         assert_eq!(saved.get("fixed"), snapshot.persistent().get("fixed"));
         let recovered = root(
             StateKeeper::with_restored(saved),
-            Rc::new(RefCell::new(InstanceKeeper::new())),
+            InstanceStore::from(InstanceKeeper::new()),
         );
         assert_eq!(
             recovered
                 .child_context("fixed")
                 .unwrap()
-                .state_keeper()
-                .borrow_mut()
-                .consume_bytes("value"),
+                .state_store()
+                .consume_bytes("value")
+                .unwrap(),
             Some(vec![2])
         );
     }
@@ -735,8 +718,7 @@ fn persistent_outer_keeps_nested_memory_in_snapshot_but_durable_restore_resets_i
     );
     let factory = |route: &Route, context: DefaultComponentContext| {
         context
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .enable_memory_navigation("nested")
             .unwrap();
         let nav = StackNavigation::new();
@@ -755,7 +737,7 @@ fn persistent_outer_keeps_nested_memory_in_snapshot_but_durable_restore_resets_i
     };
     let parent = root(
         StateKeeper::new(),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let nav = StackNavigation::new();
     let outer = child_stack(
@@ -772,17 +754,17 @@ fn persistent_outer_keeps_nested_memory_in_snapshot_but_durable_restore_resets_i
     nav.push(Route(2));
     outer.get().active.instance.0.push(Route(99));
     let original = outer.get().active.instance.1.get().active.clone();
-    let snapshot = parent.state_keeper().borrow().save_snapshot().unwrap();
+    let snapshot = parent.state_store().save_snapshot().unwrap();
     assert!(snapshot.persistent().contains_key("DefaultChildStack"));
     let bytes = snapshot.persistent().clone();
     parent.lifecycle().destroy().unwrap();
     let memory = root(
         StateKeeper::from_snapshot(snapshot),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let disk = root(
         StateKeeper::with_restored(bytes),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     for (parent, memory) in [(&memory, true), (&disk, false)] {
         let outer = child_stack_with_initial(

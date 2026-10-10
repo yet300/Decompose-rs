@@ -55,8 +55,8 @@ impl TestContext {
     pub(crate) fn from_parts(parts: ContextParts) -> Self {
         Self {
             lifecycle: parts.lifecycle().clone(),
-            state: parts.state_keeper(),
-            instances: parts.instance_keeper(),
+            state: parts.state_store().inner,
+            instances: parts.instance_store().inner,
             back: parts.back_handler(),
         }
     }
@@ -64,6 +64,11 @@ impl TestContext {
     /// Saves this scope's state bytes (parent save).
     pub(crate) fn save_bytes(&self) -> BTreeMap<String, Vec<u8>> {
         self.state.borrow().save().unwrap()
+    }
+
+    /// Raw state handle for white-box borrow-discipline tests only.
+    pub(crate) fn raw_state_keeper(&self) -> SharedKeeper {
+        Rc::clone(&self.state)
     }
 
     /// Recreates the harness from saved bytes, mirroring upstream
@@ -100,12 +105,16 @@ impl ComponentContext for TestContext {
         self.lifecycle.clone()
     }
 
-    fn state_keeper(&self) -> SharedKeeper {
-        Rc::clone(&self.state)
+    fn state_store(&self) -> crate::StateStore {
+        crate::StateStore {
+            inner: Rc::clone(&self.state),
+        }
     }
 
-    fn instance_keeper(&self) -> SharedInstances {
-        Rc::clone(&self.instances)
+    fn instance_store(&self) -> crate::InstanceStore {
+        crate::InstanceStore {
+            inner: Rc::clone(&self.instances),
+        }
     }
 
     fn back_handler(&self) -> SharedBack {

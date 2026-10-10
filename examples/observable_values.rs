@@ -19,15 +19,19 @@ fn main() {
 
     let previous = source.get();
     let next = Rc::new(Counter(5));
-    assert!(source.compare_and_set(&previous, next.clone()));
+    assert!(source.compare_exchange(&previous, next.clone()).is_ok());
     assert!(Rc::ptr_eq(&source.get(), &next));
-    assert!(!source.compare_and_set(&previous, Rc::new(Counter(99))));
+    assert!(
+        source
+            .compare_exchange(&previous, Rc::new(Counter(99)))
+            .is_err()
+    );
     assert_eq!(mapped.get().as_str(), "counter=5");
     assert_eq!(calls.get(), 2);
 
     let attempts = Cell::new(0);
     let reentrant = source.clone();
-    let installed = source.update_and_get(|old| {
+    let installed = source.update_rc_and_get(|old| {
         attempts.set(attempts.get() + 1);
         if attempts.get() == 1 {
             reentrant.set(Counter(12));

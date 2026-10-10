@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::{
     router::{
         self,
@@ -1088,7 +1089,7 @@ fn dropping_custom_handles_does_not_disconnect_and_parent_destruction_cancels_ev
             .is_destroyed()
     );
     assert_eq!(parent.back_handler().handler_count(), 0);
-    assert!(parent.state_keeper().borrow().save().unwrap().is_empty());
+    assert!(parent.state_store().save().unwrap().is_empty());
 }
 
 fn stack_codec() -> StackCodec<Config> {
@@ -1114,21 +1115,20 @@ fn saved_stack() -> std::collections::BTreeMap<String, Vec<u8>> {
         .get()
         .active
         .instance
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("child-state", || vec![42])
         .unwrap();
-    parent.state_keeper().borrow().save().unwrap()
+    parent.state_store().save().unwrap()
 }
 fn restored(saved: std::collections::BTreeMap<String, Vec<u8>>) -> DefaultComponentContext {
-    DefaultComponentContext::with_state_keeper(
+    DefaultComponentContext::with_state_store(
         root().lifecycle(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     )
 }
 fn assert_clean(parent: &DefaultComponentContext, key: &str) {
-    assert!(!parent.state_keeper().borrow().is_registered(key));
-    assert!(parent.instance_keeper().borrow().is_empty());
+    assert!(!parent.state_store().is_registered(key).unwrap());
+    assert!(parent.instance_store().is_empty().unwrap());
     assert_eq!(parent.back_handler().handler_count(), 0);
 }
 
@@ -1256,7 +1256,7 @@ fn construction_panics_preserve_original_unwind_even_when_custom_cancellation_pa
                 move |_, ctx| -> Component {
                     captured
                         .borrow_mut()
-                        .push((ctx.lifecycle(), ctx.instance_keeper()));
+                        .push((ctx.lifecycle(), ctx.instance_store()));
                     panic!("original slot factory");
                 },
             )
@@ -1290,19 +1290,19 @@ fn construction_panics_preserve_original_unwind_even_when_custom_cancellation_pa
                 move |c, ctx| {
                     captured
                         .borrow_mut()
-                        .push((ctx.lifecycle(), ctx.instance_keeper()));
+                        .push((ctx.lifecycle(), ctx.instance_store()));
                     Component(c.0)
                 },
                 move |c, ctx| {
                     details
                         .borrow_mut()
-                        .push((ctx.lifecycle(), ctx.instance_keeper()));
+                        .push((ctx.lifecycle(), ctx.instance_store()));
                     Component(c.0)
                 },
                 move |c, ctx| {
                     extra
                         .borrow_mut()
-                        .push((ctx.lifecycle(), ctx.instance_keeper()));
+                        .push((ctx.lifecycle(), ctx.instance_store()));
                     Component(c.0)
                 },
             )
@@ -1335,7 +1335,7 @@ fn construction_panics_preserve_original_unwind_even_when_custom_cancellation_pa
                 move |_, ctx| -> Component {
                     captured
                         .borrow_mut()
-                        .push((ctx.lifecycle(), ctx.instance_keeper()));
+                        .push((ctx.lifecycle(), ctx.instance_store()));
                     panic!("original restored factory");
                 },
             )
@@ -1352,10 +1352,10 @@ fn construction_panics_preserve_original_unwind_even_when_custom_cancellation_pa
     assert_eq!(panic.downcast_ref::<&str>().copied(), Some(expected));
     assert_eq!(connections.get(), 0);
     assert_clean(&parent, key);
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     for (lifecycle, instances) in scopes.borrow().iter() {
         assert!(lifecycle.state().is_destroyed());
-        assert!(instances.borrow().is_destroyed());
+        assert!(instances.is_destroyed().unwrap());
     }
     match mode.as_str() {
         "slot_factory" => {
@@ -1397,9 +1397,9 @@ fn construction_panics_preserve_original_unwind_even_when_custom_cancellation_pa
                     .get()
                     .active
                     .instance
-                    .state_keeper()
-                    .borrow_mut()
-                    .consume_bytes("child-state"),
+                    .state_store()
+                    .consume_bytes("child-state")
+                    .unwrap(),
                 Some(vec![42])
             );
         }
@@ -1434,7 +1434,7 @@ fn back_dispatch_construction_error_restores_saved_input_before_custom_cancel_pa
                         ..Default::default()
                     },
                     move |_, ctx| {
-                        *captured.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_keeper()));
+                        *captured.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_store()));
                         ctx
                     },
                 )
@@ -1451,12 +1451,12 @@ fn back_dispatch_construction_error_restores_saved_input_before_custom_cancel_pa
     assert_eq!(connections.get(), 0);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildStack")
+            .unwrap()
     );
-    assert!(parent.instance_keeper().borrow().is_empty());
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert!(parent.instance_store().is_empty().unwrap());
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     assert_eq!(parent.back_handler().handler_count(), 1);
     // Back dispatch rejects the new child scope before its factory is called.
     assert!(scoped.borrow().is_none());
@@ -1519,7 +1519,7 @@ fn decoder_and_restored_factory_events_join_subscribe_events_in_fifo_order() {
             if c.0 == 1 {
                 assert!(factory_log.borrow().is_empty());
                 assert_eq!(
-                    ctx.state_keeper().borrow_mut().consume_bytes("child-state"),
+                    ctx.state_store().consume_bytes("child-state").unwrap(),
                     Some(vec![42])
                 );
                 nested.navigate(StackEvent::with_completion(
@@ -1665,7 +1665,7 @@ fn typed_decoder_error_returns_saved_input_and_cancels_custom_source_before_retr
     );
     assert_eq!(source.connections.get(), 0);
     assert_clean(&parent, "DefaultChildStack");
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     let value = child_stack(
         &parent,
         &source,
@@ -1707,9 +1707,9 @@ fn parent_cleanup_finishes_scopes_and_provider_removal_before_custom_cancel_pani
     assert_eq!(source.connections.get(), 0);
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildSlot")
+            .unwrap()
     );
     assert_eq!(parent.back_handler().handler_count(), 0);
     assert!(child.instance.lifecycle().state().is_destroyed());

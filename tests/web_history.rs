@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::webhistory::*;
 use decompose_rs::value::MutableValue;
 use decompose_rs::{ComponentContext, DefaultComponentContext};

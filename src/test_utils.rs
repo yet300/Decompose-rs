@@ -7,11 +7,10 @@
 //! [`TestComponentContext::recreate`] explicitly ends them for process death.
 
 use crate::{
-    ComponentContext, ContextFactory, ContextParts, InstanceKeeper, LifecycleError,
-    LifecycleRegistry, LifecycleState, SharedBack, SharedInstances, SharedKeeper, StateKeeper,
-    StateKeeperError,
+    ComponentContext, ContextFactory, ContextParts, InstanceKeeper, InstanceStore, LifecycleError,
+    LifecycleRegistry, LifecycleState, SharedBack, StateKeeper, StateKeeperError, StateStore,
 };
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{collections::BTreeMap, rc::Rc};
 
 /// Failure while saving or recreating a test scope.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -28,8 +27,8 @@ pub enum TestContextError {
 #[derive(Debug, Clone)]
 pub struct TestComponentContext {
     lifecycle: LifecycleRegistry,
-    state: SharedKeeper,
-    instances: SharedInstances,
+    state: StateStore,
+    instances: InstanceStore,
     back: SharedBack,
 }
 
@@ -53,20 +52,20 @@ impl TestComponentContext {
         lifecycle
             .move_to(state)
             .expect("fresh lifecycle accepts every state");
-        Self::with_all(
+        Self::with_stores(
             lifecycle,
-            Rc::new(RefCell::new(StateKeeper::new())),
-            Rc::new(RefCell::new(InstanceKeeper::new())),
+            StateStore::from(StateKeeper::new()),
+            InstanceStore::from(InstanceKeeper::new()),
             SharedBack::new(),
         )
     }
 
-    /// Uses supplied collaborators verbatim without lifecycle attach hooks.
+    /// Uses supplied services verbatim without lifecycle attach hooks.
     #[must_use]
-    pub fn with_all(
+    pub fn with_stores(
         lifecycle: LifecycleRegistry,
-        state: SharedKeeper,
-        instances: SharedInstances,
+        state: StateStore,
+        instances: InstanceStore,
         back: SharedBack,
     ) -> Self {
         Self {
@@ -80,17 +79,23 @@ impl TestComponentContext {
     /// Assembles a test context through the standard detached child factory.
     #[must_use]
     pub fn from_parts(parts: ContextParts) -> Self {
-        Self::with_all(
+        Self::with_stores(
             parts.lifecycle().clone(),
-            parts.state_keeper(),
-            parts.instance_keeper(),
+            parts.state_store(),
+            parts.instance_store(),
             parts.back_handler(),
         )
     }
 
     /// Saves durable state bytes, excluding memory-only navigation data.
     pub fn save_bytes(&self) -> Result<BTreeMap<String, Vec<u8>>, StateKeeperError> {
-        self.state.borrow().save()
+        self.state.save().map_err(|error| match error {
+            crate::StateAccessError::Keeper(error) => error,
+            crate::StateAccessError::Borrowed => StateKeeperError::Encode {
+                key: String::new(),
+                reason: "state store is borrowed".into(),
+            },
+        })
     }
 
     /// Saves first, then destroys the old lifecycle and builds a fresh scope
@@ -105,8 +110,15 @@ impl TestComponentContext {
         if state == LifecycleState::Destroyed {
             return Err(LifecycleError::AlreadyDestroyed.into());
         }
+        let map_to_keeper = |error: crate::StateAccessError| match error {
+            crate::StateAccessError::Keeper(error) => error,
+            crate::StateAccessError::Borrowed => StateKeeperError::Encode {
+                key: String::new(),
+                reason: "state store is borrowed".into(),
+            },
+        };
         let restored = if configuration_change {
-            StateKeeper::from_snapshot(self.state.borrow().save_snapshot()?)
+            StateKeeper::from_snapshot(self.state.save_snapshot().map_err(map_to_keeper)?)
         } else {
             StateKeeper::with_restored(self.save_bytes()?)
         };
@@ -114,19 +126,24 @@ impl TestComponentContext {
             self.lifecycle.create()?;
         }
         if !configuration_change {
-            self.instances.borrow_mut().destroy_all();
+            self.instances
+                .destroy_all()
+                .map_err(|_| StateKeeperError::Encode {
+                    key: String::new(),
+                    reason: "instance store is borrowed".into(),
+                })?;
         }
         self.lifecycle.destroy()?;
         let instances = if configuration_change {
             self.instances.clone()
         } else {
-            Rc::new(RefCell::new(InstanceKeeper::new()))
+            InstanceStore::from(InstanceKeeper::new())
         };
         let lifecycle = LifecycleRegistry::new();
         lifecycle.move_to(state)?;
-        Ok(Self::with_all(
+        Ok(Self::with_stores(
             lifecycle,
-            Rc::new(RefCell::new(restored)),
+            StateStore::from(restored),
             instances,
             SharedBack::new(),
         ))
@@ -141,10 +158,10 @@ impl ComponentContext for TestComponentContext {
     fn lifecycle(&self) -> LifecycleRegistry {
         self.lifecycle.clone()
     }
-    fn state_keeper(&self) -> SharedKeeper {
+    fn state_store(&self) -> StateStore {
         self.state.clone()
     }
-    fn instance_keeper(&self) -> SharedInstances {
+    fn instance_store(&self) -> InstanceStore {
         self.instances.clone()
     }
     fn back_handler(&self) -> SharedBack {

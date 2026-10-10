@@ -28,6 +28,8 @@ pub type PagesEvent<C> = NavigationEvent<Pages<C>, NavigationResult<C>>;
 /// Generic callbacks use static dispatch; this trait is not object-safe.
 pub trait PagesNavigator<C: 'static> {
     /// Applies a transformer, panicking on transition errors.
+    #[deprecated(note = "use try_navigate or navigate_or_panic")]
+    #[track_caller]
     fn navigate(&self, transformer: impl Fn(Pages<C>) -> Pages<C> + 'static) {
         self.navigate_with(transformer, |r| {
             if let Err(e) = r {
@@ -42,6 +44,8 @@ pub trait PagesNavigator<C: 'static> {
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     );
     /// Selects an index. Empty pages remain empty; nonempty invalid indices panic.
+    #[deprecated(note = "use try_select or select_or_panic")]
+    #[track_caller]
     fn select(&self, index: usize) {
         self.navigate(move |mut p| {
             p.selected_index = (!p.items.is_empty()).then_some(index);
@@ -63,6 +67,8 @@ pub trait PagesNavigator<C: 'static> {
         )
     }
     /// Selects the next page, optionally wrapping at the boundary.
+    #[deprecated(note = "use try_select_next or select_next_or_panic")]
+    #[track_caller]
     fn select_next(&self, circular: bool) {
         self.select_next_with(circular, panic_completion)
     }
@@ -89,6 +95,8 @@ pub trait PagesNavigator<C: 'static> {
         )
     }
     /// Selects the previous page, optionally wrapping at the boundary.
+    #[deprecated(note = "use try_select_prev or select_prev_or_panic")]
+    #[track_caller]
     fn select_prev(&self, circular: bool) {
         self.select_prev_with(circular, panic_completion)
     }
@@ -115,6 +123,8 @@ pub trait PagesNavigator<C: 'static> {
         )
     }
     /// Selects the first page.
+    #[deprecated(note = "use try_select_first or select_first_or_panic")]
+    #[track_caller]
     fn select_first(&self) {
         self.select(0)
     }
@@ -126,6 +136,8 @@ pub trait PagesNavigator<C: 'static> {
         self.select_with(0, completion)
     }
     /// Selects the last page.
+    #[deprecated(note = "use try_select_last or select_last_or_panic")]
+    #[track_caller]
     fn select_last(&self) {
         self.select_last_with(panic_completion)
     }
@@ -143,6 +155,8 @@ pub trait PagesNavigator<C: 'static> {
         )
     }
     /// Removes every page.
+    #[deprecated(note = "use try_clear or clear_or_panic")]
+    #[track_caller]
     fn clear(&self) {
         self.navigate(|_| Pages::default())
     }
@@ -154,6 +168,8 @@ pub trait PagesNavigator<C: 'static> {
         self.navigate_with(|_| Pages::default(), completion)
     }
     /// Replaces membership, clamping the old numeric index to the new range.
+    #[deprecated(note = "use try_set_items or set_items_or_panic")]
+    #[track_caller]
     fn set_items(&self, items: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static) {
         self.set_items_with(items, panic_completion)
     }
@@ -177,6 +193,122 @@ pub trait PagesNavigator<C: 'static> {
             },
             completion,
         )
+    }
+    /// Fallible counterpart of `navigate`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_navigate(
+        &self,
+        transformer: impl Fn(Pages<C>) -> Pages<C> + 'static,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| {
+            self.navigate_with(transformer, completion)
+        })
+    }
+    /// Fallible counterpart of `select`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_select(
+        &self,
+        index: usize,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| self.select_with(index, completion))
+    }
+    /// Fallible counterpart of `select_next`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_select_next(
+        &self,
+        circular: bool,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| {
+            self.select_next_with(circular, completion)
+        })
+    }
+    /// Fallible counterpart of `select_prev`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_select_prev(
+        &self,
+        circular: bool,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| {
+            self.select_prev_with(circular, completion)
+        })
+    }
+    /// Fallible counterpart of `select_first`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_select_first(
+        &self,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| self.select_first_with(completion))
+    }
+    /// Fallible counterpart of `select_last`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_select_last(
+        &self,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| self.select_last_with(completion))
+    }
+    /// Fallible counterpart of `clear`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_clear(
+        &self,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| self.clear_with(completion))
+    }
+    /// Fallible counterpart of `set_items`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    fn try_set_items(
+        &self,
+        items: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        crate::router::navigation::collect_results(|completion| {
+            self.set_items_with(items, completion)
+        })
+    }
+    /// Explicitly panicking compatibility operation. See `try_navigate` for errors.
+    #[track_caller]
+    fn navigate_or_panic(&self, transformer: impl Fn(Pages<C>) -> Pages<C> + 'static) {
+        self.navigate_with(transformer, |r| {
+            if let Err(e) = r {
+                panic!("pages navigation failed: {e:?}")
+            }
+        })
+    }
+    /// Explicitly panicking compatibility operation. See `try_select` for errors.
+    #[track_caller]
+    fn select_or_panic(&self, index: usize) {
+        self.navigate_or_panic(move |mut p| {
+            p.selected_index = (!p.items.is_empty()).then_some(index);
+            p
+        })
+    }
+    /// Explicitly panicking compatibility operation. See `try_select_next` for errors.
+    #[track_caller]
+    fn select_next_or_panic(&self, circular: bool) {
+        self.select_next_with(circular, panic_completion)
+    }
+    /// Explicitly panicking compatibility operation. See `try_select_prev` for errors.
+    #[track_caller]
+    fn select_prev_or_panic(&self, circular: bool) {
+        self.select_prev_with(circular, panic_completion)
+    }
+    /// Explicitly panicking compatibility operation. See `try_select_first` for errors.
+    #[track_caller]
+    fn select_first_or_panic(&self) {
+        self.select_or_panic(0)
+    }
+    /// Explicitly panicking compatibility operation. See `try_select_last` for errors.
+    #[track_caller]
+    fn select_last_or_panic(&self) {
+        self.select_last_with(panic_completion)
+    }
+    /// Explicitly panicking compatibility operation. See `try_clear` for errors.
+    #[track_caller]
+    fn clear_or_panic(&self) {
+        self.navigate_or_panic(|_| Pages::default())
+    }
+    /// Explicitly panicking compatibility operation. See `try_set_items` for errors.
+    #[track_caller]
+    fn set_items_or_panic(&self, items: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static) {
+        self.set_items_with(items, panic_completion)
     }
 }
 
@@ -208,6 +340,8 @@ impl<C: 'static> PagesNavigation<C> {
         }
     }
     /// Applies a transformer, panicking on transition errors.
+    #[deprecated(note = "use try_navigate or navigate_or_panic")]
+    #[track_caller]
     pub fn navigate(&self, transformer: impl Fn(Pages<C>) -> Pages<C> + 'static) {
         PagesNavigator::navigate(self, transformer)
     }
@@ -220,6 +354,8 @@ impl<C: 'static> PagesNavigation<C> {
         PagesNavigator::navigate_with(self, transformer, completion)
     }
     /// Selects an index. Empty pages remain empty; nonempty invalid indices panic.
+    #[deprecated(note = "use try_select or select_or_panic")]
+    #[track_caller]
     pub fn select(&self, index: usize) {
         PagesNavigator::select(self, index)
     }
@@ -232,6 +368,8 @@ impl<C: 'static> PagesNavigation<C> {
         PagesNavigator::select_with(self, index, completion)
     }
     /// Selects the next page, optionally wrapping at the boundary.
+    #[deprecated(note = "use try_select_next or select_next_or_panic")]
+    #[track_caller]
     pub fn select_next(&self, circular: bool) {
         PagesNavigator::select_next(self, circular)
     }
@@ -244,6 +382,8 @@ impl<C: 'static> PagesNavigation<C> {
         PagesNavigator::select_next_with(self, circular, completion)
     }
     /// Selects the previous page, optionally wrapping at the boundary.
+    #[deprecated(note = "use try_select_prev or select_prev_or_panic")]
+    #[track_caller]
     pub fn select_prev(&self, circular: bool) {
         PagesNavigator::select_prev(self, circular)
     }
@@ -256,6 +396,8 @@ impl<C: 'static> PagesNavigation<C> {
         PagesNavigator::select_prev_with(self, circular, completion)
     }
     /// Selects the first page.
+    #[deprecated(note = "use try_select_first or select_first_or_panic")]
+    #[track_caller]
     pub fn select_first(&self) {
         PagesNavigator::select_first(self)
     }
@@ -267,6 +409,8 @@ impl<C: 'static> PagesNavigation<C> {
         PagesNavigator::select_first_with(self, completion)
     }
     /// Selects the last page.
+    #[deprecated(note = "use try_select_last or select_last_or_panic")]
+    #[track_caller]
     pub fn select_last(&self) {
         PagesNavigator::select_last(self)
     }
@@ -278,6 +422,8 @@ impl<C: 'static> PagesNavigation<C> {
         PagesNavigator::select_last_with(self, completion)
     }
     /// Removes every page.
+    #[deprecated(note = "use try_clear or clear_or_panic")]
+    #[track_caller]
     pub fn clear(&self) {
         PagesNavigator::clear(self)
     }
@@ -289,6 +435,8 @@ impl<C: 'static> PagesNavigation<C> {
         PagesNavigator::clear_with(self, completion)
     }
     /// Replaces membership, clamping the old numeric index to the new range.
+    #[deprecated(note = "use try_set_items or set_items_or_panic")]
+    #[track_caller]
     pub fn set_items(&self, items: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static) {
         PagesNavigator::set_items(self, items)
     }
@@ -307,8 +455,12 @@ impl<C: 'static> PagesNavigator<C> for PagesNavigation<C> {
         transformer: impl Fn(Pages<C>) -> Pages<C> + 'static,
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     ) {
+        let event = PagesEvent::with_completion(transformer, completion);
+        let abandon = event.clone();
         self.source
-            .navigate(PagesEvent::with_completion(transformer, completion));
+            .navigate_rc_abandonable(Rc::new(event), move || {
+                abandon.complete(Err(NavigationError::ChildUnavailable))
+            });
     }
 }
 impl<C: 'static> NavigationSource<PagesEvent<C>> for PagesNavigation<C> {
@@ -319,5 +471,109 @@ impl<C: 'static> NavigationSource<PagesEvent<C>> for PagesNavigation<C> {
 fn panic_completion<C>(r: Result<NavigationResult<C>, NavigationError>) {
     if let Err(e) = r {
         panic!("pages navigation failed: {e:?}")
+    }
+}
+
+impl<C: 'static> PagesNavigation<C> {
+    /// Fallible counterpart of `navigate`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_navigate(
+        &self,
+        transformer: impl Fn(Pages<C>) -> Pages<C> + 'static,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        PagesNavigator::try_navigate(self, transformer)
+    }
+    /// Fallible counterpart of `select`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_select(
+        &self,
+        index: usize,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        PagesNavigator::try_select(self, index)
+    }
+    /// Fallible counterpart of `select_next`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_select_next(
+        &self,
+        circular: bool,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        PagesNavigator::try_select_next(self, circular)
+    }
+    /// Fallible counterpart of `select_prev`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_select_prev(
+        &self,
+        circular: bool,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        PagesNavigator::try_select_prev(self, circular)
+    }
+    /// Fallible counterpart of `select_first`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_select_first(
+        &self,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        PagesNavigator::try_select_first(self)
+    }
+    /// Fallible counterpart of `select_last`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_select_last(
+        &self,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        PagesNavigator::try_select_last(self)
+    }
+    /// Fallible counterpart of `clear`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_clear(
+        &self,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        PagesNavigator::try_clear(self)
+    }
+    /// Fallible counterpart of `set_items`; accepted nested work returns a pending receipt.
+    /// Stored transformations own their captures because FIFO delivery may outlive this call.
+    pub fn try_set_items(
+        &self,
+        items: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static,
+    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
+        PagesNavigator::try_set_items(self, items)
+    }
+    /// Explicitly panicking compatibility operation. See `try_navigate` for errors.
+    #[track_caller]
+    pub fn navigate_or_panic(&self, transformer: impl Fn(Pages<C>) -> Pages<C> + 'static) {
+        PagesNavigator::navigate_or_panic(self, transformer)
+    }
+    /// Explicitly panicking compatibility operation. See `try_select` for errors.
+    #[track_caller]
+    pub fn select_or_panic(&self, index: usize) {
+        PagesNavigator::select_or_panic(self, index)
+    }
+    /// Explicitly panicking compatibility operation. See `try_select_next` for errors.
+    #[track_caller]
+    pub fn select_next_or_panic(&self, circular: bool) {
+        PagesNavigator::select_next_or_panic(self, circular)
+    }
+    /// Explicitly panicking compatibility operation. See `try_select_prev` for errors.
+    #[track_caller]
+    pub fn select_prev_or_panic(&self, circular: bool) {
+        PagesNavigator::select_prev_or_panic(self, circular)
+    }
+    /// Explicitly panicking compatibility operation. See `try_select_first` for errors.
+    #[track_caller]
+    pub fn select_first_or_panic(&self) {
+        PagesNavigator::select_first_or_panic(self)
+    }
+    /// Explicitly panicking compatibility operation. See `try_select_last` for errors.
+    #[track_caller]
+    pub fn select_last_or_panic(&self) {
+        PagesNavigator::select_last_or_panic(self)
+    }
+    /// Explicitly panicking compatibility operation. See `try_clear` for errors.
+    #[track_caller]
+    pub fn clear_or_panic(&self) {
+        PagesNavigator::clear_or_panic(self)
+    }
+    /// Explicitly panicking compatibility operation. See `try_set_items` for errors.
+    #[track_caller]
+    pub fn set_items_or_panic(&self, items: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static) {
+        PagesNavigator::set_items_or_panic(self, items)
     }
 }

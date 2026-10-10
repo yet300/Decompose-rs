@@ -8,6 +8,17 @@ pub use navigation::{NavigationResult, PanelsEvent, PanelsNavigation, PanelsNavi
 pub use state::PanelsCodec;
 use std::{convert::Infallible, rc::Rc};
 
+/// Main/Details membership with Extra uninhabited.
+pub type TwoPanels<MC, DC> = Panels<MC, DC, Infallible>;
+/// Main/Details child snapshots, without explicit never-type parameters.
+pub type ChildTwoPanels<MC, MT, DC, DT> = ChildPanels<MC, MT, DC, DT, Infallible, Infallible>;
+/// Main/Details navigation source.
+pub type TwoPanelNavigation<MC, DC> = PanelsNavigation<MC, DC, Infallible>;
+/// Main/Details construction options.
+pub type TwoPanelOptions<MC, DC> = PanelsOptions<MC, DC, Infallible>;
+/// Main/Details codec; use `without_extra` or typed `without_extra_fallible`.
+pub type TwoPanelCodec<MC, DC> = PanelsCodec<MC, DC, Infallible>;
+
 /// Controls which present panels are resumed. Every present panel stays created.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChildPanelsMode {

@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::slot::*;
 use decompose_rs::*;
 use std::{
@@ -44,7 +45,7 @@ fn empty_activate_equal_replace_and_dismiss_preserve_scope_contract() {
         first.instance.lifecycle().state(),
         LifecycleState::Destroyed
     );
-    assert!(first.instance.instance_keeper().borrow().is_destroyed());
+    assert!(first.instance.instance_store().is_destroyed().unwrap());
     let second = slot.get().child.as_ref().unwrap().clone();
     assert_ne!(first.key, second.key);
     navigation.dismiss();
@@ -110,41 +111,39 @@ fn persistent_options() -> SlotOptions<u32> {
 }
 fn restored_root(
     saved: std::collections::BTreeMap<String, Vec<u8>>,
-    instances: Option<SharedInstances>,
+    instances: Option<InstanceStore>,
 ) -> DefaultComponentContext {
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    let state = Rc::new(RefCell::new(StateKeeper::with_restored(saved)));
+    let state = StateStore::from(StateKeeper::with_restored(saved));
     if let Some(instances) = instances {
-        DefaultComponentContext::with_all(lifecycle, state, instances, SharedBack::new())
+        DefaultComponentContext::with_stores(lifecycle, state, instances, SharedBack::new())
     } else {
-        DefaultComponentContext::with_state_keeper(lifecycle, state)
+        DefaultComponentContext::with_state_store(lifecycle, state)
     }
 }
 
 #[test]
 fn populated_persistence_restores_configuration_key_nested_state_and_retention() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored_root(Default::default(), Some(instances.clone()));
     let nav = SlotNavigation::new();
     let slot = child_slot(&parent, &nav, Some(10), persistent_options(), |_, ctx| ctx).unwrap();
     let original = slot.get().child.as_ref().unwrap().clone();
     original
         .instance
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("nested", || vec![42])
         .unwrap();
     let service = original
         .instance
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("service", || 99u32)
         .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert_eq!(&saved["DefaultChildSlot"][..4], b"DSL1");
     parent.lifecycle().destroy().unwrap();
-    assert!(!original.instance.instance_keeper().borrow().is_destroyed());
+    assert!(!original.instance.instance_store().is_destroyed().unwrap());
     let recreated = restored_root(saved.clone(), Some(instances));
     let slot = child_slot(
         &recreated,
@@ -160,15 +159,14 @@ fn populated_persistence_restores_configuration_key_nested_state_and_retention()
     assert_eq!(
         restored
             .instance
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("nested"),
+            .state_store()
+            .consume_bytes("nested")
+            .unwrap(),
         Some(vec![42])
     );
     let reused = restored
         .instance
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("service", || 0u32)
         .unwrap();
     assert!(Rc::ptr_eq(&service, &reused));
@@ -185,8 +183,7 @@ fn populated_persistence_restores_configuration_key_nested_state_and_retention()
     assert_eq!(*child.configuration, 10);
     let new = child
         .instance
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("service", || 0u32)
         .unwrap();
     assert!(!Rc::ptr_eq(&service, &new));
@@ -204,7 +201,7 @@ fn persisted_empty_overrides_initial_and_never_invokes_codec() {
         ..Default::default()
     };
     let slot = child_slot(&parent, &nav, None, options, |_, ctx| ctx).unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert_eq!(saved["DefaultChildSlot"].len(), 16);
     let recreated = restored_root(saved, None);
     let options = SlotOptions {
@@ -228,9 +225,9 @@ fn saving_dismissal_overwrites_populated_membership_and_preserves_counter() {
     let nav = SlotNavigation::new();
     let slot = child_slot(&parent, &nav, Some(1), persistent_options(), |_, ctx| ctx).unwrap();
     let old_key = slot.get().child.as_ref().unwrap().key.clone();
-    assert!(parent.state_keeper().borrow().save().unwrap()["DefaultChildSlot"].len() > 16);
+    assert!(parent.state_store().save().unwrap()["DefaultChildSlot"].len() > 16);
     nav.dismiss();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved, None);
     let slot = child_slot(&parent, &nav, Some(2), persistent_options(), |_, ctx| ctx).unwrap();
     assert!(slot.get().child.is_none());
@@ -256,9 +253,9 @@ fn destroying_parent_in_initial_factory_aborts_construction() {
     assert_eq!(root.back_handler().handler_count(), 0);
     assert!(
         !root
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildSlot")
+            .unwrap()
     );
 }
 
@@ -283,9 +280,9 @@ fn initial_resume_destroying_parent_is_a_construction_error() {
     assert!(matches!(result, Err(NavigationError::Destroyed)));
     assert!(
         !root
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildSlot")
+            .unwrap()
     );
     assert_eq!(root.back_handler().handler_count(), 0);
 }
@@ -314,11 +311,11 @@ fn panicking_navigation_queued_by_initial_factory_rolls_back_constructor() {
     assert!(outcome.is_err());
     assert!(
         !root
-            .state_keeper()
-            .borrow()
+            .state_store()
             .is_registered("DefaultChildSlot")
+            .unwrap()
     );
-    assert!(root.instance_keeper().borrow().is_empty());
+    assert!(root.instance_store().is_empty().unwrap());
     assert_eq!(root.back_handler().handler_count(), 0);
 }
 
@@ -361,8 +358,7 @@ fn saves_use_one_membership_snapshot_even_when_a_provider_navigates() {
         if *config == 1 {
             let nav = source.clone();
             let once = once.clone();
-            ctx.state_keeper()
-                .borrow_mut()
+            ctx.state_store()
                 .register("state", move || {
                     if once.replace(false) {
                         nav.activate(2);
@@ -375,11 +371,11 @@ fn saves_use_one_membership_snapshot_even_when_a_provider_navigates() {
     })
     .unwrap();
     let original_key = stack.get().child.as_ref().unwrap().key.clone();
-    let saved = root.state_keeper().borrow().save().unwrap();
+    let saved = root.state_store().save().unwrap();
     assert_eq!(*stack.get().child.as_ref().unwrap().configuration, 2);
-    let restored = DefaultComponentContext::with_state_keeper(
+    let restored = DefaultComponentContext::with_state_store(
         self::root().lifecycle(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let options = SlotOptions {
         codec: Some(codec()),
@@ -402,9 +398,9 @@ fn saves_use_one_membership_snapshot_even_when_a_provider_navigates() {
             .as_ref()
             .unwrap()
             .instance
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("state"),
+            .state_store()
+            .consume_bytes("state")
+            .unwrap(),
         Some(vec![11])
     );
 }
@@ -438,13 +434,13 @@ fn queued_initial_event_destroying_parent_returns_a_construction_error() {
 
 #[test]
 fn parent_destroyed_while_old_active_pauses_releases_uncommitted_children() {
-    let root = DefaultComponentContext::with_instance_keeper(
+    let root = DefaultComponentContext::with_instance_store(
         root().lifecycle(),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        InstanceStore::from(InstanceKeeper::new()),
     );
     let nav = SlotNavigation::new();
     let parent = root.lifecycle();
-    let created = Rc::new(RefCell::new(None::<SharedInstances>));
+    let created = Rc::new(RefCell::new(None::<InstanceStore>));
     let peer = created.clone();
     let stack = child_slot(
         &root,
@@ -459,7 +455,7 @@ fn parent_destroyed_while_old_active_pauses_releases_uncommitted_children() {
                     .do_on_pause(move || parent.destroy().unwrap())
                     .detach();
             } else {
-                *peer.borrow_mut() = Some(ctx.instance_keeper());
+                *peer.borrow_mut() = Some(ctx.instance_store());
             }
             ctx
         },
@@ -475,7 +471,7 @@ fn parent_destroyed_while_old_active_pauses_releases_uncommitted_children() {
         &*outcome.borrow(),
         Some(Err(NavigationError::Destroyed))
     ));
-    assert!(created.borrow().as_ref().unwrap().borrow().is_destroyed());
+    assert!(created.borrow().as_ref().unwrap().is_destroyed().unwrap());
     assert_eq!(*stack.get().child.as_ref().unwrap().configuration, 1);
     assert_eq!(root.back_handler().handler_count(), 0);
 }
@@ -490,11 +486,11 @@ fn custom_nonclone_context_and_configuration_work_through_three_slots() {
         fn lifecycle(&self) -> LifecycleRegistry {
             self.base.lifecycle()
         }
-        fn state_keeper(&self) -> SharedKeeper {
-            self.base.state_keeper()
+        fn state_store(&self) -> StateStore {
+            self.base.state_store()
         }
-        fn instance_keeper(&self) -> SharedInstances {
-            self.base.instance_keeper()
+        fn instance_store(&self) -> InstanceStore {
+            self.base.instance_store()
         }
         fn back_handler(&self) -> SharedBack {
             self.base.back_handler()
@@ -733,7 +729,7 @@ fn factory_panic_leaves_old_membership_and_releases_prepared_scope() {
         SlotOptions::default(),
         move |config: &u32, ctx| {
             if *config == 2 {
-                *peer.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_keeper()));
+                *peer.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_store()));
                 source.activate(3);
                 panic!("factory failed");
             }
@@ -745,7 +741,7 @@ fn factory_panic_leaves_old_membership_and_releases_prepared_scope() {
     let captured = captured.borrow();
     let (lifecycle, instances) = captured.as_ref().unwrap();
     assert!(lifecycle.state().is_destroyed());
-    assert!(instances.borrow().is_destroyed());
+    assert!(instances.is_destroyed().unwrap());
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 1);
     assert_eq!(
         slot.get()
@@ -938,7 +934,7 @@ fn stack_slot_siblings_coexist_and_conflicts_are_rejected_before_factories() {
         |_, ctx| ctx,
     )
     .unwrap();
-    assert_eq!(parent.state_keeper().borrow().provider_count(), 2);
+    assert_eq!(parent.state_store().provider_count().unwrap(), 2);
     let same = child_slot(
         &parent,
         &SlotNavigation::new(),
@@ -964,7 +960,7 @@ fn stack_slot_siblings_coexist_and_conflicts_are_rejected_before_factories() {
 #[test]
 fn transient_recreation_and_empty_restore_discard_old_retained_scopes() {
     for persistent in [false, true] {
-        let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+        let instances = InstanceStore::from(InstanceKeeper::new());
         let parent = restored_root(Default::default(), Some(instances.clone()));
         let nav = SlotNavigation::new();
         let options = if persistent {
@@ -973,17 +969,11 @@ fn transient_recreation_and_empty_restore_discard_old_retained_scopes() {
             SlotOptions::default()
         };
         let slot = child_slot(&parent, &nav, None, options, |_, ctx| ctx).unwrap();
-        let saved = parent.state_keeper().borrow().save().unwrap();
+        let saved = parent.state_store().save().unwrap();
         nav.activate(1);
-        let old = slot
-            .get()
-            .child
-            .as_ref()
-            .unwrap()
-            .instance
-            .instance_keeper();
+        let old = slot.get().child.as_ref().unwrap().instance.instance_store();
         parent.lifecycle().destroy().unwrap();
-        assert!(!old.borrow().is_destroyed());
+        assert!(!old.is_destroyed().unwrap());
         let recreated = restored_root(saved, Some(instances));
         let options = if persistent {
             persistent_options()
@@ -998,20 +988,11 @@ fn transient_recreation_and_empty_restore_discard_old_retained_scopes() {
             |_, ctx| ctx,
         )
         .unwrap();
-        assert!(old.borrow().is_destroyed());
+        assert!(old.is_destroyed().unwrap());
         if persistent {
             assert!(slot.get().child.is_none());
         } else {
-            assert!(!Rc::ptr_eq(
-                &old,
-                &slot
-                    .get()
-                    .child
-                    .as_ref()
-                    .unwrap()
-                    .instance
-                    .instance_keeper()
-            ));
+            assert!(!old.ptr_eq(&slot.get().child.as_ref().unwrap().instance.instance_store()));
         }
     }
 }
@@ -1021,7 +1002,7 @@ fn malformed_frames_reject_before_codec_and_remain_retryable() {
     let parent = root();
     let nav = SlotNavigation::new();
     child_slot(&parent, &nav, Some(1), persistent_options(), |_, ctx| ctx).unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let original = saved["DefaultChildSlot"].clone();
     let mut malformed = Vec::new();
     for len in 0..original.len() {
@@ -1068,8 +1049,8 @@ fn malformed_frames_reject_before_codec_and_remain_retryable() {
                 panic!("malformed factory")
             });
             assert!(matches!(result, Err(NavigationError::State(_))));
-            assert_eq!(parent.state_keeper().borrow().provider_count(), 0);
-            assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+            assert_eq!(parent.state_store().provider_count().unwrap(), 0);
+            assert_eq!(parent.state_store().save().unwrap(), saved);
             assert_eq!(parent.back_handler().handler_count(), 0);
         }
     }
@@ -1080,7 +1061,7 @@ fn codec_failures_and_initial_factory_panic_allow_restoration_retry() {
     let parent = root();
     let nav = SlotNavigation::new();
     child_slot(&parent, &nav, Some(1), persistent_options(), |_, ctx| ctx).unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let restored = restored_root(saved.clone(), None);
     let options = SlotOptions {
         codec: Some(SlotCodec::new(
@@ -1092,7 +1073,7 @@ fn codec_failures_and_initial_factory_panic_allow_restoration_retry() {
     assert!(
         matches!(child_slot(&restored,&nav,None,options,|_,ctx|ctx),Err(NavigationError::State(s)) if s=="decode failed")
     );
-    assert_eq!(restored.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(restored.state_store().save().unwrap(), saved);
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child_slot(
             &restored,
@@ -1103,7 +1084,7 @@ fn codec_failures_and_initial_factory_panic_allow_restoration_retry() {
         )))
         .is_err()
     );
-    assert_eq!(restored.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(restored.state_store().save().unwrap(), saved);
     let slot = child_slot(&restored, &nav, None, persistent_options(), |_, ctx| ctx).unwrap();
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 1);
     let parent = root();
@@ -1123,8 +1104,10 @@ fn codec_failures_and_initial_factory_panic_allow_restoration_retry() {
     )
     .unwrap();
     assert!(matches!(
-        parent.state_keeper().borrow().save(),
-        Err(StateKeeperError::Encode { .. })
+        parent.state_store().save(),
+        Err(decompose_rs::StateAccessError::Keeper(
+            StateKeeperError::Encode { .. }
+        ))
     ));
 }
 
@@ -1139,7 +1122,7 @@ fn state_key_reserved_before_reentrant_codec_runs() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved, None);
     let nested = parent.clone();
     let rejected = Rc::new(Cell::new(false));
@@ -1209,14 +1192,12 @@ fn transient_slot_save_does_not_invoke_child_state_providers() {
         .as_ref()
         .unwrap()
         .instance
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("transient", || panic!("transient child save must not run"))
         .unwrap();
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .save()
             .unwrap()
             .contains_key("DefaultChildSlot")
@@ -1237,7 +1218,7 @@ fn lifecycle_panic_releases_prepared_scope_and_processing_recovers() {
         SlotOptions::default(),
         move |config: &u32, ctx| {
             if *config == 2 {
-                *peer.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_keeper()));
+                *peer.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_store()));
                 let nav = source.clone();
                 let _ = ctx
                     .lifecycle()
@@ -1256,7 +1237,7 @@ fn lifecycle_panic_releases_prepared_scope_and_processing_recovers() {
     let captured = captured.borrow();
     let (lifecycle, instances) = captured.as_ref().unwrap();
     assert!(lifecycle.state().is_destroyed());
-    assert!(instances.borrow().is_destroyed());
+    assert!(instances.is_destroyed().unwrap());
     // Lifecycle callback effects preceding the panic cannot be reversed.
     assert!(old.instance.lifecycle().state().is_destroyed());
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 1);
@@ -1276,36 +1257,21 @@ fn lifecycle_panic_releases_prepared_scope_and_processing_recovers() {
 
 #[test]
 fn restoring_earlier_populated_membership_does_not_reuse_discarded_retention() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored_root(Default::default(), Some(instances.clone()));
     let nav = SlotNavigation::new();
     let slot = child_slot(&parent, &nav, Some(1), persistent_options(), |_, ctx| ctx).unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     nav.activate(2);
-    let removed = slot
-        .get()
-        .child
-        .as_ref()
-        .unwrap()
-        .instance
-        .instance_keeper();
+    let removed = slot.get().child.as_ref().unwrap().instance.instance_store();
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, Some(instances));
     let nav = SlotNavigation::new();
     let slot = child_slot(&parent, &nav, Some(99), persistent_options(), |_, ctx| ctx).unwrap();
-    assert!(removed.borrow().is_destroyed());
+    assert!(removed.is_destroyed().unwrap());
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 1);
     nav.activate(3);
-    assert!(!Rc::ptr_eq(
-        &removed,
-        &slot
-            .get()
-            .child
-            .as_ref()
-            .unwrap()
-            .instance
-            .instance_keeper()
-    ));
+    assert!(!removed.ptr_eq(&slot.get().child.as_ref().unwrap().instance.instance_store()));
 }
 
 #[test]
@@ -1363,7 +1329,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
     let navigation = SlotNavigation::new();
     let calls = Rc::new(Cell::new(0));
     let count = calls.clone();
-    let prepared = Rc::new(RefCell::new(None::<SharedInstances>));
+    let prepared = Rc::new(RefCell::new(None::<InstanceStore>));
     let captured = prepared.clone();
     let slot = child_slot(
         &parent,
@@ -1379,7 +1345,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
                     .detach();
             }
             if *configuration == 2 {
-                *captured.borrow_mut() = Some(context.instance_keeper());
+                *captured.borrow_mut() = Some(context.instance_store());
                 if !outgoing_destroy {
                     let _ = context
                         .lifecycle()
@@ -1396,7 +1362,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| navigation.activate(2))).is_err()
     );
     assert!(old.instance.lifecycle().state().is_destroyed());
-    assert!(prepared.borrow().as_ref().unwrap().borrow().is_destroyed());
+    assert!(prepared.borrow().as_ref().unwrap().is_destroyed().unwrap());
     let completed = Rc::new(Cell::new(false));
     let done = completed.clone();
     navigation.activate_with(1, move |result| {
@@ -1412,8 +1378,8 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
     assert!(!Rc::ptr_eq(&old.instance, &retried.instance));
     assert_ne!(old.key, retried.key);
     assert_eq!(calls.get(), 3);
-    assert!(old.instance.instance_keeper().borrow().is_destroyed());
-    assert!(!retried.instance.instance_keeper().borrow().is_destroyed());
+    assert!(old.instance.instance_store().is_destroyed().unwrap());
+    assert!(!retried.instance.instance_store().is_destroyed().unwrap());
     navigation.activate(1);
     assert!(Rc::ptr_eq(
         &retried.instance,
@@ -1452,7 +1418,7 @@ fn dsl1_populated_bytes_remain_identical_to_frozen_pre_pages_fixture() {
         105, 108, 100, 47, 48, 8, 0, 0, 0, 68, 67, 83, 49, 0, 0, 0, 0,
     ];
     assert_eq!(
-        parent.state_keeper().borrow().save().unwrap()["DefaultChildSlot"],
+        parent.state_store().save().unwrap()["DefaultChildSlot"],
         fixture
     );
 }

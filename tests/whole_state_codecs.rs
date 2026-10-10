@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::{
     router::{NavigationError, items::*, pages::*, panels::*, slot::*},
     *,
@@ -46,11 +47,10 @@ impl Policy {
     fn factory(&self, c: &u8, context: DefaultComponentContext) -> ChildData {
         self.factories.set(self.factories.get() + 1);
         assert!(!self.factory_panic.get(), "factory panic");
-        let restored = context.state_keeper().borrow_mut().consume_bytes("nested");
+        let restored = context.state_store().consume_bytes("nested").unwrap();
         let value = *c;
         context
-            .state_keeper()
-            .borrow_mut()
+            .state_store()
             .register("nested", move || vec![value])
             .unwrap();
         ChildData { restored, context }
@@ -81,10 +81,10 @@ struct View {
 fn root(saved: BTreeMap<String, Vec<u8>>) -> DefaultComponentContext {
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    DefaultComponentContext::with_all(
+    DefaultComponentContext::with_stores(
         lifecycle,
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
-        Rc::new(RefCell::new(InstanceKeeper::new())),
+        StateStore::from(StateKeeper::with_restored(saved)),
+        InstanceStore::from(InstanceKeeper::new()),
         SharedBack::new(),
     )
 }
@@ -322,7 +322,7 @@ fn build(
 fn saved(family: Family) -> (BTreeMap<String, Vec<u8>>, View) {
     let p = root(BTreeMap::new());
     let view = build(family, &p, &Policy::default(), || vec![7, 8]).unwrap();
-    (p.state_keeper().borrow().save().unwrap(), view)
+    (p.state_store().save().unwrap(), view)
 }
 
 #[test]
@@ -380,7 +380,7 @@ fn invalid_whole_state_is_rejected_before_factories_and_restoration_is_retryable
             .is_err()
         );
         assert_eq!(policy.factories.get(), 0);
-        assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(p.state_store().save().unwrap(), saved);
         policy.invalid.set(false);
         policy.decline.set(false);
         assert_eq!(
@@ -409,7 +409,7 @@ fn invalid_envelope_metadata_is_rejected_before_whole_state_decoder() {
         assert!(build(family, &p, &policy, || panic!("corrupt data initialized")).is_err());
         assert_eq!(policy.decodes.get(), 0);
         assert_eq!(policy.factories.get(), 0);
-        assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(p.state_store().save().unwrap(), saved);
     }
 }
 #[test]
@@ -430,7 +430,7 @@ fn whole_state_codecs_keep_save_and_restore_decline_policies() {
         assert_eq!(fresh.members, [9, 10]);
         assert_eq!(fresh.restored, [None, None]);
         assert_eq!(initial_calls, 1);
-        assert!(p.state_keeper().borrow().save().unwrap().is_empty());
+        assert!(p.state_store().save().unwrap().is_empty());
     }
 }
 #[test]
@@ -444,7 +444,7 @@ fn whole_state_decode_errors_and_factory_panics_preserve_retryable_saved_bytes()
             matches!(build(family, &p, &policy, || panic!("codec failure initialized")), Err(NavigationError::State(message)) if message == "decode error")
         );
         assert_eq!(policy.factories.get(), 0);
-        assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(p.state_store().save().unwrap(), saved);
         policy.decode_error.set(false);
         policy.factory_panic.set(true);
         assert!(
@@ -456,7 +456,7 @@ fn whole_state_decode_errors_and_factory_panics_preserve_retryable_saved_bytes()
             )))
             .is_err()
         );
-        assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(p.state_store().save().unwrap(), saved);
         policy.factory_panic.set(false);
         assert_eq!(
             build(family, &p, &policy, || panic!("retry initialized"))
@@ -479,7 +479,7 @@ fn whole_state_decoders_cannot_change_page_count_or_introduce_duplicates() {
             Err(NavigationError::DuplicateConfiguration)
         ));
         assert_eq!(policy.factories.get(), 0);
-        assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(p.state_store().save().unwrap(), saved);
         policy.duplicate.set(false);
         if matches!(family, Family::Pages) {
             policy.wrong_count.set(true);
@@ -488,7 +488,7 @@ fn whole_state_decoders_cannot_change_page_count_or_introduce_duplicates() {
                 Err(NavigationError::State(_))
             ));
             assert_eq!(policy.factories.get(), 0);
-            assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+            assert_eq!(p.state_store().save().unwrap(), saved);
             policy.wrong_count.set(false);
         }
         build(family, &p, &policy, || panic!("valid retry initialized")).unwrap();
@@ -542,7 +542,7 @@ fn whole_state_codecs_restore_empty_pages_and_items_without_initializing() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let p = root(p.state_keeper().borrow().save().unwrap());
+    let p = root(p.state_store().save().unwrap());
     let restored_pages = child_pages_with_initial(
         &p,
         &PagesNavigation::new(),
@@ -632,7 +632,7 @@ fn new_state_supports_panels_without_extra_and_receives_mode_during_encoding() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let p = root(p.state_keeper().borrow().save().unwrap());
+    let p = root(p.state_store().save().unwrap());
     let panels = child_panels_without_extra_with_initial(
         &p,
         &PanelsNavigation::new(),
@@ -661,15 +661,14 @@ fn nullable_slot_restoration_accepts_empty_and_keeps_the_identity_counter() {
         },
         |c, ctx| {
             let value = *c;
-            ctx.state_keeper()
-                .borrow_mut()
+            ctx.state_store()
                 .register("nested", move || vec![value])
                 .unwrap();
             ctx
         },
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = root(saved);
     let navigation = SlotNavigation::new();
     let restored = Rc::new(RefCell::new(Vec::new()));
@@ -690,14 +689,14 @@ fn nullable_slot_restoration_accepts_empty_and_keeps_the_identity_counter() {
         },
         move |_: &u8, ctx| {
             out.borrow_mut()
-                .push(ctx.state_keeper().borrow_mut().consume_bytes("nested"));
+                .push(ctx.state_store().consume_bytes("nested").unwrap());
             ctx
         },
     )
     .unwrap();
     assert!(slot.get().child.is_none());
     assert!(restored.borrow().is_empty());
-    let empty = parent.state_keeper().borrow().save().unwrap();
+    let empty = parent.state_store().save().unwrap();
     assert_eq!(empty["DefaultChildSlot"].len(), 16);
     navigation.activate(9);
     let current = slot.get();
@@ -719,7 +718,7 @@ fn nullable_slot_decoder_errors_and_factory_panics_preserve_saved_data_for_retry
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = p.state_keeper().borrow().save().unwrap();
+    let saved = p.state_store().save().unwrap();
     let p = root(saved.clone());
     let error = child_slot_with_initial(
         &p,
@@ -737,7 +736,7 @@ fn nullable_slot_decoder_errors_and_factory_panics_preserve_saved_data_for_retry
     assert!(
         matches!(error, Err(NavigationError::State(message)) if message == "slot decode error")
     );
-    assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(p.state_store().save().unwrap(), saved);
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child_slot_with_initial(
             &p,
@@ -751,7 +750,7 @@ fn nullable_slot_decoder_errors_and_factory_panics_preserve_saved_data_for_retry
         )))
         .is_err()
     );
-    assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(p.state_store().save().unwrap(), saved);
     let slot = child_slot_with_initial(
         &p,
         &SlotNavigation::new(),
@@ -792,7 +791,7 @@ fn nullable_slot_preserves_empty_dsl1_and_memory_modes_without_codec_callbacks()
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = p.state_keeper().borrow().save().unwrap();
+    let saved = p.state_store().save().unwrap();
     let p = root(saved.clone());
     let slot = child_slot_with_initial(
         &p,
@@ -806,10 +805,9 @@ fn nullable_slot_preserves_empty_dsl1_and_memory_modes_without_codec_callbacks()
     )
     .unwrap();
     assert!(slot.get().child.is_none());
-    assert_eq!(p.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(p.state_store().save().unwrap(), saved);
     let p = TestComponentContext::new();
-    p.state_keeper()
-        .borrow_mut()
+    p.state_store()
         .enable_memory_navigation("DefaultChildSlot")
         .unwrap();
     let memory_codec = SlotCodec::new_state(
@@ -897,7 +895,7 @@ fn whole_state_decoders_can_read_existing_configuration_codec_payloads() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let p = root(p.state_keeper().borrow().save().unwrap());
+    let p = root(p.state_store().save().unwrap());
     let pages = child_pages_with_initial(
         &p,
         &PagesNavigation::new(),

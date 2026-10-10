@@ -1,8 +1,10 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::stack::{StackCodec, StackNavigation, StackOptions, child_stack};
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
+    StateStore,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 // Routes and components do not need Clone.
 #[derive(Debug, PartialEq, Eq)]
@@ -73,16 +75,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.items().count()
         );
     });
-    navigation.push_new(Route::Details(7));
-    navigation.push_new(Route::Details(7)); // Same active configuration: no-op.
+    navigation.push_new_or_panic(Route::Details(7));
+    navigation.push_new_or_panic(Route::Details(7)); // Same active configuration: no-op.
     root.back_handler().back();
-    navigation.push(Route::Settings);
-    let saved = root.state_keeper().borrow().save()?;
+    navigation.push_or_panic(Route::Settings);
+    let saved = root.state_store().save()?;
     root.lifecycle().destroy()?;
 
-    let restored = DefaultComponentContext::with_state_keeper(
+    let restored = DefaultComponentContext::with_state_store(
         resumed(),
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
+        StateStore::from(StateKeeper::with_restored(saved)),
     );
     let options = StackOptions {
         codec: Some(codec()),

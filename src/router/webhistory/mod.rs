@@ -30,12 +30,83 @@ pub enum HistoryError {
     /// An application-supplied key conversion failed.
     #[error("history route codec: {0}")]
     Codec(String),
+    /// Route codec failure preserving its application error object.
+    #[error("history route codec: {0}")]
+    CodecSource(#[source] crate::ErrorSource),
     /// The host could not perform a requested operation.
     #[error("history backend: {0}")]
     Backend(String),
+    /// Host operation failure preserving its application error object.
+    #[error("history backend: {0}")]
+    BackendSource(#[source] crate::ErrorSource),
     /// The underlying router rejected a restored state.
     #[error(transparent)]
     Navigation(#[from] super::NavigationError),
+}
+
+impl HistoryError {
+    /// Owns a route codec error for later history completion/diagnostics.
+    pub fn codec_source(error: impl std::error::Error + 'static) -> Self {
+        Self::CodecSource(crate::ErrorSource::new(error))
+    }
+    /// Owns a host error for later history completion/diagnostics.
+    pub fn backend_source(error: impl std::error::Error + 'static) -> Self {
+        Self::BackendSource(crate::ErrorSource::new(error))
+    }
+}
+
+/// Completed history restoration, or accepted work with a deferred completion.
+#[derive(Debug)]
+#[must_use = "retain pending history receipts instead of resubmitting accepted work"]
+pub enum HistoryOutcome {
+    /// Restoration and notifications finished successfully.
+    Completed,
+    /// A callback/host adapter deferred completion.
+    Pending(HistoryReceipt),
+}
+
+#[derive(Default)]
+struct HistoryResult {
+    result: std::cell::RefCell<Option<Result<(), HistoryError>>>,
+    completed: std::cell::Cell<bool>,
+}
+
+/// Result observation for one accepted history operation. Drop does not cancel it.
+#[must_use = "dropping a receipt discards its result, not the accepted history operation"]
+pub struct HistoryReceipt {
+    result: Rc<HistoryResult>,
+}
+impl HistoryReceipt {
+    /// Whether the adapter has yet to invoke its one-shot completion.
+    pub fn is_pending(&self) -> bool {
+        !self.result.completed.get()
+    }
+    /// Takes the completed result once; `None` means pending or already taken.
+    pub fn take_result(&self) -> Option<Result<(), HistoryError>> {
+        self.result.result.borrow_mut().take()
+    }
+}
+impl std::fmt::Debug for HistoryReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HistoryReceipt")
+            .field("pending", &self.is_pending())
+            .finish_non_exhaustive()
+    }
+}
+fn history_result(
+    dispatch: impl FnOnce(HistoryCompletion),
+) -> Result<HistoryOutcome, HistoryError> {
+    let result = Rc::new(HistoryResult::default());
+    let output = result.clone();
+    dispatch(Box::new(move |value| {
+        *output.result.borrow_mut() = Some(value);
+        output.completed.set(true);
+    }));
+    let receipt = HistoryReceipt { result };
+    match receipt.take_result() {
+        Some(result) => result.map(|()| HistoryOutcome::Completed),
+        None => Ok(HistoryOutcome::Pending(receipt)),
+    }
 }
 
 /// Completes once the requested operation and its notifications have finished.
@@ -108,6 +179,18 @@ impl RouteInfo {
 
 /// An object-safe model bridge for heterogeneous recursive navigation trees.
 pub trait WebNavigation {
+    /// Restores keys with an immediate Result when possible. Accepted deferred
+    /// work returns a receipt; do not resubmit it. Object-safe and runtime-free.
+    fn try_navigate(&self, keys: Vec<Vec<u8>>) -> Result<HistoryOutcome, HistoryError> {
+        history_result(|completion| self.navigate(keys, completion))
+    }
+    /// Restores the full nested target using the same completion observation.
+    fn try_navigate_history(
+        &self,
+        nodes: Vec<HistoryNode>,
+    ) -> Result<HistoryOutcome, HistoryError> {
+        history_result(|completion| self.navigate_history(nodes, completion))
+    }
     /// Reads and encodes the current nonempty history without mutating it.
     fn history(&self) -> Result<Vec<HistoryItem>, HistoryError>;
     /// Registers change notifications, without replaying an initial notification.
@@ -189,6 +272,10 @@ impl<K> Clone for Route<K> {
     }
 }
 impl<K> Route<K> {
+    /// Creates a route from an owned key, allocating shared storage internally.
+    pub fn from_key(key: K, path: impl Into<String>) -> Self {
+        Self::new(Rc::new(key), path)
+    }
     /// Creates a route without parameters or nested navigation.
     pub fn new(key: Rc<K>, path: impl Into<String>) -> Self {
         Self {
@@ -214,6 +301,18 @@ pub struct TypedWebNavigation<K> {
     before: Box<dyn Fn() -> bool>,
 }
 impl<K: 'static> TypedWebNavigation<K> {
+    /// Binds a truly synchronous restoration function returning Result. The
+    /// function is retained with the model and must own its captures. Use `new`
+    /// for sources/hosts that defer completion through FIFO or host callbacks.
+    pub fn new_sync(
+        routes: Value<Vec<Route<K>>>,
+        codec: RouteCodec<K>,
+        navigate: impl Fn(Vec<Rc<K>>) -> Result<(), HistoryError> + 'static,
+    ) -> Self {
+        Self::new(routes, codec, move |keys, completion| {
+            completion(navigate(keys))
+        })
+    }
     /// Binds a typed route observable and restoration callback.
     pub fn new(
         routes: Value<Vec<Route<K>>>,

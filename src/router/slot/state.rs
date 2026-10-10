@@ -1,9 +1,9 @@
 use super::NavigationError;
 use crate::router::engine::SavedState;
 use std::{collections::BTreeMap, rc::Rc};
-type Encode<C> = dyn Fn(&C) -> Result<Vec<u8>, String>;
-type Decode<C> = dyn Fn(&[u8]) -> Result<C, String>;
-type DecodeState<C> = dyn Fn(&[u8]) -> Result<Option<C>, String>;
+type Encode<C> = dyn Fn(&C) -> Result<Vec<u8>, NavigationError>;
+type Decode<C> = dyn Fn(&[u8]) -> Result<C, NavigationError>;
+type DecodeState<C> = dyn Fn(&[u8]) -> Result<Option<C>, NavigationError>;
 enum Decoder<C> {
     Configuration(Rc<Decode<C>>),
     State(Rc<DecodeState<C>>),
@@ -69,8 +69,10 @@ impl<C> SlotCodec<C> {
         decode: impl Fn(&[u8]) -> Result<C, String> + 'static,
     ) -> Self {
         Self {
-            encode: Rc::new(encode),
-            decode: Decoder::Configuration(Rc::new(decode)),
+            encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+            decode: Decoder::Configuration(Rc::new(move |bytes| {
+                decode(bytes).map_err(NavigationError::State)
+            })),
             should_save: None,
             should_restore: None,
         }
@@ -86,6 +88,34 @@ impl<C> SlotCodec<C> {
     pub fn new_state(
         encode: impl Fn(&C) -> Result<Vec<u8>, String> + 'static,
         decode: impl Fn(&[u8]) -> Result<Option<C>, String> + 'static,
+    ) -> Self {
+        Self {
+            encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+            decode: Decoder::State(Rc::new(move |bytes| {
+                decode(bytes).map_err(NavigationError::State)
+            })),
+            should_save: None,
+            should_restore: None,
+        }
+    }
+    /// Uses typed navigation errors, including `NavigationError::state_source`.
+    /// Callbacks are retained for future saves/restoration and must own captures.
+    pub fn new_fallible(
+        encode: impl Fn(&C) -> Result<Vec<u8>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<C, NavigationError> + 'static,
+    ) -> Self {
+        Self {
+            encode: Rc::new(encode),
+            decode: Decoder::Configuration(Rc::new(decode)),
+            should_save: None,
+            should_restore: None,
+        }
+    }
+    /// Uses typed navigation errors, including `NavigationError::state_source`.
+    /// Callbacks are retained for future saves/restoration and must own captures.
+    pub fn new_state_fallible(
+        encode: impl Fn(&C) -> Result<Vec<u8>, NavigationError> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Option<C>, NavigationError> + 'static,
     ) -> Self {
         Self {
             encode: Rc::new(encode),
@@ -121,7 +151,7 @@ pub(super) fn encode<C>(
     if let Some(config) = configs.first() {
         let (key, state) = &children[0];
         validate_key(key, next_key)?;
-        let payload = (codec.encode)(config).map_err(NavigationError::State)?;
+        let payload = (codec.encode)(config)?;
         field(&mut out, &payload)?;
         field(&mut out, key.as_bytes())?;
         u32::try_from(state.len()).map_err(|_| error("DCS1 entry count exceeds u32"))?;
@@ -195,10 +225,8 @@ pub(super) fn decode<C>(
     let (configurations, children) = match child {
         Some((payload, key, state)) => {
             let configuration = match &codec.decode {
-                Decoder::Configuration(decode) => {
-                    Some(decode(payload).map_err(NavigationError::State)?)
-                }
-                Decoder::State(decode) => decode(payload).map_err(NavigationError::State)?,
+                Decoder::Configuration(decode) => Some(decode(payload)?),
+                Decoder::State(decode) => decode(payload)?,
             };
             match configuration {
                 Some(configuration) => (vec![Rc::new(configuration)], vec![(key, state)]),

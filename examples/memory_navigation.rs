@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::stack::{
     StackNavigation, StackOptions, child_stack, child_stack_with_initial,
 };
@@ -10,8 +11,7 @@ struct Screen(u8); // no Clone and no byte codec
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context = TestComponentContext::new();
     context
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .enable_memory_navigation("DefaultChildStack")?;
     let navigation = StackNavigation::new();
     let stack = child_stack(
@@ -21,16 +21,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         StackOptions::default(),
         |_, child| {
             child
-                .state_keeper()
-                .borrow_mut()
+                .state_store()
                 .register("draft", || b"unsent".to_vec())
                 .unwrap();
             child
         },
     )?;
-    navigation.push(Screen(2));
+    navigation.push_or_panic(Screen(2));
     let original = stack.get().active.clone();
-    assert!(context.state_keeper().borrow().save()?.is_empty()); // no navigation or nested draft reaches disk
+    assert!(context.state_store().save()?.is_empty()); // no navigation or nested draft reaches disk
     let recreated = context.recreate(true)?;
     let restored = child_stack_with_initial(
         &recreated,
@@ -49,9 +48,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get()
             .active
             .instance
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("draft"),
+            .state_store()
+            .consume_bytes("draft")
+            .unwrap(),
         Some(b"unsent".to_vec())
     );
     let process = recreated.recreate(false)?;

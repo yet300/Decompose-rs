@@ -21,35 +21,16 @@ use essenty_lifecycle::LifecycleRegistry;
 use crate::child::build_child;
 use crate::error::DecomposeError;
 use crate::shared_back::SharedBack;
+mod stores;
+pub use stores::{InstanceAccessError, InstanceStore, StateAccessError, StateStore};
 
-/// Shared parent-side state-keeper handle.
-///
-/// `Rc`-backed and [`Clone`]; `!Send + !Sync` like the rest of the core.
+/// Shared parent-side state-keeper handle (crate-internal).
 /// Mutated through short `borrow_mut()` calls that never cross observer
 /// delivery, back dispatch, user callbacks, or factory invocation.
-///
-/// # Borrow discipline
-///
-/// Callers MUST NOT hold a `Ref`/`RefMut` on the keeper across Decompose
-/// operations that may mutate that same shared keeper — notably
-/// `child_context*` construction and root lifecycle destroy when using the
-/// default attached `InstanceKeeper`. Violating this panics at runtime under
-/// normal `RefCell` borrowing rules; the API does not (and cannot)
-/// statically prevent it. Decompose itself upholds the mirror discipline:
-/// it never holds a keeper borrow across observer delivery, back dispatch,
-/// user callbacks, or factory invocation.
-pub type SharedKeeper = Rc<RefCell<StateKeeper>>;
+pub(crate) type SharedKeeper = Rc<RefCell<StateKeeper>>;
 
-/// Shared parent-side instance-keeper handle.
-///
-/// Same sharing discipline as [`SharedKeeper`].
-///
-/// # Borrow discipline
-///
-/// Same contract as [`SharedKeeper`]: never hold a borrow across
-/// `child_context*` construction or root lifecycle destroy with the default
-/// attached keeper. A conflicting borrow panics per `RefCell` rules.
-pub type SharedInstances = Rc<RefCell<InstanceKeeper>>;
+/// Shared parent-side instance-keeper handle (crate-internal).
+pub(crate) type SharedInstances = Rc<RefCell<InstanceKeeper>>;
 
 /// Detached context factory: builds a context of type `C` from prepared
 /// child-scope parts, closing over any extra services.
@@ -114,16 +95,18 @@ impl ContextParts {
         &self.lifecycle
     }
 
-    /// The prepared child state keeper (seeded from restored bytes).
-    #[must_use]
-    pub fn state_keeper(&self) -> SharedKeeper {
-        Rc::clone(&self.state)
+    /// Opaque child state service; no borrow guard is exposed.
+    pub fn state_store(&self) -> StateStore {
+        StateStore {
+            inner: self.state.clone(),
+        }
     }
 
-    /// The prepared child instance keeper (retained-or-new scope).
-    #[must_use]
-    pub fn instance_keeper(&self) -> SharedInstances {
-        Rc::clone(&self.instances)
+    /// Opaque child instance service with owned typed results.
+    pub fn instance_store(&self) -> InstanceStore {
+        InstanceStore {
+            inner: self.instances.clone(),
+        }
     }
 
     /// The prepared child back handler (bridged into the parent).
@@ -179,12 +162,17 @@ pub const MANUAL_DESTROY_PANIC_MESSAGE: &str =
 /// cross observer delivery, back dispatch, user callbacks, or factory
 /// invocation.
 pub trait ComponentContext: Sized {
+    /// Explicit diagnostic configuration inherited by descendants. `None`
+    /// preserves legacy thread-local diagnostics for existing custom contexts.
+    fn configuration(&self) -> Option<crate::DecomposeConfig> {
+        None
+    }
     /// The component lifecycle.
     fn lifecycle(&self) -> LifecycleRegistry;
-    /// The component state keeper.
-    fn state_keeper(&self) -> SharedKeeper;
-    /// The component instance keeper.
-    fn instance_keeper(&self) -> SharedInstances;
+    /// Opaque state service. A clone shares the same provider scope.
+    fn state_store(&self) -> StateStore;
+    /// Opaque retention service. Stored types use Essenty's `Any` registry.
+    fn instance_store(&self) -> InstanceStore;
     /// The component back handler. Access goes exclusively through
     /// [`SharedBack`]; raw `RefCell<BackDispatcher>` borrowing is
     /// crate-private.
@@ -193,6 +181,14 @@ pub trait ComponentContext: Sized {
     /// prepared child scope parts, closing over any extra services.
     /// Computed from `&self` per call; never stored.
     fn context_factory(&self) -> ContextFactory<Self>;
+
+    /// Assembles an immediate child from prepared parts. Override this to avoid
+    /// allocating a detached factory for synchronous `child_context*` calls.
+    /// Routers still use `context_factory` for future child creation; existing
+    /// custom implementations inherit their factory behavior unchanged.
+    fn make_context(&self, parts: ContextParts) -> Self {
+        self.context_factory()(parts)
+    }
 
     /// Fixed-child helper ("lives as long as the parent").
     ///
@@ -213,9 +209,8 @@ pub trait ComponentContext: Sized {
     ///
     /// # Panics
     ///
-    /// Holding a `Ref`/`RefMut` borrow on the parent state or instance
-    /// keeper across this call panics under `RefCell` rules (see the
-    /// borrow-discipline sections on [`SharedKeeper`]/[`SharedInstances`]).
+    /// Opaque [`StateStore`]/[`InstanceStore`] handles never expose borrow
+    /// guards, so no caller-held borrow can conflict with this call.
     fn child_context(&self, key: &str) -> Result<Self, DecomposeError> {
         self.child_context_with_priority(key, DEFAULT_BACK_PRIORITY)
     }
@@ -242,9 +237,7 @@ pub trait ComponentContext: Sized {
     /// then the panic. Post-panic observer cleanup is unspecified — use
     /// fresh fixtures when testing this path.
     ///
-    /// Holding a keeper borrow across this call panics under `RefCell`
-    /// rules, same as
-    /// [`child_context`](ComponentContext::child_context).
+    /// No caller-held borrow can conflict with this call; services are opaque.
     fn child_context_with_lifecycle(
         &self,
         key: &str,
@@ -265,8 +258,7 @@ pub trait ComponentContext: Sized {
     ///
     /// # Panics
     ///
-    /// Same keeper-borrow contract as
-    /// [`child_context`](ComponentContext::child_context).
+    /// No caller-held borrow can conflict with this call.
     fn child_context_with_priority(
         &self,
         key: &str,
@@ -274,13 +266,13 @@ pub trait ComponentContext: Sized {
     ) -> Result<Self, DecomposeError> {
         build_child(
             &self.lifecycle(),
-            &self.state_keeper(),
-            &self.instance_keeper(),
+            &self.state_store().inner,
+            &self.instance_store().inner,
             &self.back_handler(),
             ChildKey::new(key),
             None,
             priority,
-            self.context_factory(),
+            |parts| self.make_context(parts),
         )
     }
 
@@ -297,9 +289,7 @@ pub trait ComponentContext: Sized {
     /// # Panics
     ///
     /// Same manual-destroy contract as
-    /// [`child_context_with_lifecycle`](ComponentContext::child_context_with_lifecycle),
-    /// plus the same keeper-borrow contract as
-    /// [`child_context`](ComponentContext::child_context).
+    /// [`child_context_with_lifecycle`](ComponentContext::child_context_with_lifecycle).
     fn child_context_with_lifecycle_and_priority(
         &self,
         key: &str,
@@ -308,13 +298,13 @@ pub trait ComponentContext: Sized {
     ) -> Result<Self, DecomposeError> {
         build_child(
             &self.lifecycle(),
-            &self.state_keeper(),
-            &self.instance_keeper(),
+            &self.state_store().inner,
+            &self.instance_store().inner,
             &self.back_handler(),
             ChildKey::new(key),
             Some(lifecycle),
             priority,
-            self.context_factory(),
+            |parts| self.make_context(parts),
         )
     }
 }
@@ -338,6 +328,7 @@ pub struct DefaultComponentContext {
     state: SharedKeeper,
     instances: SharedInstances,
     back: SharedBack,
+    config: Option<crate::DecomposeConfig>,
 }
 
 impl DefaultComponentContext {
@@ -371,6 +362,7 @@ impl DefaultComponentContext {
             state,
             instances,
             back,
+            config: None,
         }
     }
 
@@ -381,19 +373,13 @@ impl DefaultComponentContext {
         Self::assemble(lifecycle, None, None, None)
     }
 
-    /// Creates a context with a supplied state keeper; the instance keeper
-    /// is fresh (attached) and the back dispatcher is fresh.
+    /// Selects explicit diagnostics for this context and descendants, bypassing
+    /// thread-local handlers. Construct router options with the same config to
+    /// select their duplicate defaults; explicit option fields still win.
     #[must_use]
-    pub fn with_state_keeper(lifecycle: LifecycleRegistry, state: SharedKeeper) -> Self {
-        Self::assemble(lifecycle, Some(state), None, None)
-    }
-
-    /// Creates a context with a supplied instance keeper (used verbatim —
-    /// no destroy hook is installed); fresh state keeper and back
-    /// dispatcher.
-    #[must_use]
-    pub fn with_instance_keeper(lifecycle: LifecycleRegistry, instances: SharedInstances) -> Self {
-        Self::assemble(lifecycle, None, Some(instances), None)
+    pub fn with_config(mut self, config: crate::DecomposeConfig) -> Self {
+        self.config = Some(config);
+        self
     }
 
     /// Creates a context with a supplied back handler; fresh state keeper
@@ -403,16 +389,33 @@ impl DefaultComponentContext {
         Self::assemble(lifecycle, None, None, Some(back))
     }
 
-    /// Creates a context with all collaborators supplied verbatim (no attach
-    /// hook on the instance keeper).
+    /// Creates a context using an opaque supplied state service.
     #[must_use]
-    pub fn with_all(
+    pub fn with_state_store(lifecycle: LifecycleRegistry, state: StateStore) -> Self {
+        Self::assemble(lifecycle, Some(state.inner), None, None)
+    }
+
+    /// Creates a context using an opaque supplied retention service. The caller
+    /// owns its teardown, as with the legacy externally supplied keeper.
+    #[must_use]
+    pub fn with_instance_store(lifecycle: LifecycleRegistry, instances: InstanceStore) -> Self {
+        Self::assemble(lifecycle, None, Some(instances.inner), None)
+    }
+
+    /// Supplies all services; external retention is not attached to the lifecycle.
+    #[must_use]
+    pub fn with_stores(
         lifecycle: LifecycleRegistry,
-        state: SharedKeeper,
-        instances: SharedInstances,
+        state: StateStore,
+        instances: InstanceStore,
         back: SharedBack,
     ) -> Self {
-        Self::assemble(lifecycle, Some(state), Some(instances), Some(back))
+        Self::assemble(
+            lifecycle,
+            Some(state.inner),
+            Some(instances.inner),
+            Some(back),
+        )
     }
 
     /// Inherent (non-trait) constructor from prepared parts. This is the
@@ -423,9 +426,10 @@ impl DefaultComponentContext {
     pub fn from_parts(parts: ContextParts) -> Self {
         Self {
             lifecycle: parts.lifecycle().clone(),
-            state: parts.state_keeper(),
-            instances: parts.instance_keeper(),
+            state: parts.state_store().inner,
+            instances: parts.instance_store().inner,
             back: parts.back_handler(),
+            config: None,
         }
     }
 
@@ -437,16 +441,28 @@ impl DefaultComponentContext {
 }
 
 impl ComponentContext for DefaultComponentContext {
+    fn make_context(&self, parts: ContextParts) -> Self {
+        let mut context = Self::from_parts(parts);
+        context.config = self.config.clone();
+        context
+    }
+    fn configuration(&self) -> Option<crate::DecomposeConfig> {
+        self.config.clone()
+    }
     fn lifecycle(&self) -> LifecycleRegistry {
         self.lifecycle.clone()
     }
 
-    fn state_keeper(&self) -> SharedKeeper {
-        Rc::clone(&self.state)
+    fn state_store(&self) -> StateStore {
+        StateStore {
+            inner: Rc::clone(&self.state),
+        }
     }
 
-    fn instance_keeper(&self) -> SharedInstances {
-        Rc::clone(&self.instances)
+    fn instance_store(&self) -> InstanceStore {
+        InstanceStore {
+            inner: Rc::clone(&self.instances),
+        }
     }
 
     fn back_handler(&self) -> SharedBack {
@@ -454,7 +470,12 @@ impl ComponentContext for DefaultComponentContext {
     }
 
     fn context_factory(&self) -> ContextFactory<Self> {
-        Rc::new(Self::from_parts)
+        let config = self.config.clone();
+        Rc::new(move |parts| {
+            let mut context = Self::from_parts(parts);
+            context.config = config.clone();
+            context
+        })
     }
 }
 
@@ -477,30 +498,30 @@ mod tests {
         let ctx = DefaultComponentContext::new(lifecycle.clone());
         assert_eq!(ctx.lifecycle().state(), LifecycleState::Resumed);
         // Fresh collaborators.
-        assert_eq!(ctx.state_keeper().borrow().provider_count(), 0);
-        assert_eq!(ctx.state_keeper().borrow().pending_count(), 0);
-        assert!(!ctx.instance_keeper().borrow().is_destroyed());
-        assert_eq!(ctx.instance_keeper().borrow().len(), 0);
+        assert_eq!(ctx.state_store().provider_count().unwrap(), 0);
+        assert_eq!(ctx.state_store().pending_count().unwrap(), 0);
+        assert!(!ctx.instance_store().is_destroyed().unwrap());
+        assert_eq!(ctx.instance_store().len().unwrap(), 0);
         assert_eq!(ctx.back_handler().handler_count(), 0);
         // The fresh instance keeper is attached: root destroy ends it.
         lifecycle.destroy().unwrap();
-        assert!(ctx.instance_keeper().borrow().is_destroyed());
+        assert!(ctx.instance_store().is_destroyed().unwrap());
     }
 
     #[test]
     fn supplied_values_used_verbatim() {
         let lifecycle = resumed_lifecycle();
-        let state: SharedKeeper = Rc::new(RefCell::new(StateKeeper::new()));
-        let instances: SharedInstances = Rc::new(RefCell::new(InstanceKeeper::new()));
+        let state = StateStore::from(StateKeeper::new());
+        let instances = InstanceStore::from(InstanceKeeper::new());
         let back = SharedBack::new();
-        let ctx = DefaultComponentContext::with_all(
+        let ctx = DefaultComponentContext::with_stores(
             lifecycle.clone(),
-            Rc::clone(&state),
-            Rc::clone(&instances),
+            state.clone(),
+            instances.clone(),
             back.clone(),
         );
-        assert!(Rc::ptr_eq(&ctx.state_keeper(), &state));
-        assert!(Rc::ptr_eq(&ctx.instance_keeper(), &instances));
+        assert!(Rc::ptr_eq(&ctx.state_store().inner, &state.inner));
+        assert!(Rc::ptr_eq(&ctx.instance_store().inner, &instances.inner));
         // Back handles share one dispatcher: registering through either is
         // visible through the other.
         ctx.back_handler().register(0, true, |_, _| {}).unwrap();
@@ -510,12 +531,12 @@ mod tests {
     #[test]
     fn external_keeper_gets_no_destroy_hook() {
         let lifecycle = resumed_lifecycle();
-        let instances: SharedInstances = Rc::new(RefCell::new(InstanceKeeper::new()));
+        let instances = InstanceStore::from(InstanceKeeper::new());
         let ctx =
-            DefaultComponentContext::with_instance_keeper(lifecycle.clone(), Rc::clone(&instances));
+            DefaultComponentContext::with_instance_store(lifecycle.clone(), instances.clone());
         lifecycle.destroy().unwrap();
         // Ownership stays with the caller: no hook installed.
-        assert!(!instances.borrow().is_destroyed());
+        assert!(!instances.is_destroyed().unwrap());
         let _ = ctx;
     }
 
@@ -523,9 +544,9 @@ mod tests {
     fn dropping_context_alone_destroys_nothing() {
         let lifecycle = resumed_lifecycle();
         let ctx = DefaultComponentContext::new(lifecycle);
-        let keeper = ctx.instance_keeper();
+        let keeper = ctx.instance_store();
         drop(ctx);
-        assert!(!keeper.borrow().is_destroyed());
+        assert!(!keeper.is_destroyed().unwrap());
     }
 
     #[test]
@@ -535,15 +556,18 @@ mod tests {
         let other = DefaultComponentContext::new(resumed_lifecycle());
         let sibling = factory(ContextParts::new(
             other.lifecycle(),
-            other.state_keeper(),
-            other.instance_keeper(),
+            other.state_store().inner,
+            other.instance_store().inner,
             other.back_handler(),
         ));
         // The factory assembled exactly the given parts (no parent link).
-        assert!(Rc::ptr_eq(&sibling.state_keeper(), &other.state_keeper()));
         assert!(Rc::ptr_eq(
-            &sibling.instance_keeper(),
-            &other.instance_keeper()
+            &sibling.state_store().inner,
+            &other.state_store().inner
+        ));
+        assert!(Rc::ptr_eq(
+            &sibling.instance_store().inner,
+            &other.instance_store().inner
         ));
         drop(parent);
         assert_eq!(sibling.lifecycle().state(), LifecycleState::Resumed);
@@ -603,11 +627,11 @@ mod tests {
         fn lifecycle(&self) -> LifecycleRegistry {
             self.delegate.lifecycle()
         }
-        fn state_keeper(&self) -> SharedKeeper {
-            self.delegate.state_keeper()
+        fn state_store(&self) -> crate::StateStore {
+            self.delegate.state_store()
         }
-        fn instance_keeper(&self) -> SharedInstances {
-            self.delegate.instance_keeper()
+        fn instance_store(&self) -> crate::InstanceStore {
+            self.delegate.instance_store()
         }
         fn back_handler(&self) -> SharedBack {
             self.delegate.back_handler()
@@ -628,11 +652,11 @@ mod tests {
         fn lifecycle(&self) -> LifecycleRegistry {
             self.delegate.lifecycle()
         }
-        fn state_keeper(&self) -> SharedKeeper {
-            self.delegate.state_keeper()
+        fn state_store(&self) -> crate::StateStore {
+            self.delegate.state_store()
         }
-        fn instance_keeper(&self) -> SharedInstances {
-            self.delegate.instance_keeper()
+        fn instance_store(&self) -> crate::InstanceStore {
+            self.delegate.instance_store()
         }
         fn back_handler(&self) -> SharedBack {
             self.delegate.back_handler()
@@ -693,13 +717,6 @@ mod tests {
         drop(child_ref);
         drop(app);
         assert_eq!(leaf.lifecycle().state(), LifecycleState::Resumed);
-        assert!(
-            leaf.delegate
-                .delegate
-                .state_keeper()
-                .borrow()
-                .save()
-                .is_ok()
-        );
+        assert!(leaf.delegate.delegate.state_store().save().is_ok());
     }
 }

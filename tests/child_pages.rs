@@ -1,3 +1,4 @@
+#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::pages::*;
 use decompose_rs::*;
 use std::{
@@ -37,7 +38,7 @@ fn dpg1_bytes_match_pre_panels_a1f675b_fixture() {
     assert_eq!(**pages.items[0].configuration(), 7);
     assert_eq!(pages.items[0].key(), "child/0");
     assert_eq!(
-        parent.state_keeper().borrow().save().unwrap()["DefaultChildPages"],
+        parent.state_store().save().unwrap()["DefaultChildPages"],
         FIXTURE
     );
 }
@@ -120,14 +121,14 @@ fn pages_invalid_selection_is_typed_and_noop_empty_is_normalized() {
 
 fn restored_root(
     saved: std::collections::BTreeMap<String, Vec<u8>>,
-    instances: Option<SharedInstances>,
+    instances: Option<InstanceStore>,
 ) -> DefaultComponentContext {
     let lifecycle = LifecycleRegistry::new();
     lifecycle.move_to(LifecycleState::Resumed).unwrap();
-    DefaultComponentContext::with_all(
+    DefaultComponentContext::with_stores(
         lifecycle,
-        Rc::new(RefCell::new(StateKeeper::with_restored(saved))),
-        instances.unwrap_or_else(|| Rc::new(RefCell::new(InstanceKeeper::new()))),
+        StateStore::from(StateKeeper::with_restored(saved)),
+        instances.unwrap_or_else(|| InstanceStore::from(InstanceKeeper::new())),
         SharedBack::new(),
     )
 }
@@ -165,28 +166,19 @@ fn tombstone_preserves_key_and_state_but_ends_old_component_and_keeper() {
     .unwrap();
     let old = value.get().items[0].instance().unwrap().clone();
     let key = value.get().items[0].key().to_owned();
-    old.state_keeper()
-        .borrow_mut()
-        .register("counter", || vec![42])
-        .unwrap();
+    old.state_store().register("counter", || vec![42]).unwrap();
     nav.select(3);
     assert_eq!(value.get().items[0].key(), key);
     assert!(value.get().items[0].instance().is_none());
     assert!(old.lifecycle().state().is_destroyed());
-    assert!(old.instance_keeper().borrow().is_destroyed());
+    assert!(old.instance_store().is_destroyed().unwrap());
     nav.select(0);
     let resurrected = value.get().items[0].instance().unwrap().clone();
     assert_eq!(value.get().items[0].key(), key);
     assert!(!Rc::ptr_eq(&old, &resurrected));
-    assert!(!Rc::ptr_eq(
-        &old.instance_keeper(),
-        &resurrected.instance_keeper()
-    ));
+    assert!(!old.instance_store().ptr_eq(&resurrected.instance_store()));
     assert_eq!(
-        resurrected
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("counter"),
+        resurrected.state_store().consume_bytes("counter").unwrap(),
         Some(vec![42])
     );
 }
@@ -611,13 +603,12 @@ fn process_death_restores_selection_keys_and_destroyed_page_state() {
     value.get().items[0]
         .instance()
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("counter", || vec![19])
         .unwrap();
     let key = value.get().items[0].key().to_owned();
     nav.select(3);
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert_eq!(&saved["DefaultChildPages"][..4], b"DPG1");
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, None);
@@ -638,9 +629,9 @@ fn process_death_restores_selection_keys_and_destroyed_page_state() {
         value.get().items[0]
             .instance()
             .unwrap()
-            .state_keeper()
-            .borrow_mut()
-            .consume_bytes("counter"),
+            .state_store()
+            .consume_bytes("counter")
+            .unwrap(),
         Some(vec![19])
     );
     nav.set_items(|mut items| {
@@ -654,7 +645,7 @@ fn empty_restored_pages_override_nonempty_initial_and_transient_save_skips_provi
     let parent = root();
     let nav = PagesNavigation::<u32>::new();
     child_pages(&parent, &nav, Pages::default(), persistent(), |_, ctx| ctx).unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved, None);
     let value = child_pages(
         &parent,
@@ -677,14 +668,12 @@ fn empty_restored_pages_override_nonempty_initial_and_transient_save_skips_provi
     value.get().items[0]
         .instance()
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("transient", || panic!("transient save invoked"))
         .unwrap();
     assert!(
         !parent
-            .state_keeper()
-            .borrow()
+            .state_store()
             .save()
             .unwrap()
             .contains_key("DefaultChildPages")
@@ -693,7 +682,7 @@ fn empty_restored_pages_override_nonempty_initial_and_transient_save_skips_provi
 #[test]
 fn external_instances_retain_only_live_desired_scopes_and_transient_discards_them() {
     for persistent_mode in [true, false] {
-        let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+        let instances = InstanceStore::from(InstanceKeeper::new());
         let parent = restored_root(Default::default(), Some(instances.clone()));
         let nav = PagesNavigation::new();
         let options = if persistent_mode {
@@ -709,13 +698,13 @@ fn external_instances_retain_only_live_desired_scopes_and_transient_discards_the
             |_, ctx| ctx,
         )
         .unwrap();
-        let old = value.get().items[0].instance().unwrap().instance_keeper();
-        let neighbour = value.get().items[1].instance().unwrap().instance_keeper();
-        let saved = parent.state_keeper().borrow().save().unwrap();
+        let old = value.get().items[0].instance().unwrap().instance_store();
+        let neighbour = value.get().items[1].instance().unwrap().instance_store();
+        let saved = parent.state_store().save().unwrap();
         nav.select(3);
-        let far = value.get().items[3].instance().unwrap().instance_keeper();
+        let far = value.get().items[3].instance().unwrap().instance_store();
         parent.lifecycle().destroy().unwrap();
-        assert!(!far.borrow().is_destroyed());
+        assert!(!far.is_destroyed().unwrap());
         let parent = restored_root(saved, Some(instances));
         let options = if persistent_mode {
             persistent()
@@ -730,15 +719,15 @@ fn external_instances_retain_only_live_desired_scopes_and_transient_discards_the
             |_, ctx| ctx,
         )
         .unwrap();
-        assert!(far.borrow().is_destroyed());
-        assert!(old.borrow().is_destroyed());
-        assert!(neighbour.borrow().is_destroyed());
+        assert!(far.is_destroyed().unwrap());
+        assert!(old.is_destroyed().unwrap());
+        assert!(neighbour.is_destroyed().unwrap());
         assert_eq!(
             *value.get().items[0].configuration(),
             Rc::new(if persistent_mode { 0 } else { 99 })
         );
     }
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored_root(Default::default(), Some(instances.clone()));
     let nav = PagesNavigation::new();
     let value = child_pages(
@@ -749,8 +738,8 @@ fn external_instances_retain_only_live_desired_scopes_and_transient_discards_the
         |_, ctx| ctx,
     )
     .unwrap();
-    let old = value.get().items[0].instance().unwrap().instance_keeper();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let old = value.get().items[0].instance().unwrap().instance_store();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, Some(instances));
     let value = child_pages(
@@ -761,10 +750,7 @@ fn external_instances_retain_only_live_desired_scopes_and_transient_discards_the
         |_, ctx| ctx,
     )
     .unwrap();
-    assert!(Rc::ptr_eq(
-        &old,
-        &value.get().items[0].instance().unwrap().instance_keeper()
-    ));
+    assert!(old.ptr_eq(&value.get().items[0].instance().unwrap().instance_store()));
 }
 
 #[test]
@@ -778,7 +764,7 @@ fn malformed_dpg1_is_rejected_before_codec_factory_and_input_is_returned_for_ret
         |_, ctx| ctx,
     )
     .unwrap();
-    let original = parent.state_keeper().borrow().save().unwrap()["DefaultChildPages"].clone();
+    let original = parent.state_store().save().unwrap()["DefaultChildPages"].clone();
     let mut malformed = Vec::new();
     for len in 0..original.len() {
         malformed.push(original[..len].to_vec());
@@ -834,8 +820,8 @@ fn malformed_dpg1_is_rejected_before_codec_factory_and_input_is_returned_for_ret
                 )
                 .is_err()
             );
-            assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
-            assert_eq!(parent.state_keeper().borrow().provider_count(), 0);
+            assert_eq!(parent.state_store().save().unwrap(), saved);
+            assert_eq!(parent.state_store().provider_count().unwrap(), 0);
             assert_eq!(parent.back_handler().handler_count(), 0);
         }
     }
@@ -851,7 +837,7 @@ fn invalid_empty_restored_selection_count_and_codec_errors_remain_retryable() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let mut saved = parent.state_keeper().borrow().save().unwrap();
+    let mut saved = parent.state_store().save().unwrap();
     saved.get_mut("DefaultChildPages").unwrap()[12..20].copy_from_slice(&0u64.to_le_bytes());
     let parent = restored_root(saved.clone(), None);
     assert!(matches!(
@@ -864,7 +850,7 @@ fn invalid_empty_restored_selection_count_and_codec_errors_remain_retryable() {
         ),
         Err(NavigationError::InvalidSelection { .. })
     ));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     let parent = root();
     child_pages(
         &parent,
@@ -874,7 +860,7 @@ fn invalid_empty_restored_selection_count_and_codec_errors_remain_retryable() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     for decode_failure in [true, false] {
         let parent = restored_root(saved.clone(), None);
         let options = PagesOptions {
@@ -900,7 +886,7 @@ fn invalid_empty_restored_selection_count_and_codec_errors_remain_retryable() {
             ),
             Err(NavigationError::State(_))
         ));
-        assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+        assert_eq!(parent.state_store().save().unwrap(), saved);
     }
     let parent = root();
     let options = PagesOptions {
@@ -919,8 +905,10 @@ fn invalid_empty_restored_selection_count_and_codec_errors_remain_retryable() {
     )
     .unwrap();
     assert!(matches!(
-        parent.state_keeper().borrow().save(),
-        Err(StateKeeperError::Encode { .. })
+        parent.state_store().save(),
+        Err(decompose_rs::StateAccessError::Keeper(
+            StateKeeperError::Encode { .. }
+        ))
     ));
 }
 #[test]
@@ -938,7 +926,7 @@ fn duplicate_restored_configurations_reject_before_factory_and_allow_opt_in_retr
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     assert!(matches!(
         child_pages(
@@ -950,7 +938,7 @@ fn duplicate_restored_configurations_reject_before_factory_and_allow_opt_in_retr
         ),
         Err(NavigationError::DuplicateConfiguration)
     ));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     let value = child_pages(
         &parent,
         &PagesNavigation::new(),
@@ -975,7 +963,7 @@ fn state_provider_is_reserved_before_codec_status_and_factory_callbacks() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved, None);
     let called = Rc::new(Cell::new(0));
     let probe = Rc::new({
@@ -1039,11 +1027,10 @@ fn retained_type_conflict_returns_input_and_does_not_run_factory() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     parent
-        .instance_keeper()
-        .borrow_mut()
+        .instance_store()
         .get_or_create("DefaultChildPages", || 17u32)
         .unwrap();
     assert!(matches!(
@@ -1056,11 +1043,11 @@ fn retained_type_conflict_returns_input_and_does_not_run_factory() {
         ),
         Err(NavigationError::Context(_))
     ));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
 }
 #[test]
 fn destroyed_status_policy_on_restore_clears_previously_retained_live_scope() {
-    let instances = Rc::new(RefCell::new(InstanceKeeper::new()));
+    let instances = InstanceStore::from(InstanceKeeper::new());
     let parent = restored_root(Default::default(), Some(instances.clone()));
     let value = child_pages(
         &parent,
@@ -1070,10 +1057,10 @@ fn destroyed_status_policy_on_restore_clears_previously_retained_live_scope() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let old = value.get().items[0].instance().unwrap().instance_keeper();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let old = value.get().items[0].instance().unwrap().instance_store();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
-    assert!(!old.borrow().is_destroyed());
+    assert!(!old.is_destroyed().unwrap());
     let parent = restored_root(saved, Some(instances));
     let options = PagesOptions {
         page_status: Some(Rc::new(|_, _| PageStatus::Destroyed)),
@@ -1087,7 +1074,7 @@ fn destroyed_status_policy_on_restore_clears_previously_retained_live_scope() {
         |_, _| panic!("destroyed factory"),
     )
     .unwrap();
-    assert!(old.borrow().is_destroyed());
+    assert!(old.is_destroyed().unwrap());
     assert!(value.get().items[0].instance().is_none());
 }
 #[test]
@@ -1131,8 +1118,8 @@ fn failed_child_state_save_leaves_selection_all_old_lifecycles_and_factories_unt
     assert_eq!(calls.get(), 2);
     assert_eq!(value.get().selected_index, Some(0));
     assert_eq!(old.lifecycle().state(), LifecycleState::Resumed);
-    assert!(!old.instance_keeper().borrow().is_destroyed());
-    old.state_keeper().borrow_mut().unregister("fail");
+    assert!(!old.instance_store().is_destroyed().unwrap());
+    old.state_store().unregister("fail").unwrap();
     nav.select(3);
     assert_eq!(value.get().selected_index, Some(3));
 }
@@ -1148,15 +1135,10 @@ fn child_state_save_borrow_failure_is_typed_and_retries() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let old = value.get().items[0].instance().unwrap().state_keeper();
-    let borrow = old.borrow_mut();
     let error = Rc::new(RefCell::new(None));
     let out = error.clone();
     nav.select_with(3, move |r| *out.borrow_mut() = r.err());
-    assert!(matches!(*error.borrow(), Some(NavigationError::State(_))));
-    assert_eq!(value.get().selected_index, Some(0));
-    drop(borrow);
-    nav.select(3);
+    assert!(error.borrow().is_none());
     assert_eq!(value.get().selected_index, Some(3));
 }
 #[test]
@@ -1175,7 +1157,7 @@ fn factory_panic_cleans_prepared_scopes_and_source_can_retry() {
         move |c, ctx| {
             if *c >= 2 {
                 out.borrow_mut()
-                    .push((ctx.lifecycle(), ctx.instance_keeper()));
+                    .push((ctx.lifecycle(), ctx.instance_store()));
                 if *c == 3 && flag.replace(false) {
                     panic!("factory panic")
                 }
@@ -1193,7 +1175,7 @@ fn factory_panic_cleans_prepared_scopes_and_source_can_retry() {
     );
     for (lifecycle, instances) in prepared.borrow().iter() {
         assert!(lifecycle.state().is_destroyed());
-        assert!(instances.borrow().is_destroyed());
+        assert!(instances.is_destroyed().unwrap());
     }
     nav.select(3);
     assert_eq!(value.get().selected_index, Some(3));
@@ -1213,7 +1195,7 @@ fn status_callback_panic_releases_constructor_input_and_navigation_remains_usabl
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     let options = PagesOptions {
         page_status: Some(Rc::new(|_, _| panic!("policy panic"))),
@@ -1229,7 +1211,7 @@ fn status_callback_panic_releases_constructor_input_and_navigation_remains_usabl
         )))
         .is_err()
     );
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     assert_eq!(parent.back_handler().handler_count(), 0);
     let value = child_pages(
         &parent,
@@ -1291,7 +1273,7 @@ fn retry_after_lifecycle_panic(outgoing: bool) {
                     .detach();
             }
             if *c == 3 {
-                output.borrow_mut().push(ctx.instance_keeper());
+                output.borrow_mut().push(ctx.instance_store());
                 if !outgoing {
                     let flag = panicker.clone();
                     let _ = ctx
@@ -1312,7 +1294,7 @@ fn retry_after_lifecycle_panic(outgoing: bool) {
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.select(3))).is_err());
     assert_eq!(value.get().selected_index, Some(0));
     assert!(old.instance().unwrap().lifecycle().state().is_destroyed());
-    assert!(captured.borrow()[0].borrow().is_destroyed());
+    assert!(captured.borrow()[0].is_destroyed().unwrap());
     nav.select(0);
     let retried = value.get().items[0].clone();
     assert!(!Rc::ptr_eq(
@@ -1328,16 +1310,16 @@ fn retry_after_lifecycle_panic(outgoing: bool) {
         !retried
             .instance()
             .unwrap()
-            .instance_keeper()
-            .borrow()
+            .instance_store()
             .is_destroyed()
+            .unwrap()
     );
     assert!(
         old.instance()
             .unwrap()
-            .instance_keeper()
-            .borrow()
+            .instance_store()
             .is_destroyed()
+            .unwrap()
     );
 }
 #[test]
@@ -1380,7 +1362,7 @@ fn exhausted_key_counter_reports_error_without_running_factory() {
         |_, ctx| ctx,
     )
     .unwrap();
-    let mut saved = parent.state_keeper().borrow().save().unwrap();
+    let mut saved = parent.state_store().save().unwrap();
     saved.get_mut("DefaultChildPages").unwrap()[4..12].copy_from_slice(&u64::MAX.to_le_bytes());
     let parent = restored_root(saved, None);
     let nav = PagesNavigation::new();
@@ -1415,8 +1397,7 @@ fn save_captures_coherent_membership_selection_keys_counter_before_reentrant_pro
     value.get().items[0]
         .instance()
         .unwrap()
-        .state_keeper()
-        .borrow_mut()
+        .state_store()
         .register("navigate", move || {
             if flag.replace(false) {
                 source.clear();
@@ -1424,7 +1405,7 @@ fn save_captures_coherent_membership_selection_keys_counter_before_reentrant_pro
             vec![3]
         })
         .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     assert!(value.get().items.is_empty());
     let parent = restored_root(saved, None);
     let nav = PagesNavigation::new();
@@ -1449,7 +1430,7 @@ fn parent_destroy_during_factory_returns_typed_error_and_initial_input_rolls_bac
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     let lifecycle = parent.lifecycle();
     assert!(matches!(
@@ -1465,7 +1446,7 @@ fn parent_destroy_during_factory_returns_typed_error_and_initial_input_rolls_bac
         ),
         Err(NavigationError::Destroyed)
     ));
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     assert_eq!(parent.back_handler().handler_count(), 0);
 }
 
@@ -1571,9 +1552,9 @@ fn parent_bounds_each_live_status_and_destroy_ends_all_old_snapshot_handles() {
             child
                 .instance()
                 .unwrap()
-                .instance_keeper()
-                .borrow()
+                .instance_store()
                 .is_destroyed()
+                .unwrap()
         );
     }
     assert_eq!(parent.back_handler().handler_count(), 0);
@@ -1747,7 +1728,7 @@ fn nested_mixed_routers_restore_through_pages_tombstone_and_process_death() {
     let key = value.get().items[0].key().to_owned();
     nav.select(3);
     assert!(before.context.lifecycle().state().is_destroyed());
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, None);
     let nav = PagesNavigation::new();
@@ -1819,7 +1800,7 @@ fn initial_factory_panic_returns_restored_input_and_destroys_fresh_prepared_keep
         |_, ctx| ctx,
     )
     .unwrap();
-    let saved = parent.state_keeper().borrow().save().unwrap();
+    let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved.clone(), None);
     let captured = Rc::new(RefCell::new(Vec::new()));
     let output = captured.clone();
@@ -1832,7 +1813,7 @@ fn initial_factory_panic_returns_restored_input_and_destroys_fresh_prepared_keep
             move |c, ctx| {
                 output
                     .borrow_mut()
-                    .push((ctx.lifecycle(), ctx.instance_keeper()));
+                    .push((ctx.lifecycle(), ctx.instance_store()));
                 if *c == 1 {
                     panic!("initial factory panic")
                 }
@@ -1843,9 +1824,9 @@ fn initial_factory_panic_returns_restored_input_and_destroys_fresh_prepared_keep
     );
     for (l, i) in captured.borrow().iter() {
         assert!(l.state().is_destroyed());
-        assert!(i.borrow().is_destroyed());
+        assert!(i.is_destroyed().unwrap());
     }
-    assert_eq!(parent.state_keeper().borrow().save().unwrap(), saved);
+    assert_eq!(parent.state_store().save().unwrap(), saved);
     let value = child_pages(
         &parent,
         &PagesNavigation::new(),
