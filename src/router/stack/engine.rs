@@ -94,7 +94,7 @@ impl<C: Eq + 'static, T: 'static> Model<C, T> for StackModel<C> {
 pub(super) fn build<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
     context: &Ctx,
     navigation: &(impl crate::router::children::NavigationSource<StackEvent<C>> + ?Sized),
-    initial: Vec<C>,
+    initial: impl FnOnce() -> Vec<C>,
     options: StackOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<Value<ChildStack<C, T>>, NavigationError> {
@@ -109,7 +109,7 @@ pub(super) fn build<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static
                 std::convert::identity,
             )
         },
-        || initial.into_iter().map(Rc::new).collect(),
+        || initial().into_iter().map(Rc::new).collect(),
         options.key.clone(),
         StackModel(options),
         factory,

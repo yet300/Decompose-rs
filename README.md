@@ -12,6 +12,9 @@ ChildPanels manages typed Main/Details/Extra components in Single, Dual or Tripl
 ChildItems manages a unique list with per-configuration lifecycle targets and
 explicit lazy component creation. Generic Navigation lets consumers define custom
 state, typed events, child lifecycle targets and an observable result.
+Standard routers accept custom event sources and lazy initial-state factories.
+The [compatibility matrix](docs/COMPATIBILITY.md) records verified behavior,
+Rust adaptations and remaining upstream API gaps.
 Platform/UI integrations are outside this delivery. Behavior is checked against pinned
 Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`, not an unspecified
 latest release. See `NOTICE` for attribution.
@@ -92,6 +95,53 @@ Run `cargo run --example router_extension_points` for an intercepted Stack sourc
 a generic navigator helper, dyn source connection, completion and teardown.
 The [design](docs/superpowers/specs/2026-10-10-router-extension-points-design.md)
 records the event, source and navigator contracts.
+
+## Lazy initial state
+
+Existing factories accept an eager state. Each also has a `_with_initial`
+counterpart taking `impl FnOnce() -> State`:
+
+| Function | Initializer result |
+|---|---|
+| `stack::child_stack_with_initial` | `Vec<C>` |
+| `slot::child_slot_with_initial` | `Option<C>` |
+| `pages::child_pages_with_initial` | `Pages<C>` |
+| `panels::child_panels_with_initial` | `Panels<MC, DC, EC>` |
+| `panels::child_panels_without_extra_with_initial` | `Panels<MC, DC>` |
+| `items::child_items_with_initial` | `Items<C>` |
+
+The initializer may borrow local data or consume non-Clone captures; it has no
+`'static` bound. The router invokes it synchronously during construction once
+when no usable state is restored. Valid restored state skips it entirely,
+including empty Slot/Pages/Items and inactive Items. Initialization is independent
+of later observable reads and lazy Items component creation. Existing eager
+calls and named generic parameter counts remain compatible.
+
+```rust
+use decompose_rs::router::stack::{child_stack_with_initial, StackNavigation, StackOptions};
+use decompose_rs::{DefaultComponentContext, LifecycleRegistry, LifecycleState};
+
+let lifecycle = LifecycleRegistry::new();
+lifecycle.move_to(LifecycleState::Resumed).unwrap();
+let context = DefaultComponentContext::new(lifecycle);
+let navigation = StackNavigation::new();
+let routes = vec![String::from("home")];
+let mut calls = 0;
+let stack = child_stack_with_initial(&context, &navigation,
+    || { calls += 1; routes }, StackOptions::default(), |_, context| context,
+).unwrap();
+assert_eq!(calls, 1);
+assert_eq!(stack.get().active.configuration.as_str(), "home");
+context.lifecycle().destroy().unwrap();
+```
+
+Destroyed/duplicate-key preflight and invalid restoration never evaluate the
+initializer. Codec errors propagate rather than falling back to it. Invalid
+initial state or initializer panic uses existing construction rollback and source
+cancellation. Events emitted during initialization are queued until initial
+publication; captures are released before construction returns, even when skipped.
+Run `cargo run --example lazy_initial_state` for move/borrow initialization and
+restoration of routes, stable keys and nested child state without initial evaluation.
 
 ## Observable values
 
@@ -527,6 +577,8 @@ describe custom event/state adapters over the shared engine.
 updates, cached mapping and the RAII lifecycle binding.
 [ADR-0012](docs/adr/0012-standard-router-extension-points.md) describes typed
 standard events, source adapters and reusable navigator traits.
+[ADR-0013](docs/adr/0013-lazy-initial-state-and-compatibility.md) describes lazy
+standard initialization and the [compatibility matrix](docs/COMPATIBILITY.md).
 
 ## Verification (Rust 1.96.0)
 
@@ -544,14 +596,20 @@ cargo run --example child_items
 cargo run --example generic_navigation
 cargo run --example observable_values
 cargo run --example router_extension_points
+cargo run --example lazy_initial_state
 ```
 
-Verified on 2026-10-10: **410 unit/integration tests and 1 doctest passed**.
-Format, strict Clippy, strict rustdoc and all eight runnable examples passed. Library
+Verified on 2026-10-10: **428 unit/integration tests and 1 doctest passed**.
+Format, strict Clippy, strict rustdoc and all nine runnable examples passed. Library
 compilation passed all 24 installed targets, including WASM, Apple, Android,
-Linux and Windows. The [Router Extension Points implementation plan](docs/superpowers/plans/2026-10-10-router-extension-points.md)
+Linux and Windows. These are compile checks, not cross-target runtime tests.
+The [Lazy Initial State implementation plan](docs/superpowers/plans/2026-10-10-lazy-initial-state-compatibility.md)
 records counts, commands, target matrix and review findings.
 
+Lazy initialization tests cover all six factory variants, moved/borrowed FnOnce
+captures, authoritative restoration including empty/inactive states, transient
+mode, preflight/decoder rejection, initialization FIFO, capture Drop reentry and
+parent destruction, panic/cancellation cleanup and exact saved-input retry.
 Router extension tests cover non-Clone public events, custom/dyn sources, generic
 helpers, shared event identity, FIFO, per-receiver results, construction-time
 buffering, every family's Back policy and guarded cancellation/rollback.

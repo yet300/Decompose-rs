@@ -14,9 +14,13 @@
 > over the shared engine (ADR-0010) adds custom event
 > sources, state projections, conditional Back and whole-state codecs.
 > Observable values (ADR-0011) are complete and all accumulated stages are merged
-> into main at 9a70ae0. Standard-router extension points (ADR-0012) are implemented
-> and independently reviewed on codex/router-extension-points; the user has
-> authorized committing this stage and merging it into main.
+> into main, including standard-router extension points (ADR-0012), at e129ab1.
+> Lazy standard-router initialization and the final compatibility matrix
+> (ADR-0013) are implemented and independently reviewed on
+> codex/lazy-initial-state-compatibility. Local commit of this stage was
+> subsequently requested by the user; main remains at e129ab1.
+> [COMPATIBILITY.md](COMPATIBILITY.md) separates behavior, Rust adaptations and
+> remaining API gaps against the pinned revision.
 > Platform integrations remain outside scope.
 
 ## Research identity
@@ -166,7 +170,9 @@ CHILD PANELS: IMPLEMENTED (typed roles, lifecycle modes, independent dismissal, 
 CHILD ITEMS: IMPLEMENTED (configuration-keyed activity, lazy instances, receiver-local navigation, DPI1 persistence)
 GENERIC NAVIGATION: IMPLEMENTED (custom NavState/events, neutral child types, DCH1 persistence)
 OBSERVABLE VALUES: IMPLEMENTED (cached map, lifecycle observation, identity CAS/update)
-STANDARD ROUTER EXTENSION POINTS: IMPLEMENTED (typed events, custom sources, navigator traits; reviewed feature branch)
+STANDARD ROUTER EXTENSION POINTS: IMPLEMENTED AND MERGED (typed events, custom sources, navigator traits)
+LAZY STANDARD INITIAL STATE: IMPLEMENTED AND VERIFIED (six FnOnce factory variants; eager calls preserved)
+COMPATIBILITY MATRIX: COMPLETE FOR PINNED REVISION (source/test evidence, Rust adaptations, remaining gaps)
 PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
 ESSENTY-RS CHANGES: NONE REQUIRED
 ```

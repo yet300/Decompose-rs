@@ -311,6 +311,18 @@ pub fn child_items<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>
     options: ItemsOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<LazyChildItems<C, T>, NavigationError> {
+    child_items_with_initial(context, navigation, || initial, options, factory)
+}
+
+/// Builds children, evaluating `initial` once only when no saved state is restored.
+/// The initializer may borrow local data and is dropped during construction.
+pub fn child_items_with_initial<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<ItemsEvent<C>> + ?Sized),
+    initial: impl FnOnce() -> Items<C>,
+    options: ItemsOptions<C>,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<LazyChildItems<C, T>, NavigationError> {
     let (value, control) = super::engine::build_with_subscriber(
         context,
         |receiver| {
@@ -325,7 +337,7 @@ pub fn child_items<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>
                 },
             )
         },
-        || initial,
+        initial,
         options.key.clone(),
         ItemsModel(options),
         factory,

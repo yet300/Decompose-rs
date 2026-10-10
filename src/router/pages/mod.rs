@@ -194,6 +194,18 @@ pub fn child_pages<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>
     options: PagesOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<Value<ChildPages<C, T>>, NavigationError> {
+    child_pages_with_initial(context, navigation, || initial, options, factory)
+}
+
+/// Builds children, evaluating `initial` once only when no saved state is restored.
+/// The initializer may borrow local data and is dropped during construction.
+pub fn child_pages_with_initial<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<PagesEvent<C>> + ?Sized),
+    initial: impl FnOnce() -> Pages<C>,
+    options: PagesOptions<C>,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<Value<ChildPages<C, T>>, NavigationError> {
     super::engine::build_with_subscriber(
         context,
         |receiver| {
@@ -208,7 +220,7 @@ pub fn child_pages<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>
                 },
             )
         },
-        || initial,
+        initial,
         options.key.clone(),
         PagesModel(options),
         factory,

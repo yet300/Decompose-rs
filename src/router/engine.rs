@@ -833,6 +833,11 @@ where
         .as_ref()
         .map(|state| state.configurations.clone())
         .unwrap_or_else(initial);
+    // Initialization (or dropping a skipped initializer) may destroy the parent.
+    // Report that before accessing its now-destroyed instance keeper.
+    if context.lifecycle().state().is_destroyed() {
+        return Err(NavigationError::Destroyed);
+    }
     let restore_children = restored.as_ref().map(|saved| saved.children.clone());
     let next_key = restored.as_ref().map(|saved| saved.next_key).unwrap_or(0);
     let initial = model.normalize(initial);

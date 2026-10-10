@@ -120,6 +120,18 @@ pub fn child_slot<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
     options: SlotOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<Value<ChildSlot<C, T>>, NavigationError> {
+    child_slot_with_initial(context, navigation, || initial, options, factory)
+}
+
+/// Builds children, evaluating `initial` once only when no saved state is restored.
+/// The initializer may borrow local data and is dropped during construction.
+pub fn child_slot_with_initial<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<SlotEvent<C>> + ?Sized),
+    initial: impl FnOnce() -> Option<C>,
+    options: SlotOptions<C>,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<Value<ChildSlot<C, T>>, NavigationError> {
     super::engine::build_with_subscriber(
         context,
         |receiver| {
@@ -134,7 +146,7 @@ pub fn child_slot<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
                 },
             )
         },
-        || initial.into_iter().map(Rc::new).collect(),
+        || initial().into_iter().map(Rc::new).collect(),
         options.key.clone(),
         SlotModel(options),
         factory,

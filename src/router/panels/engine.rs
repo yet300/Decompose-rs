@@ -158,7 +158,7 @@ impl<MC: Eq + 'static, DC: Eq + 'static, EC: Eq + 'static, MT: 'static, DT: 'sta
 pub(super) fn build<Ctx, MC, MT, DC, DT, EC, ET>(
     context: &Ctx,
     navigation: &(impl crate::router::children::NavigationSource<PanelsEvent<MC, DC, EC>> + ?Sized),
-    initial: Panels<MC, DC, EC>,
+    initial: impl FnOnce() -> Panels<MC, DC, EC>,
     options: PanelsOptions<MC, DC, EC>,
     main: impl Fn(&MC, Ctx) -> MT + 'static,
     details: impl Fn(&DC, Ctx) -> DT + 'static,
@@ -187,7 +187,7 @@ where
                 },
             )
         },
-        || initial,
+        initial,
         options.key.clone(),
         PanelsModel(options),
         move |c, ctx| match c {

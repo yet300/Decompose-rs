@@ -5,7 +5,9 @@
 //! [`router::stack`], [`router::slot`], [`router::pages`], [`router::panels`] and
 //! [`router::items`] with navigation operations, Back handling and explicit
 //! configuration codecs. Standard factories also accept typed custom navigation
-//! sources, and navigator traits provide reusable family operations.
+//! sources, and navigator traits provide reusable family operations. Additive
+//! `*_with_initial` factories accept borrowed or owned `FnOnce` initializers,
+//! which valid restored state skips entirely.
 //! [`router::children`] connects custom immutable state
 //! and event sources to the same child lifecycle engine. [`value`] supplies
 //! synchronous observable snapshots, cached mapping, identity updates and
@@ -27,9 +29,11 @@
 //! repository README and `examples/child_stack.rs`, `examples/child_slot.rs`,
 //! `examples/child_pages.rs`, `examples/child_panels.rs` and
 //! `examples/child_items.rs`, `examples/generic_navigation.rs` and
-//! `examples/observable_values.rs` and `examples/router_extension_points.rs`
+//! `examples/observable_values.rs`, `examples/router_extension_points.rs` and
+//! `examples/lazy_initial_state.rs`
 //! for usage, and `NOTICE`
 //! for attribution. This project has no official upstream affiliation.
+//! `docs/COMPATIBILITY.md` records Rust adaptations and remaining API gaps.
 
 mod child;
 mod context;

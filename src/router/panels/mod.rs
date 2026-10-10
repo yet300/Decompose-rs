@@ -119,6 +119,38 @@ where
     DT: 'static,
     ET: 'static,
 {
+    child_panels_with_initial(
+        context,
+        navigation,
+        || initial,
+        options,
+        main_factory,
+        details_factory,
+        extra_factory,
+    )
+}
+
+/// Builds panels, evaluating `initial` once only when no saved state is restored.
+/// The initializer may borrow local data and is dropped during construction.
+#[allow(clippy::type_complexity)]
+pub fn child_panels_with_initial<Ctx, MC, MT, DC, DT, EC, ET>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<PanelsEvent<MC, DC, EC>> + ?Sized),
+    initial: impl FnOnce() -> Panels<MC, DC, EC>,
+    options: PanelsOptions<MC, DC, EC>,
+    main_factory: impl Fn(&MC, Ctx) -> MT + 'static,
+    details_factory: impl Fn(&DC, Ctx) -> DT + 'static,
+    extra_factory: impl Fn(&EC, Ctx) -> ET + 'static,
+) -> Result<Value<ChildPanels<MC, MT, DC, DT, EC, ET>>, NavigationError>
+where
+    Ctx: ComponentContext + 'static,
+    MC: Eq + 'static,
+    DC: Eq + 'static,
+    EC: Eq + 'static,
+    MT: 'static,
+    DT: 'static,
+    ET: 'static,
+{
     engine::build(
         context,
         navigation,
@@ -147,7 +179,35 @@ where
     MT: 'static,
     DT: 'static,
 {
-    child_panels(
+    child_panels_without_extra_with_initial(
+        context,
+        navigation,
+        || initial,
+        options,
+        main_factory,
+        details_factory,
+    )
+}
+
+/// Builds panels, evaluating `initial` once only when no saved state is restored.
+/// The initializer may borrow local data and is dropped during construction.
+#[allow(clippy::type_complexity)]
+pub fn child_panels_without_extra_with_initial<Ctx, MC, MT, DC, DT>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<PanelsEvent<MC, DC>> + ?Sized),
+    initial: impl FnOnce() -> Panels<MC, DC>,
+    options: PanelsOptions<MC, DC>,
+    main_factory: impl Fn(&MC, Ctx) -> MT + 'static,
+    details_factory: impl Fn(&DC, Ctx) -> DT + 'static,
+) -> Result<Value<ChildPanels<MC, MT, DC, DT>>, NavigationError>
+where
+    Ctx: ComponentContext + 'static,
+    MC: Eq + 'static,
+    DC: Eq + 'static,
+    MT: 'static,
+    DT: 'static,
+{
+    child_panels_with_initial(
         context,
         navigation,
         initial,

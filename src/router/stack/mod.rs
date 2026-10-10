@@ -62,5 +62,22 @@ where
     C: Eq + 'static,
     T: 'static,
 {
+    child_stack_with_initial(context, navigation, || initial, options, factory)
+}
+
+/// Builds children, evaluating `initial` once only when no saved state is restored.
+/// The initializer may borrow local data and is dropped during construction.
+pub fn child_stack_with_initial<Ctx, C, T>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<StackEvent<C>> + ?Sized),
+    initial: impl FnOnce() -> Vec<C>,
+    options: StackOptions<C>,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<Value<ChildStack<C, T>>, NavigationError>
+where
+    Ctx: ComponentContext + 'static,
+    C: Eq + 'static,
+    T: 'static,
+{
     engine::build(context, navigation, initial, options, factory)
 }
