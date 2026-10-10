@@ -3,13 +3,15 @@
 > Current delivery (2026-10-10): the selected independent Decompose core is
 > complete against pinned revision `00840bcfed6d55710c8fbb1a72503f2041eda490`.
 > Contexts, values, five standard families and Generic Navigation now include
-> selective/full-state persistence, owned memory snapshots, current-thread
-> settings/diagnostics, public test utilities and both portable history algorithms.
-> See [COMPATIBILITY.md](COMPATIBILITY.md), ADR-0014 through ADR-0018 and the
+> selective/full-state persistence, owned memory snapshots, explicit
+> configuration/diagnostics, public test utilities and both portable history algorithms.
+> The public surface is explicit Rust style with no deprecated aliases
+> (`try_*`/`*_or_panic` navigation, opaque stores, `DecomposeConfig`).
+> See [COMPATIBILITY.md](COMPATIBILITY.md), ADR-0014 through ADR-0019 and the
 > [completion plan](superpowers/plans/2026-10-10-independent-core-completion.md)
 > for source mappings, test evidence and remaining integration boundaries.
-> This delivery extends `f3886cd` on `codex/lazy-initial-state-compatibility`;
-> local commits only. The original phase research below is historical.
+> This delivery is `main` at `2c45df6`; local commits only. The original phase
+> research below is historical.
 > DOM/wasm host wiring, Android/Jetpack, Compose, SwiftUI, Reaktive and other
 > UI/platform adapters remain outside scope, as do thread-safe mirrors and no_std.
 > Kotlin serialized-byte migration is explicitly outside the required contract.
@@ -164,15 +166,16 @@ CHILD PAGES: IMPLEMENTED (selected-index state, live/destroyed instances, lazy r
 CHILD PANELS: IMPLEMENTED (typed roles, lifecycle modes, independent dismissal, Back and DPN1 persistence)
 CHILD ITEMS: IMPLEMENTED (configuration-keyed activity, lazy instances, receiver-local navigation, DPI1 persistence)
 GENERIC NAVIGATION: IMPLEMENTED (custom NavState/events, neutral child types, DCH1 persistence)
-OBSERVABLE VALUES: IMPLEMENTED (cached map, lifecycle observation, identity CAS/update)
+OBSERVABLE VALUES: IMPLEMENTED (cached map, lifecycle observation, explicit exchange/update/clone-and-edit)
 STANDARD ROUTER EXTENSION POINTS: IMPLEMENTED AND MERGED (typed events, custom sources, navigator traits)
 LAZY STANDARD INITIAL STATE: IMPLEMENTED AND VERIFIED (six FnOnce factory variants; eager calls preserved)
 COMPATIBILITY MATRIX: COMPLETE FOR PINNED REVISION (source/test evidence, Rust adaptations, excluded integrations)
 SELECTIVE / WHOLE-STATE PERSISTENCE: IMPLEMENTED (ADR-0014/0018; old formats preserved)
 MEMORY NAVIGATION: IMPLEMENTED (ADR-0015; owned nested snapshots, no disk storage)
-SETTINGS / PUBLIC TEST UTILITIES: IMPLEMENTED (ADR-0017)
+EXPLICIT CONFIG / PUBLIC TEST UTILITIES: IMPLEMENTED (ADR-0017/0019; no global state, opaque stores)
 PORTABLE RECURSIVE AND LEGACY HISTORY: IMPLEMENTED (ADR-0016; explicit host backend)
-VERIFICATION: 509 unit/integration tests, 1 doctest, 15 examples, 24 compile targets; fmt/Clippy/rustdoc pass
+EXPLICIT RUST API SURFACE: IMPLEMENTED (ADR-0019; deprecated aliases deleted, try_*/_or_panic only)
+VERIFICATION: 519 unit/integration tests, 1 doctest, 15 examples, 24 compile targets; fmt/Clippy/rustdoc pass
 PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
 ESSENTY-RS CHANGES: NONE REQUIRED
 ```

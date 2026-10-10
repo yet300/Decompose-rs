@@ -188,6 +188,10 @@ enabled`) returns false.
 
 ## 9. Policy (`DecomposeSettings`)
 
+> Upstream contract as observed. The Rust port maps this to explicit
+> `DecomposeConfig` with no global state; see
+> [ADR-0019](adr/0019-explicit-rust-api-surface.md).
+
 Global `@Volatile` settings: `duplicateConfigurationsEnabled = false` (navigation rejects
 duplicate configs by equality unless enabled), `mainThreadCheckEnabled = true`
 (violations route `NotOnMainThreadException` to `onDecomposeError`, never throw),

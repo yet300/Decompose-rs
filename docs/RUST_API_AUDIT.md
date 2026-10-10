@@ -1,5 +1,11 @@
 # Rust API audit and migration plan
 
+> **Completed.** All groups below are implemented and merged (commits `78ee8d6`
+> and `2c45df6`; details in [ADR-0019](adr/0019-explicit-rust-api-surface.md)).
+> Because the crate is pre-public, deprecated aliases were **deleted**, not kept:
+> no `#[deprecated]` remains in `src/`, `tests/` or `examples/`.
+> The audit table is preserved as the historical proposal record.
+
 Baseline (2026-10-10): `cargo test --all-targets` passed **509 tests** before edits.
 No commits are part of this work. Dependency set and persistent formats are fixed.
 
@@ -28,11 +34,11 @@ Locations below refer to the baseline, before additive methods shift line number
 
 - [x] Baseline and source audit.
 - [x] Value conveniences, immutable snapshots and reentrant clone-and-edit regression tests.
-- [ ] Fallible navigation families, explicit panic wrappers and FIFO receipts.
-- [ ] Explicit configuration and isolated diagnostics.
-- [ ] Opaque keeper services and direct context assembly.
-- [ ] History results, source errors, names/aliases/map docs.
-- [ ] Module docs, compatibility matrix, runnable migration example, final review.
+- [x] Fallible navigation families, explicit panic wrappers and FIFO receipts.
+- [x] Explicit configuration and isolated diagnostics.
+- [x] Opaque keeper services and direct context assembly.
+- [x] History results, source errors, names/aliases/map docs.
+- [x] Module docs, compatibility matrix, runnable migration example, final review.
 
 After each implementation group run `cargo fmt --all -- --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`.

@@ -1,5 +1,11 @@
 # ADR-0017: Thread-local settings and public test contexts
 
+> Superseded in part by [ADR-0019](0019-explicit-rust-api-surface.md): the
+> thread-local `DecomposeSettings` global is deleted in favor of explicit
+> `DecomposeConfig`; `tests/settings.rs` and the `core_settings` example are
+> removed. The `TestComponentContext` contract below still applies (now built on
+> opaque stores via `with_stores`).
+
 Status: Accepted. Upstream reference:
 `00840bcfed6d55710c8fbb1a72503f2041eda490`.
 

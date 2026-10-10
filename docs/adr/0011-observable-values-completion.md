@@ -1,5 +1,10 @@
 # ADR-0011: Complete observable values using Rc identity
 
+> Naming superseded by [ADR-0019](0019-explicit-rust-api-surface.md):
+> `compare_and_set`/`update`/`update_and_get`/`get_and_update` are deleted in
+> favor of `compare_exchange`/`update_rc`/`update_rc_and_get`/`get_and_update_rc`
+> plus `modify`. The identity/retry semantics below are unchanged.
+
 Date: 2026-10-10. Status: implemented and independently reviewed.
 Reference: Decompose 00840bc, value and value/operator.
 

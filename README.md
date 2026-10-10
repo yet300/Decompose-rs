@@ -13,8 +13,8 @@ ChildItems manages a unique list with per-configuration lifecycle targets and
 explicit lazy component creation. Generic Navigation lets consumers define custom
 state, typed events, child lifecycle targets and an observable result.
 Standard routers accept custom event sources and lazy initial-state factories.
-Selective and whole-state codecs, owned memory navigation snapshots, current-thread
-settings with typed diagnostics and a public test context complete the portable
+Selective and whole-state codecs, owned memory navigation snapshots, explicit
+`DecomposeConfig` with typed diagnostics and a public test context complete the portable
 state/recreation contracts. History supports recursive WebNavigation and the older
 stack-only algorithm over an explicit host backend.
 The [compatibility matrix](docs/COMPATIBILITY.md) records verified behavior,
@@ -45,9 +45,9 @@ let subscription = stack.subscribe(|snapshot| {
     println!("depth: {}", snapshot.items().count());
 }); // Immediately replays the current value.
 
-navigation.push_new(Route::Details(7));
+navigation.push_new_or_panic(Route::Details(7));
 assert_eq!(stack.get().items().count(), 2);
-navigation.pop();
+navigation.pop_or_panic();
 assert_eq!(stack.get().items().count(), 1);
 drop(subscription); // Cancels observation.
 lifecycle.destroy().unwrap();
@@ -73,9 +73,11 @@ updates and lifecycle-bound subscriptions.
 
 The crate provides public `StackEvent`, `SlotEvent`, `PagesEvent`,
 `PanelsEvent` and `ItemsEvent` aliases. Each describes a shared
-`NavigationEvent<State, Result>` with `new`, `with_completion`, `transform` and
-`complete`. `new` uses a no-op completion; navigator convenience methods panic on
-transition errors, while `navigate_with` reports typed errors per receiver.
+`NavigationEvent<State, Result>` with `new`, `modify`, `with_completion`, `transform` and
+`complete`. `new` uses a no-op completion; `try_*` navigator methods return
+`Result<NavigationOutcome<R>, NavigationError>` (a `Pending` receipt when nested work is
+accepted during a surrounding dispatch), `*_or_panic` variants panic with caller location,
+while `navigate_with` reports typed errors per receiver.
 
 Standard child factories accept `NavigationSource<FamilyEvent>`, including
 `dyn NavigationSource`. A custom source can wrap `SimpleNavigation` to filter,
@@ -165,13 +167,16 @@ reads of the same in-flight uncached input panic instead of recursing indefinite
 When a mapper reentrantly changes its source, its result still belongs to the
 input snapshot it received; a newer cache populated during that call is preserved.
 
-`MutableValue::compare_and_set(&expected, next)` compares Rc identity, replacing
-and notifying only on a match. `update`, `update_and_get` and `get_and_update`
-take `FnMut(Rc<T>) -> Rc<T>` transformers and retry if reentrant mutation makes
-their expected snapshot stale. A transformer may run multiple times. The latter
-two return the installed snapshot or its predecessor, even if observer reentry
-immediately changes the source again. These are synchronous operations without
-multithreaded atomicity guarantees.
+`MutableValue::compare_exchange(&expected, next)` exchanges Rc identity, returning the
+predecessor on success or the current snapshot on failure. `update_rc`,
+`update_rc_and_get` and `get_and_update_rc` take `FnMut(Rc<T>) -> Rc<T>` transformers
+and retry if reentrant mutation makes their expected snapshot stale. A transformer
+may run multiple times. The latter two return the installed snapshot or its
+predecessor, even if observer reentry immediately changes the source again. These
+are synchronous operations without multithreaded atomicity guarantees. `modify`
+edits a cloned payload through `&mut T` and publishes a new snapshot; `get_cloned`,
+`with`, `subscribe_ref` and `subscribe_cloned` provide owned/borrowed reads without
+Rc ceremony for `Clone` payloads.
 
 `subscribe_with_lifecycle(&lifecycle, mode, observer)` observes at Created+, Started+
 or Resumed using `ObserveLifecycleMode::{CreateDestroy, StartStop, ResumePause}`;
@@ -206,17 +211,25 @@ during synchronous replay and rolls back registrations when replay panics.
   the dispatcher releases its borrow. A child’s enabled Back handler has
   precedence over automatic pop; inactive children do not handle Back.
 
-`StackNavigation` provides `navigate`, `navigate_with`, `push`, `push_new`,
-`push_to_front`, `pop`, `pop_while`, `pop_to`, `pop_to_first`, `replace_current`,
-`replace_all` and `bring_to_front_by`. Root pop and pushing an already active
-configuration with `push_new` are no-ops. `bring_to_front_by` takes a kind
+`StackNavigation` provides `navigate_with`/`navigate_or_panic`, `try_push`/`push_or_panic`,
+`try_push_new`/`push_new_or_panic`, `try_push_to_front`/`push_to_front_or_panic`,
+`try_pop`/`pop_or_panic`, `try_pop_while`/`pop_while_or_panic`,
+`try_pop_to`/`pop_to_or_panic`, `try_pop_to_first`/`pop_to_first_or_panic`,
+`try_replace_current`/`replace_current_or_panic`,
+`try_replace_all`/`replace_all_or_panic` and
+`try_bring_to_front_by`/`bring_to_front_by_or_panic` (plus
+`try_replace_kind_and_push`). Root pop and pushing an already active
+configuration with `push_new_or_panic` are no-ops. `bring_to_front_by_or_panic` takes a kind
 selector so Rust enum variants can replace Kotlin runtime-class matching.
 
-`child_stack` returns a typed construction error. Convenience navigation methods
-panic on rejected transformations (for example, an empty stack or disallowed
+`child_stack` returns a typed construction error. Fallible `try_*` methods return
+`Result<NavigationOutcome<R>, NavigationError>`; `*_or_panic` variants panic with
+caller location on rejected transformations (for example, an empty stack or disallowed
 duplicates). Use `navigate_with` for a `Result<NavigationResult<C>, NavigationError>`
-completion callback. A shared source reports once per connected stack; a queued
-call has no immediate final result. User panics propagate, with cleanup of
+completion callback. A shared source reports once per connected stack; accepted nested
+work returns a `Pending` receipt whose results are taken after the surrounding
+dispatch finishes. Abandoned queued work (after an observer panic) reports
+`ChildUnavailable`. User panics propagate, with cleanup of
 incomplete construction and abandoned queued work. Successful user callback
 side effects are outside that rollback boundary. If a lifecycle callback panic
 ends a child before membership commits, subsequent navigation reconstructs that
@@ -242,9 +255,9 @@ let slot = child_slot(&root, &navigation, None::<String>,
     |_, context| context,
 ).unwrap();
 
-navigation.activate("Confirm deletion".into());
+navigation.activate_or_panic("Confirm deletion".into());
 assert!(slot.get().child.is_some());
-navigation.dismiss();
+navigation.dismiss_or_panic();
 assert!(slot.get().child.is_none());
 lifecycle.destroy().unwrap();
 ```
@@ -255,11 +268,11 @@ one; `dismiss` destroys the child's lifecycle and retained scope. Empty dismissa
 is a no-op. A child targets Resumed, bounded by the parent. No-op navigation still
 publishes an observable snapshot and runs completion, as in upstream.
 
-`navigate`/`navigate_with` transform `Option<Rc<C>>`. `activate_with` reports
+`try_navigate`/`navigate_or_panic` transform `Option<Rc<C>>`. `activate_with` reports
 old/new configuration snapshots through a typed completion;
 `dismiss_with` reports `Result<bool, NavigationError>`, true if a child existed.
-Convenience calls panic on rejected transitions, while explicit completions
-receive errors. Shared sources report independently for each connected slot.
+Fallible helpers return `Result<NavigationOutcome<R>, NavigationError>` and explicit
+completions receive errors. Shared sources report independently for each connected slot.
 
 `SlotCodec::new` accepts callbacks for one configuration. With a codec,
 DSL1 persists explicit empty/populated membership, child key, allocation counter
@@ -296,13 +309,15 @@ Started, Resumed or Destroyed for each position. This supports circular neighbor
 or keeping additional pages live. The hosting lifecycle bounds each live page.
 The default policy and a circular navigation operation are independent choices.
 
-`PagesNavigation` provides `navigate`/`navigate_with`, `select`/`select_with`,
-`select_next(circular)`, `select_prev(circular)`, `select_first`, `select_last`,
-`clear` and `set_items`. Boundary movement clamps unless circular behavior is
-requested. Empty selection operations are no-ops. `set_items` clamps the previous
+`PagesNavigation` provides `try_navigate`/`navigate_or_panic`,
+`try_select`/`select_or_panic`, `try_select_next`/`select_next_or_panic`,
+`try_select_prev`/`select_prev_or_panic`, `try_select_first`/`select_first_or_panic`,
+`try_select_last`/`select_last_or_panic`, `try_clear`/`clear_or_panic` and
+`try_set_items`/`set_items_or_panic`. Boundary movement clamps unless circular behavior is
+requested. Empty selection operations are no-ops. `set_items_or_panic` clamps the previous
 numeric index to the new list; it does not follow the selected configuration
 when items move. Explicit completion callbacks receive typed errors for invalid
-nonempty selection; convenience methods panic on rejection.
+nonempty selection; `*_or_panic` variants panic on rejection.
 
 With `handle_back_button: true`, unhandled Back selects the previous page when
 the selected index exceeds zero. Enabled child handlers take precedence.
@@ -340,11 +355,14 @@ values in different roles remain separate children. Factories run Main, Details,
 Extra order and destruction runs in reverse. Replacing Main leaves optional
 panels unchanged. Dismissing Details leaves Extra unchanged.
 
-Navigation provides `navigate`/`navigate_with`, `set_panels`,
-`set_details_extra`, `set_extra`, `activate_main`, `activate_details`,
-`activate_extra`, `dismiss_details`, `dismiss_extra`, `pop` and `set_mode`.
-Helpers have `_with` forms reporting typed old/new state per connected receiver.
-`pop` removes Extra first, then Details, and preserves Main. Explicit pop works
+Navigation provides `try_navigate`/`navigate_or_panic`, `try_set_panels`/`set_panels_or_panic`,
+`try_set_details_extra`/`set_details_extra_or_panic`, `try_set_extra`/`set_extra_or_panic`,
+`try_activate_main`/`activate_main_or_panic`, `try_activate_details`/`activate_details_or_panic`,
+`try_activate_extra`/`activate_extra_or_panic`, `try_dismiss_details`/`dismiss_details_or_panic`,
+`try_dismiss_extra`/`dismiss_extra_or_panic`, `try_pop`/`pop_or_panic` and
+`try_set_mode`/`set_mode_or_panic`.
+Helpers have `*_with` forms reporting typed old/new state per connected receiver.
+`pop_or_panic` removes Extra first, then Details, and preserves Main. Explicit pop works
 in every mode; automatic Back requires Single and `handle_back_button: true`.
 Enabled child handlers have precedence; Created children cannot intercept Back.
 
@@ -401,17 +419,18 @@ let items = child_items(&root, &navigation, Items::new(vec![1u8, 2, 3]).unwrap()
 assert!(items.get().active_items.is_empty());
 let component = items.get_or_create(&2).unwrap();
 assert_eq!(component.lifecycle().state(), LifecycleState::Created);
-items.set_active_items(|mut active| { active.remove(&2); active });
+items.set_active_items_or_panic(|mut active| { active.remove(&2); active });
 assert_eq!(component.lifecycle().state(), LifecycleState::Destroyed);
 lifecycle.destroy().unwrap();
 ```
 
-Both `ItemsNavigation` and `LazyChildItems` provide `navigate`/`navigate_with`,
-`set_items`/`set_items_with` and `set_active_items`/`set_active_items_with`.
+Both `ItemsNavigation` and `LazyChildItems` provide `try_navigate`/`navigate_or_panic`,
+`try_set_items`/`set_items_or_panic` and
+`try_set_active_items`/`set_active_items_or_panic`.
 The helpers accept transformers over the current list or active map. The source
 broadcasts to each receiver; the lazy handle changes only its own receiver.
-Explicit completions receive typed old/new Items states or errors; convenience
-calls panic on rejected navigation. No-op events publish and complete.
+Explicit completions receive typed old/new Items states or errors; `*_or_panic`
+variants panic on rejected navigation. No-op events publish and complete.
 
 `LazyChildItems::get()` returns the current snapshot, `value()` returns an
 observable Value, and `subscribe()` observes it. `get_or_create(&configuration)`
@@ -528,13 +547,14 @@ instances preserve identity. A default root’s owned keeper ends with its
 lifecycle. Fixed-child retention follows the parent retained scope’s lifetime.
 Explicit child lifecycle destruction retains the existing public panic contract.
 
-The public `StateKeeper` is now a Decompose adapter around Essenty’s primitive;
-`SharedKeeper` is `Rc<RefCell<StateKeeper>>`. This API correction lets failed
-construction return consumed input for retries and saves, without replacing the
-parent keeper or changing Essenty. Convert existing owned primitives with
+The public `StateKeeper` is now a Decompose adapter around Essenty’s primitive.
+Contexts expose opaque `StateStore` and `InstanceStore` services whose operations
+return owned data instead of `RefCell` guards, so no caller-held borrow can
+conflict with navigation or teardown. This lets failed construction return
+consumed input for retries and saves, without replacing the parent keeper or
+changing Essenty. Convert existing owned primitives with
 `StateKeeper::from(essenty_keeper)`; the raw type is reexported as
-`EssentyStateKeeper`. Existing shared raw handles need conversion at context
-assembly. The restored child frame is also the first-save fallback, so a failed
+`EssentyStateKeeper`. The restored child frame is also the first-save fallback, so a failed
 first child save does not discard previously restored data.
 
 ## Selective, whole-state and memory persistence
@@ -563,16 +583,18 @@ behavior. Snapshots have explicit owners and release data when the last owner
 is dropped; they do not retain running controllers or components.
 Run `cargo run --example memory_navigation`.
 
-## Settings and test contexts
+## Configuration and test contexts
 
-`DecomposeSettings::{current,replace,update,with}` manages current-thread snapshots.
-Stack/Pages/Generic options read duplicate policy when their Default is constructed;
+`DecomposeConfig` carries explicit duplicate policy and an opt-in diagnostic hook;
+it is attached to contexts with `with_config` and to router options with
+`with_config`. Stack/Pages/Generic options default to rejecting duplicates;
 explicit `allow_duplicates` always wins, and running routers keep captured policy.
-Items remains unique-only. `on_decompose_error` observes typed diagnostics while
-Result/completion errors and convenience panics retain their existing behavior.
-Reentrant settings changes are supported and diagnostic cycles are suppressed.
-Rc/RefCell enforce the single-thread architecture; the core invents no OS/UI
-main-thread identity. Run `cargo run --example core_settings`.
+Items remains unique-only. The configured `on_error` hook observes typed diagnostics
+while `Result`/completion errors and `*_or_panic` panics retain their existing
+behavior. There is no global mutable state and no OS/UI main-thread check:
+Rc/RefCell enforce the single-thread architecture, while host adapters own
+UI-thread identity. Run `cargo run --example rust_api` for explicit configuration,
+owned value reads and fallible navigation.
 
 Public `TestComponentContext` requires no feature or extra crate. It starts
 Resumed by default, exposes the standard service handles, and supports explicit
@@ -613,7 +635,7 @@ separate context, value and stack crates in this scope.
 | `state`, `framing` | Essenty state adapter and child-state encoding |
 | public `value` | Observable immutable snapshots and subscription guards |
 | public `router::stack`, `router::slot`, `router::pages`, `router::panels`, `router::items` | Model APIs, operations, snapshots and codecs |
-| public `settings`, `test_utils` | Current-thread defaults/diagnostics and recreation harness |
+| public `settings`, `test_utils` | Explicit `DecomposeConfig`/diagnostics and recreation harness |
 | public `router::webhistory` | Recursive/legacy history, model bridges and host backend contract |
 | public `router::children` | Custom models, typed event sources, neutral child records and whole-state codec |
 | private router machinery | Shared scope ownership, transactions and queued events |
@@ -669,19 +691,20 @@ cargo run --example router_extension_points
 cargo run --example lazy_initial_state
 cargo run --example selective_persistence
 cargo run --example memory_navigation
-cargo run --example core_settings
+cargo run --example rust_api
 cargo run --example test_context
 cargo run --example web_history
 cargo run --example whole_state_persistence
 ```
 
-Verified on 2026-10-10: **509 unit/integration tests and 1 doctest passed**.
+Verified on 2026-10-10: **519 unit/integration tests and 1 doctest passed**.
 Formatting, strict Clippy/rustdoc, all 15 examples and library compilation on all
 24 installed targets passed. The no-default-features run passed the same tests.
 Complete commands, target names and independent review evidence are recorded in the
 [independent-core completion plan](docs/superpowers/plans/2026-10-10-independent-core-completion.md).
 The stage adds regression coverage for selective/whole-state persistence,
-in-process memory ownership, settings reentry, public test utilities and both
+in-process memory ownership, explicit configuration with isolated diagnostics,
+opaque store services, public test utilities and both
 history algorithms, including deferred completion, veto, cancellation and panic
 recovery. All old format fixtures remain covered. Cross-target compilation is
 not runtime validation of an OS/UI/browser integration.
