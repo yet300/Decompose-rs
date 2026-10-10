@@ -39,7 +39,7 @@ impl<E, N> Default for ChildrenOptions<E, N> {
     fn default() -> Self {
         Self {
             key: "DefaultChildren".into(),
-            allow_duplicates: false,
+            allow_duplicates: crate::DecomposeSettings::current().duplicate_configurations_enabled,
             codec: None,
             on_state_changed: None,
             on_event_complete: None,

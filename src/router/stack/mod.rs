@@ -40,7 +40,7 @@ impl<C> Default for StackOptions<C> {
         Self {
             key: "DefaultChildStack".into(),
             handle_back_button: false,
-            allow_duplicates: false,
+            allow_duplicates: crate::DecomposeSettings::current().duplicate_configurations_enabled,
             codec: None,
         }
     }

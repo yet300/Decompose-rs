@@ -14,9 +14,13 @@ struct Observer<E> {
     callback: Rc<dyn Fn(Rc<E>)>,
     active: Cell<bool>,
 }
+struct PendingEvent<E> {
+    event: Rc<E>,
+    from_diagnostic: bool,
+}
 struct Source<E> {
     observers: RefCell<Vec<Rc<Observer<E>>>>,
-    pending: RefCell<VecDeque<Rc<E>>>,
+    pending: RefCell<VecDeque<PendingEvent<E>>>,
     emitting: Cell<bool>,
 }
 /// Synchronous event broadcasting, with registration order and nested FIFO delivery.
@@ -59,7 +63,10 @@ impl<E> SimpleNavigation<E> {
         if self.source.observers.borrow().is_empty() {
             return;
         }
-        self.source.pending.borrow_mut().push_back(event);
+        self.source.pending.borrow_mut().push_back(PendingEvent {
+            event,
+            from_diagnostic: crate::settings::is_reporting(),
+        });
         if self.source.emitting.replace(true) {
             return;
         }
@@ -76,10 +83,17 @@ impl<E> SimpleNavigation<E> {
             let event = self.source.pending.borrow_mut().pop_front();
             let Some(event) = event else { break };
             let observers = self.source.observers.borrow().clone();
-            for observer in observers {
-                if observer.active.get() {
-                    (observer.callback)(event.clone());
+            let deliver = || {
+                for observer in observers {
+                    if observer.active.get() {
+                        (observer.callback)(event.event.clone());
+                    }
                 }
+            };
+            if event.from_diagnostic {
+                crate::settings::without_diagnostics(deliver);
+            } else {
+                deliver();
             }
         }
     }
