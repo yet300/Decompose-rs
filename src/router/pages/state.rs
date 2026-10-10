@@ -3,15 +3,42 @@ use std::{collections::BTreeMap, rc::Rc};
 
 type Encode<C> = dyn Fn(&[Rc<C>]) -> Result<Vec<u8>, String>;
 type Decode<C> = dyn Fn(&[u8]) -> Result<Vec<C>, String>;
+type EncodeState<C> = dyn Fn(&Pages<C>) -> Result<Vec<u8>, String>;
+type DecodeState<C> = dyn Fn(&[u8]) -> Result<Pages<C>, String>;
+
+enum Callbacks<C> {
+    Configurations {
+        encode: Rc<Encode<C>>,
+        decode: Rc<Decode<C>>,
+    },
+    State {
+        encode: Rc<EncodeState<C>>,
+        decode: Rc<DecodeState<C>>,
+    },
+}
+impl<C> Clone for Callbacks<C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Configurations { encode, decode } => Self::Configurations {
+                encode: encode.clone(),
+                decode: decode.clone(),
+            },
+            Self::State { encode, decode } => Self::State {
+                encode: encode.clone(),
+                decode: decode.clone(),
+            },
+        }
+    }
+}
 
 type Policy<C> = dyn Fn(&Pages<C>) -> bool;
-/// Explicit serialization of an ordered page configuration list, without serde.
+/// Explicit page serialization, without serde. [`Self::new`] handles
+/// configurations; [`Self::new_state`] also handles selected page metadata.
 ///
 /// Child component state is framed separately by the pages router. Decode
 /// errors are returned to the caller; restoration never silently resets.
 pub struct PagesCodec<C> {
-    encode: Rc<Encode<C>>,
-    decode: Rc<Decode<C>>,
+    callbacks: Callbacks<C>,
     should_save: Option<Rc<Policy<C>>>,
     should_restore: Option<Rc<Policy<C>>>,
 }
@@ -48,8 +75,29 @@ impl<C> PagesCodec<C> {
         decode: impl Fn(&[u8]) -> Result<Vec<C>, String> + 'static,
     ) -> Self {
         Self {
-            encode: Rc::new(encode),
-            decode: Rc::new(decode),
+            callbacks: Callbacks::Configurations {
+                encode: Rc::new(encode),
+                decode: Rc::new(decode),
+            },
+            should_save: None,
+            should_restore: None,
+        }
+    }
+
+    /// Supplies whole-state callbacks, including page selection.
+    /// The decoded state may override selection but must preserve the saved
+    /// ordered child count. Saved child states are paired by position. The
+    /// library validates the envelope before decoding and the returned state
+    /// before child construction. Save/restore predicates remain available.
+    pub fn new_state(
+        encode: impl Fn(&Pages<C>) -> Result<Vec<u8>, String> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Pages<C>, String> + 'static,
+    ) -> Self {
+        Self {
+            callbacks: Callbacks::State {
+                encode: Rc::new(encode),
+                decode: Rc::new(decode),
+            },
             should_save: None,
             should_restore: None,
         }
@@ -58,8 +106,7 @@ impl<C> PagesCodec<C> {
 impl<C> Clone for PagesCodec<C> {
     fn clone(&self) -> Self {
         Self {
-            encode: self.encode.clone(),
-            decode: self.decode.clone(),
+            callbacks: self.callbacks.clone(),
             should_save: self.should_save.clone(),
             should_restore: self.should_restore.clone(),
         }
@@ -99,7 +146,11 @@ pub(crate) fn encode<C>(
             return Err(state_error("duplicate child key in DPG1"));
         }
     }
-    let payload = (codec.encode)(configurations).map_err(NavigationError::State)?;
+    let payload = match &codec.callbacks {
+        Callbacks::Configurations { encode, .. } => encode(configurations),
+        Callbacks::State { encode, .. } => encode(pages),
+    }
+    .map_err(NavigationError::State)?;
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&next_key.to_le_bytes());
@@ -193,17 +244,25 @@ pub(crate) fn decode<C>(
     if reader.cursor != bytes.len() {
         return Err(state_error("trailing bytes after DPG1 envelope"));
     }
-    let configurations = (codec.decode)(payload).map_err(NavigationError::State)?;
-    if configurations.len() != children.len() {
+    let configurations = match &codec.callbacks {
+        Callbacks::Configurations { decode, .. } => Pages {
+            items: decode(payload)
+                .map_err(NavigationError::State)?
+                .into_iter()
+                .map(Rc::new)
+                .collect(),
+            selected_index,
+        },
+        Callbacks::State { decode, .. } => decode(payload).map_err(NavigationError::State)?,
+    };
+    if configurations.items.len() != children.len() {
         return Err(state_error(
             "DPG1 child count does not match configurations",
         ));
     }
+    configurations.validate()?;
     Ok(SavedPages {
-        configurations: Pages {
-            items: configurations.into_iter().map(Rc::new).collect(),
-            selected_index,
-        },
+        configurations,
         children,
         next_key,
     })

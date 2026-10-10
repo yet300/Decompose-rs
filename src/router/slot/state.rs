@@ -3,13 +3,26 @@ use crate::router::engine::SavedState;
 use std::{collections::BTreeMap, rc::Rc};
 type Encode<C> = dyn Fn(&C) -> Result<Vec<u8>, String>;
 type Decode<C> = dyn Fn(&[u8]) -> Result<C, String>;
+type DecodeState<C> = dyn Fn(&[u8]) -> Result<Option<C>, String>;
+enum Decoder<C> {
+    Configuration(Rc<Decode<C>>),
+    State(Rc<DecodeState<C>>),
+}
+impl<C> Clone for Decoder<C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Configuration(decode) => Self::Configuration(decode.clone()),
+            Self::State(decode) => Self::State(decode.clone()),
+        }
+    }
+}
 type Policy<C> = dyn Fn(Option<&C>) -> bool;
 /// Explicit serialization of a populated slot's configuration, without serde.
 /// Empty slots never invoke configuration encoding or decoding; membership and child
 /// state are framed separately. Persistence predicates still receive `None`.
 pub struct SlotCodec<C> {
     encode: Rc<Encode<C>>,
-    decode: Rc<Decode<C>>,
+    decode: Decoder<C>,
     should_save: Option<Rc<Policy<C>>>,
     should_restore: Option<Rc<Policy<C>>>,
 }
@@ -57,7 +70,26 @@ impl<C> SlotCodec<C> {
     ) -> Self {
         Self {
             encode: Rc::new(encode),
-            decode: Rc::new(decode),
+            decode: Decoder::Configuration(Rc::new(decode)),
+            should_save: None,
+            should_restore: None,
+        }
+    }
+
+    /// Supplies populated-slot encoding and nullable restoration callbacks.
+    /// Returning `Ok(None)` accepts an empty slot, discards its saved child
+    /// state, and skips the initializer. This differs from `should_restore`
+    /// returning false, which declines restoration and runs the initializer.
+    /// Empty DSL1 slots have no payload and skip both callbacks, preserving
+    /// the existing format. The identity counter is preserved when the
+    /// decoded slot becomes empty. Invalid frames fail before decoding.
+    pub fn new_state(
+        encode: impl Fn(&C) -> Result<Vec<u8>, String> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Option<C>, String> + 'static,
+    ) -> Self {
+        Self {
+            encode: Rc::new(encode),
+            decode: Decoder::State(Rc::new(decode)),
             should_save: None,
             should_restore: None,
         }
@@ -161,12 +193,18 @@ pub(super) fn decode<C>(
         return Err(error("trailing bytes after DSL1 envelope"));
     }
     let (configurations, children) = match child {
-        Some((payload, key, state)) => (
-            vec![Rc::new(
-                (codec.decode)(payload).map_err(NavigationError::State)?,
-            )],
-            vec![(key, state)],
-        ),
+        Some((payload, key, state)) => {
+            let configuration = match &codec.decode {
+                Decoder::Configuration(decode) => {
+                    Some(decode(payload).map_err(NavigationError::State)?)
+                }
+                Decoder::State(decode) => decode(payload).map_err(NavigationError::State)?,
+            };
+            match configuration {
+                Some(configuration) => (vec![Rc::new(configuration)], vec![(key, state)]),
+                None => (Vec::new(), Vec::new()),
+            }
+        }
         None => (Vec::new(), Vec::new()),
     };
     Ok(SavedState {

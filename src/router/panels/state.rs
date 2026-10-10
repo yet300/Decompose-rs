@@ -8,12 +8,38 @@ use std::{
 
 type Encode<MC, DC, EC> = dyn Fn(&MC, Option<&DC>, Option<&EC>) -> Result<Vec<u8>, String>;
 type Decode<MC, DC, EC> = dyn Fn(&[u8]) -> Result<(MC, Option<DC>, Option<EC>), String>;
+type EncodeState<MC, DC, EC> = dyn Fn(&Panels<MC, DC, EC>) -> Result<Vec<u8>, String>;
+type DecodeState<MC, DC, EC> = dyn Fn(&[u8]) -> Result<Panels<MC, DC, EC>, String>;
+enum Callbacks<MC, DC, EC> {
+    Configurations {
+        encode: Rc<Encode<MC, DC, EC>>,
+        decode: Rc<Decode<MC, DC, EC>>,
+    },
+    State {
+        encode: Rc<EncodeState<MC, DC, EC>>,
+        decode: Rc<DecodeState<MC, DC, EC>>,
+    },
+}
+impl<MC, DC, EC> Clone for Callbacks<MC, DC, EC> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Configurations { encode, decode } => Self::Configurations {
+                encode: encode.clone(),
+                decode: decode.clone(),
+            },
+            Self::State { encode, decode } => Self::State {
+                encode: encode.clone(),
+                decode: decode.clone(),
+            },
+        }
+    }
+}
 type Policy<MC, DC, EC> = dyn Fn(&Panels<MC, DC, EC>) -> bool;
-/// Explicit whole-membership serialization, independent of mode and child state.
+/// Explicit panel serialization, independent of child state. [`Self::new`]
+/// handles membership; [`Self::new_state`] also handles lifecycle mode.
 /// The decoder must return the same optional-role presence encoded in the envelope.
 pub struct PanelsCodec<MC, DC, EC = Infallible> {
-    encode: Rc<Encode<MC, DC, EC>>,
-    decode: Rc<Decode<MC, DC, EC>>,
+    callbacks: Callbacks<MC, DC, EC>,
     should_save: Option<Rc<Policy<MC, DC, EC>>>,
     should_restore: Option<Rc<Policy<MC, DC, EC>>>,
 }
@@ -56,8 +82,29 @@ impl<MC, DC, EC> PanelsCodec<MC, DC, EC> {
         decode: impl Fn(&[u8]) -> Result<(MC, Option<DC>, Option<EC>), String> + 'static,
     ) -> Self {
         Self {
-            encode: Rc::new(encode),
-            decode: Rc::new(decode),
+            callbacks: Callbacks::Configurations {
+                encode: Rc::new(encode),
+                decode: Rc::new(decode),
+            },
+            should_save: None,
+            should_restore: None,
+        }
+    }
+
+    /// Supplies whole-state callbacks, including panel lifecycle mode.
+    /// The decoded state may override mode but must preserve the saved
+    /// optional-role presence. Child states remain associated with their role.
+    /// The library validates the envelope before decoding and role presence
+    /// before child construction. Save/restore predicates remain available.
+    pub fn new_state(
+        encode: impl Fn(&Panels<MC, DC, EC>) -> Result<Vec<u8>, String> + 'static,
+        decode: impl Fn(&[u8]) -> Result<Panels<MC, DC, EC>, String> + 'static,
+    ) -> Self {
+        Self {
+            callbacks: Callbacks::State {
+                encode: Rc::new(encode),
+                decode: Rc::new(decode),
+            },
             should_save: None,
             should_restore: None,
         }
@@ -83,8 +130,7 @@ impl<MC, DC> PanelsCodec<MC, DC, Infallible> {
 impl<MC, DC, EC> Clone for PanelsCodec<MC, DC, EC> {
     fn clone(&self) -> Self {
         Self {
-            encode: self.encode.clone(),
-            decode: self.decode.clone(),
+            callbacks: self.callbacks.clone(),
             should_save: self.should_save.clone(),
             should_restore: self.should_restore.clone(),
         }
@@ -132,8 +178,13 @@ pub(super) fn encode<MC, DC, EC>(
             u32::try_from(v.len()).map_err(|_| error("DCS1 value length exceeds u32"))?;
         }
     }
-    let payload = (codec.encode)(&p.main, p.details.as_deref(), p.extra.as_deref())
-        .map_err(NavigationError::State)?;
+    let payload = match &codec.callbacks {
+        Callbacks::Configurations { encode, .. } => {
+            encode(&p.main, p.details.as_deref(), p.extra.as_deref())
+        }
+        Callbacks::State { encode, .. } => encode(p),
+    }
+    .map_err(NavigationError::State)?;
     let mut out = MAGIC.to_vec();
     out.extend_from_slice(&next.to_le_bytes());
     out.push(match p.mode {
@@ -217,19 +268,27 @@ pub(super) fn decode<MC, DC, EC>(
         return Err(error("trailing bytes after DPN1 envelope"));
     }
     // Structural validation, including every nested frame, precedes user decoding.
-    let (main, details, extra) = (codec.decode)(payload).map_err(NavigationError::State)?;
-    if details.is_some() != (flags & 1 != 0) || extra.is_some() != (flags & 2 != 0) {
+    let configurations = match &codec.callbacks {
+        Callbacks::Configurations { decode, .. } => {
+            let (main, details, extra) = decode(payload).map_err(NavigationError::State)?;
+            Panels {
+                main: Rc::new(main),
+                details: details.map(Rc::new),
+                extra: extra.map(Rc::new),
+                mode,
+            }
+        }
+        Callbacks::State { decode, .. } => decode(payload).map_err(NavigationError::State)?,
+    };
+    if configurations.details.is_some() != (flags & 1 != 0)
+        || configurations.extra.is_some() != (flags & 2 != 0)
+    {
         return Err(error(
             "DPN1 decoded membership does not match presence flags",
         ));
     }
     Ok(SavedState {
-        configurations: Panels {
-            main: Rc::new(main),
-            details: details.map(Rc::new),
-            extra: extra.map(Rc::new),
-            mode,
-        },
+        configurations,
         children,
         next_key,
     })
