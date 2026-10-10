@@ -13,6 +13,8 @@
 > receiver-local navigation documented in ADR-0009. Public Generic Navigation
 > over the shared engine (ADR-0010) adds custom event
 > sources, state projections, conditional Back and whole-state codecs.
+> Observable value completion (ADR-0011) is the current authorized stage, followed
+> by standard-router extension points after merging accumulated work into main.
 > Platform integrations remain outside scope.
 
 ## Research identity
@@ -58,7 +60,7 @@ Git mutation performed: NONE on any remote. Local-only repo init + research docs
 | Error strategy | DECIDED (0.6: minimized) | 6-variant `DecomposeError` (+`BackDispatchInProgress`); manual-destroy panics (fires last), creation-destroyed is `Err` |
 | Key strategy | DECIDED (0.6: crate-private) | `pub(crate) ChildKey`; `&str` boundaries; uniqueness only — `""` legal; deterministic |
 | `child_context` receiver | DECIDED (0.5) | `&self` via `Rc<RefCell<…>>` short borrows; never across callbacks |
-| Observable state abstraction | DEFERRED WITH REASON | Phase 2 with the engine; leading candidate `Rc`-backed `Value<T>`; no Tokio |
+| Observable state abstraction | IMPLEMENTED | Rc-backed `Value<T>`/`MutableValue<T>`, cached map, lifecycle bindings, identity CAS/update (ADR-0011); no runtime or payload Clone/Eq bounds |
 | Serialization boundary | DEFERRED WITH REASON | Caller-supplied codecs to opaque bytes; no `serde` in core; revisit Phase 6 |
 | Crate layout | DECIDED | One `decompose-rs` crate through Phase 5; no premature splits |
 | Threading model | DECIDED | `!Send + !Sync` core; thread-safe mirrors are future new types, never bounds |
@@ -161,6 +163,7 @@ CHILD PAGES: IMPLEMENTED (selected-index state, live/destroyed instances, lazy r
 CHILD PANELS: IMPLEMENTED (typed roles, lifecycle modes, independent dismissal, Back and DPN1 persistence)
 CHILD ITEMS: IMPLEMENTED (configuration-keyed activity, lazy instances, receiver-local navigation, DPI1 persistence)
 GENERIC NAVIGATION: IMPLEMENTED (custom NavState/events, neutral child types, DCH1 persistence)
+OBSERVABLE VALUES: IMPLEMENTED (cached map, lifecycle observation, identity CAS/update)
 PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
 ESSENTY-RS CHANGES: NONE REQUIRED
 ```

@@ -6,7 +6,8 @@
 //! [`router::items`] with navigation operations, Back handling and explicit
 //! configuration codecs. [`router::children`] connects custom immutable state
 //! and event sources to the same child lifecycle engine. [`value`] supplies
-//! synchronous observable snapshots.
+//! synchronous observable snapshots, cached mapping, identity updates and
+//! lifecycle observation.
 //!
 //! The core uses `Rc` and is single-threaded, synchronous and runtime-agnostic.
 //! Contexts, configurations and components need no Clone implementation.
@@ -19,11 +20,12 @@
 //! [`EssentyStateKeeper`] reexports the original primitive.
 //!
 //! Behavior is checked against Decompose revision `00840bc`, using the four
-//! published `essenty-* 0.1.0` crates. Other navigation families, web history
+//! published `essenty-* 0.1.0` crates. Web history
 //! and UI/platform integrations are outside the current delivery. See the
 //! repository README and `examples/child_stack.rs`, `examples/child_slot.rs`,
 //! `examples/child_pages.rs`, `examples/child_panels.rs` and
-//! `examples/child_items.rs` and `examples/generic_navigation.rs` for usage, and `NOTICE`
+//! `examples/child_items.rs`, `examples/generic_navigation.rs` and
+//! `examples/observable_values.rs` for usage, and `NOTICE`
 //! for attribution. This project has no official upstream affiliation.
 
 mod child;

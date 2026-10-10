@@ -59,6 +59,45 @@ Run `cargo run --example child_items` for lazy activation, viewport lifecycle
 targets, deactivation/recreation and restoration of inactive child state.
 Run `cargo run --example generic_navigation` for a custom empty-capable model,
 typed events, metadata, lazy child state, conditional Back and restoration.
+Run `cargo run --example observable_values` for cached mapping, identity-based
+updates and lifecycle-bound subscriptions.
+
+## Observable values
+
+`value::MutableValue<T>` owns a writable source; `value()` returns its read-only
+`Value<T>`. `get()` returns an `Rc<T>` snapshot. `set`/`set_rc` commit immediately
+and synchronously notify observers; nested writes conflate to the latest snapshot
+after the current notification round. Payloads need no Clone or Eq implementation.
+`subscribe` replays immediately and returns a cancellation token; Drop cancels,
+while `detach` leaves the observer registered.
+
+`Value::map` computes its initial output and caches by input Rc identity. Reads
+refresh even without subscribers. Multiple readers/observers share cached output
+and avoid repeated mapper work for the same input snapshot. A fresh equal payload
+is a new input; assigning the same Rc can notify without remapping. Mapping can
+be chained. Mapper panic leaves the previous cache usable for retry. Recursive
+reads of the same in-flight uncached input panic instead of recursing indefinitely.
+When a mapper reentrantly changes its source, its result still belongs to the
+input snapshot it received; a newer cache populated during that call is preserved.
+
+`MutableValue::compare_and_set(&expected, next)` compares Rc identity, replacing
+and notifying only on a match. `update`, `update_and_get` and `get_and_update`
+take `FnMut(Rc<T>) -> Rc<T>` transformers and retry if reentrant mutation makes
+their expected snapshot stale. A transformer may run multiple times. The latter
+two return the installed snapshot or its predecessor, even if observer reentry
+immediately changes the source again. These are synchronous operations without
+multithreaded atomicity guarantees.
+
+`subscribe_with_lifecycle(&lifecycle, mode, observer)` observes at Created+, Started+
+or Resumed using `ObserveLifecycleMode::{CreateDestroy, StartStop, ResumePause}`;
+StartStop is the default mode. It skips updates while inactive and replays the
+latest value whenever observation resumes. Its returned token owns both source
+and lifecycle registrations: cancelling/dropping removes both, while detach keeps
+the binding until lifecycle destruction. Detached lifecycle bindings require an
+explicit `Destroy` transition to release resources: Essenty has no weak registry
+handle, so they retain a lifecycle witness. Ordinary RAII bindings release their
+captures on cancellation even without `Destroy`. Setup handles lifecycle shutdown
+during synchronous replay and rolls back registrations when replay panics.
 
 ## Rust API and behavior
 
@@ -453,6 +492,8 @@ describe configuration-keyed activity and receiver-local lazy activation.
 [ADR-0010](docs/adr/0010-public-generic-navigation.md) and the
 [Generic Navigation design](docs/superpowers/specs/2026-10-09-generic-navigation-design.md)
 describe custom event/state adapters over the shared engine.
+[ADR-0011](docs/adr/0011-observable-values-completion.md) describes identity-based
+updates, cached mapping and the RAII lifecycle binding.
 
 ## Verification (Rust 1.96.0)
 
@@ -468,14 +509,18 @@ cargo run --example child_pages
 cargo run --example child_panels
 cargo run --example child_items
 cargo run --example generic_navigation
+cargo run --example observable_values
 ```
 
-Verified on 2026-10-10: **360 unit/integration tests and 1 doctest passed**.
-Format, strict Clippy, strict rustdoc and all six runnable examples passed. Library
+Verified on 2026-10-10: **389 unit/integration tests and 1 doctest passed**.
+Format, strict Clippy, strict rustdoc and all seven runnable examples passed. Library
 compilation passed all 24 installed targets, including WASM, Apple, Android,
-Linux and Windows. The [Generic Navigation implementation plan](docs/superpowers/plans/2026-10-09-generic-navigation.md)
+Linux and Windows. The [Observable Values implementation plan](docs/superpowers/plans/2026-10-10-observable-values.md)
 records counts, commands, target matrix and review findings.
 
+Observable tests cover identity updates, stale retries, cached/chained mapping,
+mapper reentry and panic recovery, every lifecycle gate, replay shutdown,
+registration rollback and RAII/detached capture release.
 Regression tests cover restored-state loss, retry after construction failure,
 retained recreation, non-Clone custom nesting, identity/lifecycle ordering,
 Back priority, repeated callback entry, persistence errors and teardown.

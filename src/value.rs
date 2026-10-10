@@ -3,6 +3,20 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+mod lifecycle;
+mod mapped;
+pub use lifecycle::ObserveLifecycleMode;
+
+trait Derived<T> {
+    fn get(&self) -> Rc<T>;
+    fn subscribe(self: Rc<Self>, callback: Box<dyn Fn(Rc<T>)>) -> Subscription;
+}
+
+enum ValueSource<T> {
+    Direct(Rc<Source<T>>),
+    Derived(Rc<dyn Derived<T>>),
+}
+
 struct Observer<T> {
     callback: Box<dyn Fn(Rc<T>)>,
     active: Cell<bool>,
@@ -21,13 +35,16 @@ struct Source<T> {
 /// `Rc` snapshots synchronously, and may subscribe, cancel, or update the source
 /// from their callbacks. This handle is single-threaded (`!Send` and `!Sync`).
 pub struct Value<T> {
-    source: Rc<Source<T>>,
+    source: ValueSource<T>,
 }
 
 impl<T> Clone for Value<T> {
     fn clone(&self) -> Self {
         Self {
-            source: self.source.clone(),
+            source: match &self.source {
+                ValueSource::Direct(source) => ValueSource::Direct(source.clone()),
+                ValueSource::Derived(source) => ValueSource::Derived(source.clone()),
+            },
         }
     }
 }
@@ -35,7 +52,10 @@ impl<T> Clone for Value<T> {
 impl<T> Value<T> {
     /// Returns the latest shared snapshot, without cloning its payload.
     pub fn get(&self) -> Rc<T> {
-        self.source.current.borrow().clone()
+        match &self.source {
+            ValueSource::Direct(source) => source.current.borrow().clone(),
+            ValueSource::Derived(source) => source.get(),
+        }
     }
 }
 
@@ -52,36 +72,38 @@ impl<T: 'static> Value<T> {
     /// the observer registered for the source's lifetime. If replay panics,
     /// registration is rolled back and the panic propagates.
     pub fn subscribe(&self, callback: impl Fn(Rc<T>) + 'static) -> Subscription {
+        let source = match &self.source {
+            ValueSource::Direct(source) => source,
+            ValueSource::Derived(source) => return source.clone().subscribe(Box::new(callback)),
+        };
         let observer = Rc::new(Observer {
             callback: Box::new(callback),
             active: Cell::new(true),
             ready: Cell::new(false),
         });
-        self.source.observers.borrow_mut().push(observer.clone());
+        source.observers.borrow_mut().push(observer.clone());
 
-        let source = Rc::downgrade(&self.source);
+        let source = Rc::downgrade(source);
         let target = Rc::downgrade(&observer);
         // Construct the cancellation guard before replay, so unwinding cannot
         // leave an observer whose caller never received a cancellation token.
-        let subscription = Subscription {
-            cancellation: RefCell::new(Some(Box::new(move || {
-                let Some(observer) = target.upgrade() else {
-                    return;
+        let subscription = Subscription::from_cancel(move || {
+            let Some(observer) = target.upgrade() else {
+                return;
+            };
+            observer.active.set(false);
+            if let Some(source) = source.upgrade() {
+                let removed = {
+                    let mut observers = source.observers.borrow_mut();
+                    observers
+                        .iter()
+                        .position(|entry| Rc::ptr_eq(entry, &observer))
+                        .map(|index| observers.remove(index))
                 };
-                observer.active.set(false);
-                if let Some(source) = source.upgrade() {
-                    let removed = {
-                        let mut observers = source.observers.borrow_mut();
-                        observers
-                            .iter()
-                            .position(|entry| Rc::ptr_eq(entry, &observer))
-                            .map(|index| observers.remove(index))
-                    };
-                    // Captured values may run arbitrary Drop implementations.
-                    drop(removed);
-                }
-            }))),
-        };
+                // Captured values may run arbitrary Drop implementations.
+                drop(removed);
+            }
+        });
 
         loop {
             let value = self.get();
@@ -93,6 +115,31 @@ impl<T: 'static> Value<T> {
         }
         subscription
     }
+
+    /// Creates an eagerly initialized view cached by source snapshot identity.
+    ///
+    /// The mapper runs outside source and cache borrows. With no observers,
+    /// source changes are mapped on the next read. Recursive reads of the same
+    /// uncached input panic; unwinding resets this guard for subsequent reads.
+    pub fn map<R: 'static>(&self, mapper: impl Fn(&T) -> R + 'static) -> Value<R> {
+        mapped::create(self.clone(), mapper)
+    }
+
+    /// Observes while the lifecycle meets the selected activity threshold.
+    ///
+    /// An active lifecycle immediately replays the latest snapshot. Dropping
+    /// or canceling the token unregisters both observers; detaching retains the
+    /// binding until destruction, which must be signaled explicitly. The token
+    /// keeps the value and lifecycle alive. A detached binding must receive
+    /// `Destroy` to release these resources, even if external handles are dropped.
+    pub fn subscribe_with_lifecycle(
+        &self,
+        lifecycle: &essenty_lifecycle::LifecycleRegistry,
+        mode: ObserveLifecycleMode,
+        observer: impl Fn(Rc<T>) + 'static,
+    ) -> Subscription {
+        lifecycle::subscribe(self.clone(), lifecycle, mode, observer)
+    }
 }
 
 /// A writable handle to synchronous observable state.
@@ -103,13 +150,13 @@ impl<T: 'static> Value<T> {
 /// the latest snapshot. Snapshot identity, rather than payload equality,
 /// determines whether another round is needed.
 pub struct MutableValue<T> {
-    value: Value<T>,
+    source: Rc<Source<T>>,
 }
 
 impl<T> Clone for MutableValue<T> {
     fn clone(&self) -> Self {
         Self {
-            value: self.value.clone(),
+            source: self.source.clone(),
         }
     }
 }
@@ -123,24 +170,24 @@ impl<T> MutableValue<T> {
     /// Creates a source using an existing shared snapshot.
     pub fn from_rc(value: Rc<T>) -> Self {
         Self {
-            value: Value {
-                source: Rc::new(Source {
-                    current: RefCell::new(value),
-                    observers: RefCell::new(Vec::new()),
-                    emitting: Cell::new(false),
-                }),
-            },
+            source: Rc::new(Source {
+                current: RefCell::new(value),
+                observers: RefCell::new(Vec::new()),
+                emitting: Cell::new(false),
+            }),
         }
     }
 
     /// Returns a read-only handle to this source.
     pub fn value(&self) -> Value<T> {
-        self.value.clone()
+        Value {
+            source: ValueSource::Direct(self.source.clone()),
+        }
     }
 
     /// Returns the latest shared snapshot, without cloning its payload.
     pub fn get(&self) -> Rc<T> {
-        self.value.get()
+        self.source.current.borrow().clone()
     }
 
     /// Replaces the current payload and notifies observers.
@@ -154,8 +201,56 @@ impl<T> MutableValue<T> {
     /// Observer panics propagate and interrupt that round; the current snapshot
     /// stays committed and the source remains usable for subsequent updates.
     pub fn set_rc(&self, value: Rc<T>) {
-        let source = &self.value.source;
+        let source = &self.source;
         let previous = source.current.replace(value);
+        self.emit(previous);
+    }
+
+    /// Commits `new` only if `expected` is the current `Rc` identity.
+    ///
+    /// A successful same-reference assignment still notifies observers.
+    pub fn compare_and_set(&self, expected: &Rc<T>, new: Rc<T>) -> bool {
+        let previous = {
+            let mut current = self.source.current.borrow_mut();
+            if !Rc::ptr_eq(&current, expected) {
+                return false;
+            }
+            std::mem::replace(&mut *current, new)
+        };
+        self.emit(previous);
+        true
+    }
+
+    /// Updates from a snapshot, retrying after reentrant mutation.
+    /// The transformer may run more than once, and receives shared snapshots.
+    pub fn update(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) {
+        self.update_pair(transformer);
+    }
+
+    /// Returns the exact successfully installed snapshot, even if an observer
+    /// replaces it before this method returns. The transformer may be retried.
+    pub fn update_and_get(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) -> Rc<T> {
+        self.update_pair(transformer).1
+    }
+
+    /// Returns the predecessor of the successful update. The transformer may
+    /// run repeatedly if it reentrantly changes the source.
+    pub fn get_and_update(&self, transformer: impl FnMut(Rc<T>) -> Rc<T>) -> Rc<T> {
+        self.update_pair(transformer).0
+    }
+
+    fn update_pair(&self, mut transformer: impl FnMut(Rc<T>) -> Rc<T>) -> (Rc<T>, Rc<T>) {
+        loop {
+            let previous = self.get();
+            let next = transformer(previous.clone());
+            if self.compare_and_set(&previous, next.clone()) {
+                return (previous, next);
+            }
+        }
+    }
+
+    fn emit(&self, previous: Rc<T>) {
+        let source = &self.source;
         if source.emitting.replace(true) {
             drop(previous);
             return;
@@ -194,11 +289,14 @@ impl<T> MutableValue<T> {
 
 /// An observer registration that cancels automatically when dropped.
 ///
-/// The token holds weak references to the source and observer, so keeping it
-/// alive does not keep either alive. Cancellation is idempotent.
+/// Direct and mapped value registrations hold weak references to their source;
+/// keeping their token alive does not keep the source or observer alive.
+/// Lifecycle registrations retain their value and lifecycle until cancellation
+/// or destruction. Cancellation is idempotent for all registrations.
 #[must_use = "dropping a subscription immediately cancels its observer"]
 pub struct Subscription {
     cancellation: RefCell<Option<Box<dyn FnOnce()>>>,
+    detachment: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl Subscription {
@@ -206,6 +304,14 @@ impl Subscription {
     pub fn from_cancel(cancel: impl FnOnce() + 'static) -> Self {
         Self {
             cancellation: RefCell::new(Some(Box::new(cancel))),
+            detachment: RefCell::new(None),
+        }
+    }
+
+    fn with_detach(cancel: impl FnOnce() + 'static, detach: impl FnOnce() + 'static) -> Self {
+        Self {
+            cancellation: RefCell::new(Some(Box::new(cancel))),
+            detachment: RefCell::new(Some(Box::new(detach))),
         }
     }
     /// Cancels this registration. Further calls have no effect.
@@ -217,15 +323,24 @@ impl Subscription {
         if let Some(cancellation) = cancellation {
             cancellation();
         }
+        let detachment = self.detachment.borrow_mut().take();
+        drop(detachment);
     }
 
-    /// Leaves the observer registered until the source is dropped.
+    /// Leaves a direct or mapped observer registered until the source is dropped.
     ///
     /// Consumes this token without canceling. Capturing a strong source handle
     /// in a detached observer creates an ownership cycle; use a weak capture
     /// when the observer needs to refer back to its source.
+    /// A lifecycle registration instead retains its binding until an explicit
+    /// lifecycle destruction; dropping external handles does not release it.
     pub fn detach(self) {
-        self.cancellation.borrow_mut().take();
+        let cancellation = self.cancellation.borrow_mut().take();
+        let detachment = self.detachment.borrow_mut().take();
+        if let Some(detachment) = detachment {
+            detachment();
+        }
+        drop(cancellation);
     }
 }
 
