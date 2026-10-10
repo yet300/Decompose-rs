@@ -1,27 +1,18 @@
 # Porting Roadmap
 
-> Current delivery (2026-10-10): ComponentContext corrections, observable values
-> and ChildStack/ChildSlot/ChildPages/ChildPanels/ChildItems plus Generic Navigation,
-> including Back and explicit-codec persistence, form
-> the current implementation scope.
-> The original phased research below is historical; the user approved the focused
-> stack delivery instead of all nine phases. ADR-0005 supersedes conflicting
-> retention/state assumptions; ADR-0006 records the shared private navigation
-> engine and ChildSlot. ADR-0007 records live/destroyed page state and selected-index
-> navigation. ChildPanels adds typed role factories and lifecycle modes,
-> documented in ADR-0008. ChildItems adds flexible activity and lazy
-> receiver-local navigation documented in ADR-0009. Public Generic Navigation
-> over the shared engine (ADR-0010) adds custom event
-> sources, state projections, conditional Back and whole-state codecs.
-> Observable values (ADR-0011) are complete and all accumulated stages are merged
-> into main, including standard-router extension points (ADR-0012), at e129ab1.
-> Lazy standard-router initialization and the final compatibility matrix
-> (ADR-0013) are implemented and independently reviewed on
-> codex/lazy-initial-state-compatibility. Local commit of this stage was
-> subsequently requested by the user; main remains at e129ab1.
-> [COMPATIBILITY.md](COMPATIBILITY.md) separates behavior, Rust adaptations and
-> remaining API gaps against the pinned revision.
-> Platform integrations remain outside scope.
+> Current delivery (2026-10-10): the selected independent Decompose core is
+> complete against pinned revision `00840bcfed6d55710c8fbb1a72503f2041eda490`.
+> Contexts, values, five standard families and Generic Navigation now include
+> selective/full-state persistence, owned memory snapshots, current-thread
+> settings/diagnostics, public test utilities and both portable history algorithms.
+> See [COMPATIBILITY.md](COMPATIBILITY.md), ADR-0014 through ADR-0018 and the
+> [completion plan](superpowers/plans/2026-10-10-independent-core-completion.md)
+> for source mappings, test evidence and remaining integration boundaries.
+> This delivery extends `f3886cd` on `codex/lazy-initial-state-compatibility`;
+> local commits only. The original phase research below is historical.
+> DOM/wasm host wiring, Android/Jetpack, Compose, SwiftUI, Reaktive and other
+> UI/platform adapters remain outside scope, as do thread-safe mirrors and no_std.
+> Kotlin serialized-byte migration is explicitly outside the required contract.
 
 ## Research identity
 
@@ -67,7 +58,7 @@ Git mutation performed: NONE on any remote. Local-only repo init + research docs
 | Key strategy | DECIDED (0.6: crate-private) | `pub(crate) ChildKey`; `&str` boundaries; uniqueness only — `""` legal; deterministic |
 | `child_context` receiver | DECIDED (0.5) | `&self` via `Rc<RefCell<…>>` short borrows; never across callbacks |
 | Observable state abstraction | IMPLEMENTED | Rc-backed `Value<T>`/`MutableValue<T>`, cached map, lifecycle bindings, identity CAS/update (ADR-0011); no runtime or payload Clone/Eq bounds |
-| Serialization boundary | DEFERRED WITH REASON | Caller-supplied codecs to opaque bytes; no `serde` in core; revisit Phase 6 |
+| Serialization boundary | IMPLEMENTED | Explicit byte codecs, selective and whole-state restoration, owned memory-only snapshots; no new serialization dependency (ADR-0014/0015/0018) |
 | Crate layout | DECIDED | One `decompose-rs` crate through Phase 5; no premature splits |
 | Threading model | DECIDED | `!Send + !Sync` core; thread-safe mirrors are future new types, never bounds |
 | Essenty dependency style | DECIDED | Four primitive crates directly; no umbrella, no Tokio in core |
@@ -160,6 +151,10 @@ save/restore; tombstone re-instantiation under the same key), and `ChildControll
 
 ## Completion status
 
+Independent core completion supersedes earlier deferred research scope: portable
+state/settings/test-utils/history are delivered; concrete platform adapters remain
+excluded. Verification commands and results are in the completion plan.
+
 ```text
 PHASE 0 RESEARCH: PASSED
 COMPONENT CONTEXT: IMPLEMENTED WITH STATE/RETENTION CORRECTIONS (ADR-0005)
@@ -172,7 +167,12 @@ GENERIC NAVIGATION: IMPLEMENTED (custom NavState/events, neutral child types, DC
 OBSERVABLE VALUES: IMPLEMENTED (cached map, lifecycle observation, identity CAS/update)
 STANDARD ROUTER EXTENSION POINTS: IMPLEMENTED AND MERGED (typed events, custom sources, navigator traits)
 LAZY STANDARD INITIAL STATE: IMPLEMENTED AND VERIFIED (six FnOnce factory variants; eager calls preserved)
-COMPATIBILITY MATRIX: COMPLETE FOR PINNED REVISION (source/test evidence, Rust adaptations, remaining gaps)
+COMPATIBILITY MATRIX: COMPLETE FOR PINNED REVISION (source/test evidence, Rust adaptations, excluded integrations)
+SELECTIVE / WHOLE-STATE PERSISTENCE: IMPLEMENTED (ADR-0014/0018; old formats preserved)
+MEMORY NAVIGATION: IMPLEMENTED (ADR-0015; owned nested snapshots, no disk storage)
+SETTINGS / PUBLIC TEST UTILITIES: IMPLEMENTED (ADR-0017)
+PORTABLE RECURSIVE AND LEGACY HISTORY: IMPLEMENTED (ADR-0016; explicit host backend)
+VERIFICATION: 509 unit/integration tests, 1 doctest, 15 examples, 24 compile targets; fmt/Clippy/rustdoc pass
 PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
 ESSENTY-RS CHANGES: NONE REQUIRED
 ```

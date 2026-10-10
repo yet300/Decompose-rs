@@ -3,7 +3,7 @@
 Independent Rust port of [Ark Ivanov’s Decompose](https://github.com/arkivanov/Decompose),
 implemented on top of [Essenty-rs](https://github.com/yet300/Essenty).
 
-**Current scope: ComponentContext, ChildStack, ChildSlot, ChildPages, ChildPanels, ChildItems and Generic Navigation.** The port includes observable
+**Current scope: the independent Decompose core, including portable navigation history.** The port includes observable
 values, navigation operations, child lifecycle management, Back routing and
 configuration/state restoration. ChildSlot represents zero-or-one children and
 supports activation, replacement and dismissal. ChildPages keeps page identities and
@@ -13,8 +13,12 @@ ChildItems manages a unique list with per-configuration lifecycle targets and
 explicit lazy component creation. Generic Navigation lets consumers define custom
 state, typed events, child lifecycle targets and an observable result.
 Standard routers accept custom event sources and lazy initial-state factories.
+Selective and whole-state codecs, owned memory navigation snapshots, current-thread
+settings with typed diagnostics and a public test context complete the portable
+state/recreation contracts. History supports recursive WebNavigation and the older
+stack-only algorithm over an explicit host backend.
 The [compatibility matrix](docs/COMPATIBILITY.md) records verified behavior,
-Rust adaptations and remaining upstream API gaps.
+Rust adaptations, evidence and excluded integrations.
 Platform/UI integrations are outside this delivery. Behavior is checked against pinned
 Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`, not an unspecified
 latest release. See `NOTICE` for attribution.
@@ -501,7 +505,8 @@ DCH1 stores the opaque caller payload plus allocation counter, ordered stable
 keys and nested states for all children. Structural validation precedes decode,
 then child count/uniqueness are checked before factories. The codec must preserve
 configuration identity and order; restored lifecycle statuses may differ.
-With no codec, navigation is transient and parent saves skip its child providers.
+Without a codec or explicit memory selection, navigation resets on recreation
+and parent saves skip its child providers.
 All five existing family save formats remain compatible.
 
 Run `cargo run --example generic_navigation` for a custom gallery with non-Clone
@@ -532,6 +537,69 @@ parent keeper or changing Essenty. Convert existing owned primitives with
 assembly. The restored child frame is also the first-save fallback, so a failed
 first child save does not discard previously restored data.
 
+## Selective, whole-state and memory persistence
+
+All five standard codecs provide `should_save` and `should_restore` predicates.
+Skipping a save avoids the encoder and nested providers; declining fully decoded,
+validated state runs the lazy initializer and discards that saved subtree. Empty
+state restores normally; damaged framing/invalid membership remains an error.
+Existing codec constructors preserve their old behavior and Rust byte formats.
+`PagesCodec::new_state`, `ItemsCodec::new_state` and `PanelsCodec::new_state` also
+expose the whole model state: a decoder may choose a different page selection,
+activity map or panel mode while preserving ordered child membership/roles.
+`SlotCodec::new_state` additionally accepts a nullable decoder: a populated save
+can restore as empty without invoking the initializer. Empty DSL1 slots have no
+payload and keep their existing callback-skipping behavior.
+Run `selective_persistence` and `whole_state_persistence` examples for these APIs.
+
+Enable memory-only navigation on a context's state keeper **before** creating a
+router with `enable_memory_navigation(key)`. `save_snapshot()` produces an owned
+`StateSnapshot`; `StateKeeper::from_snapshot(snapshot)` recreates from it, including
+nested scopes, stable keys and actual Rc configurations without a byte codec.
+`save()` and `snapshot.into_persistent()` omit the memory-only router subtree.
+Memory selection takes precedence over a byte codec and its predicates.
+Without that selection, `codec: None` retains its existing reset-on-recreation
+behavior. Snapshots have explicit owners and release data when the last owner
+is dropped; they do not retain running controllers or components.
+Run `cargo run --example memory_navigation`.
+
+## Settings and test contexts
+
+`DecomposeSettings::{current,replace,update,with}` manages current-thread snapshots.
+Stack/Pages/Generic options read duplicate policy when their Default is constructed;
+explicit `allow_duplicates` always wins, and running routers keep captured policy.
+Items remains unique-only. `on_decompose_error` observes typed diagnostics while
+Result/completion errors and convenience panics retain their existing behavior.
+Reentrant settings changes are supported and diagnostic cycles are suppressed.
+Rc/RefCell enforce the single-thread architecture; the core invents no OS/UI
+main-thread identity. Run `cargo run --example core_settings`.
+
+Public `TestComponentContext` requires no feature or extra crate. It starts
+Resumed by default, exposes the standard service handles, and supports explicit
+lifecycle states and supplied services. `recreate(true)` saves memory state and
+preserves retained instances; `recreate(false)` saves durable bytes and resets
+instances/memory navigation. Failed saves preserve the old context.
+Run `cargo run --example test_context`.
+
+## Portable browser history
+
+`router::webhistory` provides `WebNavigation`, `TypedWebNavigation`, explicit
+`RouteCodec`, standard Stack/Pages/Panels bridges, `HistoryController`,
+`HistoryBackend` and `MemoryHistoryBackend`. The controller synchronizes paths,
+merged/escaped query parameters and nested navigation with Back/Forward, guards,
+queued restoration completions and lifecycle cancellation.
+The recursive controller initializes one entry for the entire starting tree;
+`StackHistoryController` implements the older upstream contract with one initial
+entry per configuration, `history_paths`, suffix rewrites and a Forward path mapper.
+Keep the returned binding alive while synchronization is needed.
+Run `cargo run --example web_history` without any browser.
+
+The host adapter must serialize managed Rust history entries and wire the actual
+browser API/pop events. DOM/wasm bindings are outside this crate. Startup keeps an
+existing managed entry without automatically restoring the model; applications
+choose their initial deep-link/history reconstruction. Neither Rust navigation
+frames nor history state decode Kotlin SerializableContainer or Kotlin JSON bytes.
+
 ## Structure
 
 One `decompose-rs` crate keeps the shared ownership and lifecycle machinery in
@@ -545,6 +613,8 @@ separate context, value and stack crates in this scope.
 | `state`, `framing` | Essenty state adapter and child-state encoding |
 | public `value` | Observable immutable snapshots and subscription guards |
 | public `router::stack`, `router::slot`, `router::pages`, `router::panels`, `router::items` | Model APIs, operations, snapshots and codecs |
+| public `settings`, `test_utils` | Current-thread defaults/diagnostics and recreation harness |
+| public `router::webhistory` | Recursive/legacy history, model bridges and host backend contract |
 | public `router::children` | Custom models, typed event sources, neutral child records and whole-state codec |
 | private router machinery | Shared scope ownership, transactions and queued events |
 | private model state modules | DST1 stack / DSL1 slot / DPG1 pages / DPN1 panels / DPI1 items / DCH1 custom envelopes |
@@ -597,14 +667,24 @@ cargo run --example generic_navigation
 cargo run --example observable_values
 cargo run --example router_extension_points
 cargo run --example lazy_initial_state
+cargo run --example selective_persistence
+cargo run --example memory_navigation
+cargo run --example core_settings
+cargo run --example test_context
+cargo run --example web_history
+cargo run --example whole_state_persistence
 ```
 
-Verified on 2026-10-10: **428 unit/integration tests and 1 doctest passed**.
-Format, strict Clippy, strict rustdoc and all nine runnable examples passed. Library
-compilation passed all 24 installed targets, including WASM, Apple, Android,
-Linux and Windows. These are compile checks, not cross-target runtime tests.
-The [Lazy Initial State implementation plan](docs/superpowers/plans/2026-10-10-lazy-initial-state-compatibility.md)
-records counts, commands, target matrix and review findings.
+Verified on 2026-10-10: **509 unit/integration tests and 1 doctest passed**.
+Formatting, strict Clippy/rustdoc, all 15 examples and library compilation on all
+24 installed targets passed. The no-default-features run passed the same tests.
+Complete commands, target names and independent review evidence are recorded in the
+[independent-core completion plan](docs/superpowers/plans/2026-10-10-independent-core-completion.md).
+The stage adds regression coverage for selective/whole-state persistence,
+in-process memory ownership, settings reentry, public test utilities and both
+history algorithms, including deferred completion, veto, cancellation and panic
+recovery. All old format fixtures remain covered. Cross-target compilation is
+not runtime validation of an OS/UI/browser integration.
 
 Lazy initialization tests cover all six factory variants, moved/borrowed FnOnce
 captures, authoritative restoration including empty/inactive states, transient

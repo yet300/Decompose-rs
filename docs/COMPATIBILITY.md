@@ -2,7 +2,7 @@
 
 Audit date: 2026-10-10. Reference: upstream Decompose
 [`00840bcfed6d55710c8fbb1a72503f2041eda490`](https://github.com/arkivanov/Decompose/tree/00840bcfed6d55710c8fbb1a72503f2041eda490).
-Rust baseline: `e129ab1`, with this stage developed on
+Rust baseline for this completion: `f3886cd`, with this stage developed on
 `codex/lazy-initial-state-compatibility`. Dependencies are the four published
 `essenty-* 0.1.0` crates and `thiserror 2`.
 
@@ -13,7 +13,7 @@ the Kotlin test suite has not been executed as a differential oracle.
 
 Status meanings: **Implemented** means the stated behavior is present;
 **Adapted** means it is present with the explicitly described Rust contract;
-**Gap** identifies an absent upstream capability; **Outside scope** identifies
+**Outside scope** identifies
 an excluded integration. Verification results and their practical limits are
 recorded below and in the stage plan.
 
@@ -59,43 +59,62 @@ recorded below and in the stage plan.
 | Lifecycle-bound observation | **Adapted:** CreateDestroy/StartStop/ResumePause gates and latest replay on reopening. Token Drop cancels both registrations; detach lasts until explicit Destroy, retaining an Essenty lifecycle witness. | [upstream lifecycle subscription][value-ext]; [Rust binding](../src/value/lifecycle.rs), [observable tests](../tests/observable_values.rs), [ADR-0011](adr/0011-observable-values-completion.md) |
 | Kotlin delegated-property Value access | **Adapted:** explicit `get()` returns Rc; Kotlin property-delegate syntax has no direct Rust API counterpart. | [upstream Value extensions][value-ext]; [Rust value](../src/value.rs) |
 
-## Persistence, adaptations and remaining gaps
+## Persistence, settings, testing and history
 
 | Upstream capability | Rust status and practical consequence | Evidence |
 |---|---|---|
 | Configuration/state serializers | **Adapted:** caller-supplied codecs to bytes, no mandatory serde or Kotlin serialization dependency. Standard family metadata belongs to the library; Generic codec saves whole state. | [upstream NavStateSaver][state-saver]; standard codec modules and [generic codec](../src/router/children/state.rs) |
 | Keys, nested child state and retained recreation | **Implemented:** stable identities/counter, strict framing, inactive child state, saved authoritative membership and guarded retries. | [stack](../tests/child_stack.rs), [slot](../tests/child_slot.rs), [pages](../tests/child_pages.rs), [panels](../tests/child_panels.rs), [items](../tests/child_items.rs), [generic tests](../tests/generic_navigation.rs) |
-| Serialized bytes across languages | **Gap:** Rust DCS1/DST1/DSL1/DPG1/DPN1/DPI1/DCH1 are local versioned formats, not Kotlin SerializableContainer bytes. Existing Rust fixtures remain stable; moving Kotlin saved data requires an explicit migration. | [framing](../src/framing.rs), all router state.rs modules, [fixture regressions](../tests/child_pages.rs) |
-| Declining valid saved state / skipping a particular save | **Partially adapted:** Generic NavStateCodec supports encode/decode None. Standard codecs do not expose equivalent per-save/per-restore decline; absent codec selects transient mode and decode errors propagate. Upstream Slot restoreConfiguration returning null means empty membership, not decline; Rust records empty Slot membership separately. | [upstream Stack callbacks][stack-factory] / [Pages][pages-factory] / [Panels][panels-factory] / [Slot][slot-factory], [NavStateSaver used by Items][state-saver]; [generic tests](../tests/generic_navigation.rs), standard public codec definitions |
-| transientNavStateSaver: retain in memory but not on disk | **Gap:** no matching memory-only container/saver. `codec: None` means reset on recreation and is not equivalent to upstream's memory-only preservation. | [upstream transient saver][transient-saver]; [ADR-0009](adr/0009-lazy-child-items.md), [ADR-0010](adr/0010-public-generic-navigation.md) |
-| DecomposeSettings duplicate policy | **Adapted:** per-router allow_duplicates for Stack/Pages/Generic; Items always rejects duplicates. No global mutable settings object. | [upstream settings][settings]; corresponding options/validation and [generic occurrence tests](../tests/generic_navigation.rs) |
-| DecomposeSettings error handler and main-thread logging | **Gap/adaptation:** no global onDecomposeError callback or platform-main-thread check. The core is Rc-based single-threaded; fallible operations use Result and user panics propagate. This does not bind a router to an OS/UI main thread. | [upstream settings][settings]; [Rust errors](../src/error.rs), [navigation errors](../src/router/mod.rs), [ADR-0001](adr/0001-component-context-model.md) |
-| Public decompose-test-utils | **Outside current delivery:** crate-internal TestContext supports tests; it is cfg(test)/private and no public test-utils crate is supplied. | [upstream TestComponentContext][test-context]; [internal harness](../src/testing.rs), [exports](../src/lib.rs) |
-| WebNavigation / browser history | **Outside scope:** no browser history controller, URL serializer or host history integration. | [upstream WebNavigation][web-navigation]; [exports](../src/lib.rs), [roadmap](PORTING_ROADMAP.md) |
+| Serialized bytes across languages | **Adapted boundary:** Rust DCS1/DST1/DSL1/DPG1/DPN1/DPI1/DCH1 remain local versioned formats. Kotlin bytes are not required by the selected scope; migration requires an explicit application converter. | [framing](../src/framing.rs), existing family fixture regressions |
+| Declining valid saved state / skipping a particular save | **Implemented:** all five standard codecs expose should_save / should_restore. Skip runs before codecs/nested providers; decline runs only after full decode, membership and stable-key validation and invokes the lazy initializer. Empty state remains distinct. Generic NavStateCodec retains its optional encode/decode contract. | [selective tests](../tests/selective_persistence.rs), [ADR-0014](adr/0014-selective-standard-router-persistence.md) |
+| transientNavStateSaver: retain in memory but not on disk | **Adapted:** StateKeeper.enable_memory_navigation(key), save_snapshot/from_snapshot and owned StateSnapshot preserve actual model state, child identities/counter and nested snapshots for all standard families and Generic. Explicit memory selection overrides byte codecs/predicates; codec=None alone still resets. | [memory tests](../tests/memory_navigation.rs), [ADR-0015](adr/0015-owned-memory-navigation-snapshots.md), [example](../examples/memory_navigation.rs) |
+| Whole-state standard persistence callbacks | **Implemented:** additive PagesCodec/ItemsCodec/PanelsCodec.new_state encodes/decodes whole model state. Valid same-membership restoration may replace selection/activity/mode; old new codecs and framing stay compatible. Child count/order and panel-role presence follow upstream ownership contracts. SlotCodec.new_state accepts empty restoration from a populated payload without invoking the initializer. | [whole-state tests](../tests/whole_state_codecs.rs), [ADR-0018](adr/0018-whole-state-standard-codecs.md), [example](../examples/whole_state_persistence.rs) |
+| DecomposeSettings duplicate policy | **Adapted:** thread-local snapshot settings supply Stack/Pages/Generic Options defaults. Existing explicit allow_duplicates bool wins, even false; previously created options/running routers retain captured policy. Items remains unique-only. | [settings tests](../tests/settings.rs), [settings](../src/settings.rs), [ADR-0017](adr/0017-settings-and-public-test-context.md) |
+| DecomposeSettings error handler and main-thread logging | **Adapted:** typed diagnostic callback supplements Result/completion and existing panics; stale reentrant settings updates retry, handler-origin errors are suppressed through FIFO. There is no fictitious OS/UI main-thread check: Rc/RefCell prevent cross-thread handle movement, while host adapters own UI-thread identity. | [settings tests](../tests/settings.rs), [ADR-0017](adr/0017-settings-and-public-test-context.md) |
+| Public decompose-test-utils | **Adapted:** public TestComponentContext in the same crate, initially Resumed or explicit state, supplied services, child factory and lifecycle/Back controls. recreate(true) preserves memory and retained services; false uses durable bytes and resets them. Save failure leaves the old context intact. | [external integration tests](../tests/test_utils.rs), [test_utils](../src/test_utils.rs), [example](../examples/test_context.rs) |
+| WebNavigation / browser history | **Implemented portable behavior:** recursive WebNavigation, typed key/URL bridges for Stack/Pages/Panels, HistoryController, HistoryBackend and deterministic MemoryHistoryBackend. Active-child observation, Back/Forward, guards, deferred FIFO completions, cancellation and panic recovery; actual DOM/wasm host binding excluded. Direct optional Rc child represents owner capability. | [history tests](../tests/web_history.rs), [ADR-0016](adr/0016-portable-navigation-history.md), [example](../examples/web_history.rs) |
+| Older stack WebHistoryController | **Implemented portable behavior:** StackHistoryController.history_paths before attachment, one initial entry per configuration, common-prefix suffix rewrites, desired/current target guard and Forward configuration reconstruction from stored paths. It deliberately differs from the newer recursive controller's one-entry startup. | [legacy and recursive history tests](../tests/web_history.rs), [pinned older implementation](https://github.com/arkivanov/Decompose/blob/00840bcfed6d55710c8fbb1a72503f2041eda490/decompose/src/webMain/kotlin/com/arkivanov/decompose/router/stack/webhistory/DefaultWebHistoryController.kt), [ADR-0016](adr/0016-portable-navigation-history.md) |
 | Android/Jetpack/Compose/SwiftUI/Reaktive and host adapters | **Outside scope:** core compiles for applicable targets but supplies no UI framework adapters or automatic host lifecycle/gesture wiring. No dependency integrations are ported just to copy upstream modules. | [pinned upstream project tree][upstream-tree]; [Cargo.toml](../Cargo.toml), [exports](../src/lib.rs) |
 | Thread safety, concurrency and no_std | **Outside the selected Rust architecture:** synchronous Rc/RefCell core, no Send/Sync promise, runtime or no_std support. A separate concurrent mirror would require its own design. | [Cargo.toml](../Cargo.toml), [Rust value](../src/value.rs), [architecture decisions](PORTING_ROADMAP.md) |
 
-## Verification boundary
+## Public-source audit and verification boundary
 
-The controller independently confirmed **428 unit/integration tests and 1
-doctest**, formatting, strict Clippy/rustdoc and all nine runnable examples.
-The lazy suite adds 18 tests to the 410-test baseline. Library compilation passed
-all 24 installed targets; full target names, commands and independent review
-results are recorded in the [implementation plan](superpowers/plans/2026-10-10-lazy-initial-state-compatibility.md).
-Cross-compilation confirms library type-checking for targets,
-not runtime behavior on those operating systems or UI hosts.
+The final audit examined commonMain public contexts/Child, all five navigation
+factories/models/source/navigator helpers, Generic NavState/Saver, values and
+operators, settings, Cancellation, public test utilities and WebNavigation. It
+also extracted both independent history algorithms from webMain. The starting
+matrix missed the older WebHistoryController and full-state Pages/Items/Panels plus nullable Slot
+restoration callbacks; both are now implemented rather than classified away.
 
-Independent whole-stage specification and quality reviews both passed without
-findings, with high confidence for the bounded Rust contracts. They independently
-confirmed focused/full tests, doctest and the restoration example, and inspected
-the actual implementation and compatibility evidence. This stage is delivered
-on codex/lazy-initial-state-compatibility; main remains at the e129ab1 baseline.
+Kotlin overloads, delegated properties, variance, data-class copy and experimental
+annotations map to named Rust operations, public snapshot fields and Clone of Rc
+handles. SimpleChildNavState maps to ChildNavState; Cancellation maps to
+Subscription; factory-owner behavior is on ComponentContext. Deprecated
+DecomposeExperimentFlags forwards to the implemented settings policy and adds
+no behavior. Ref, hashString/keyHashString, Relay, locking and internal controllers
+remain internal implementation details, not omitted public component facilities.
+Public test StateKeeper register/consume/recreation conveniences map to Essenty
+registration/consume_value and StateKeeper::{with_restored,from_snapshot}; byte
+serialize/deserialize roundtrips remain caller-codec work rather than Kotlin
+serializer syntax. Direct optional Rc WebNavigation replaces WebNavigationOwner;
+None covers a fake component without child navigation.
 
-The covered portable behavior includes the component model, five standard
-routers, custom navigation, values, Back and explicit-codec restoration. The
-gaps above prevent a claim that every upstream API/module has been ported. No
-percentage is assigned: counting overloads, internal helpers and integrations
-as equal units would obscure practical compatibility.
+No unresolved functional gap was found in the selected independent-core scope
+against pinned revision `00840bcfed6d55710c8fbb1a72503f2041eda490` after these fixes.
+Confidence is high for the explicit tested contracts, moderate for exhaustive
+behavioral equivalence: the Kotlin suite was inspected but not run as a
+differential oracle. This is not a claim that every upstream module or source
+API spelling was ported.
+
+Final fresh checks passed: **509 unit/integration tests and 1 doctest**, format,
+strict Clippy/rustdoc, all 15 runnable examples and all 24 installed library
+compile targets. The no-default-features run passed the same tests; no feature
+gates or dependencies were added. Full commands/results are recorded in the
+[completion plan](superpowers/plans/2026-10-10-independent-core-completion.md).
+Cross compilation confirms library type-checking, not runtime behavior on those
+OS/UI/browser hosts. Actual host bindings, Android/Jetpack, Compose, SwiftUI,
+Reaktive, OS-main-thread checks, thread-safe mirrors and no_std remain outside
+scope. Rust saved formats require explicit migration from Kotlin containers.
 
 [upstream-tree]: https://github.com/arkivanov/Decompose/tree/00840bcfed6d55710c8fbb1a72503f2041eda490
 [generic-context]: https://github.com/arkivanov/Decompose/blob/00840bcfed6d55710c8fbb1a72503f2041eda490/decompose/src/commonMain/kotlin/com/arkivanov/decompose/GenericComponentContext.kt
