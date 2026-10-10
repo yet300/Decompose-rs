@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, rc::Rc};
 type Encode<C> = dyn Fn(&[Rc<C>]) -> Result<Vec<u8>, String>;
 type Decode<C> = dyn Fn(&[u8]) -> Result<Vec<C>, String>;
 
+type Policy<C> = dyn Fn(&Items<C>) -> bool;
 /// Explicit serialization of an ordered item configuration list, without serde.
 ///
 /// Child component state is framed separately by the items router. Decode
@@ -11,8 +12,36 @@ type Decode<C> = dyn Fn(&[u8]) -> Result<Vec<C>, String>;
 pub struct ItemsCodec<C> {
     encode: Rc<Encode<C>>,
     decode: Rc<Decode<C>>,
+    should_save: Option<Rc<Policy<C>>>,
+    should_restore: Option<Rc<Policy<C>>>,
 }
 impl<C> ItemsCodec<C> {
+    /// Chooses whether each save includes this router and its nested child states.
+    /// Returning false skips the encoder and child state providers for that save.
+    /// Defaults to true. Called synchronously on the current navigation snapshot.
+    pub fn should_save(mut self, predicate: impl Fn(&Items<C>) -> bool + 'static) -> Self {
+        self.should_save = Some(Rc::new(predicate));
+        self
+    }
+    /// Chooses whether to accept fully decoded, validated saved navigation.
+    /// Returning false uses the lazy initializer and discards saved child state.
+    /// Corrupt data and codec errors remain errors and never call this predicate.
+    /// Defaults to true; an absent saved state never calls this predicate.
+    pub fn should_restore(mut self, predicate: impl Fn(&Items<C>) -> bool + 'static) -> Self {
+        self.should_restore = Some(Rc::new(predicate));
+        self
+    }
+    pub(super) fn can_save(&self, state: &Items<C>) -> bool {
+        self.should_save
+            .as_ref()
+            .is_none_or(|predicate| predicate(state))
+    }
+    pub(super) fn can_restore(&self, state: &Items<C>) -> bool {
+        self.should_restore
+            .as_ref()
+            .is_none_or(|predicate| predicate(state))
+    }
+
     /// Supplies list-wide configuration encoding and decoding callbacks.
     pub fn new(
         encode: impl Fn(&[Rc<C>]) -> Result<Vec<u8>, String> + 'static,
@@ -21,6 +50,8 @@ impl<C> ItemsCodec<C> {
         Self {
             encode: Rc::new(encode),
             decode: Rc::new(decode),
+            should_save: None,
+            should_restore: None,
         }
     }
 }
@@ -29,6 +60,8 @@ impl<C> Clone for ItemsCodec<C> {
         Self {
             encode: self.encode.clone(),
             decode: self.decode.clone(),
+            should_save: self.should_save.clone(),
+            should_restore: self.should_restore.clone(),
         }
     }
 }

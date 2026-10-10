@@ -97,6 +97,29 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
             .map(|codec| state::decode(codec, bytes))
             .transpose()
     }
+    fn should_restore(&self, state: &Self::State) -> bool {
+        self.0
+            .codec
+            .as_ref()
+            .is_none_or(|codec| codec.can_restore(state.first().map(Rc::as_ref)))
+    }
+    fn encode_with_children(
+        &self,
+        state: &Self::State,
+        next_key: u64,
+        children: impl FnOnce() -> Result<
+            Vec<(String, std::collections::BTreeMap<String, Vec<u8>>)>,
+            NavigationError,
+        >,
+    ) -> Result<Option<Vec<u8>>, NavigationError> {
+        let Some(codec) = &self.0.codec else {
+            return Ok(None);
+        };
+        if !codec.can_save(state.first().map(Rc::as_ref)) {
+            return Ok(None);
+        }
+        state::encode(codec, state, &children()?, next_key).map(Some)
+    }
     fn encode(
         &self,
         configs: &Vec<Rc<C>>,

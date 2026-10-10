@@ -140,6 +140,29 @@ impl<MC: Eq + 'static, DC: Eq + 'static, EC: Eq + 'static, MT: 'static, DT: 'sta
             .map(|c| state::decode(c, bytes))
             .transpose()
     }
+    fn should_restore(&self, state: &Self::State) -> bool {
+        self.0
+            .codec
+            .as_ref()
+            .is_none_or(|codec| codec.can_restore(state))
+    }
+    fn encode_with_children(
+        &self,
+        state: &Self::State,
+        next_key: u64,
+        children: impl FnOnce() -> Result<
+            Vec<(String, std::collections::BTreeMap<String, Vec<u8>>)>,
+            NavigationError,
+        >,
+    ) -> Result<Option<Vec<u8>>, NavigationError> {
+        let Some(codec) = &self.0.codec else {
+            return Ok(None);
+        };
+        if !codec.can_save(state) {
+            return Ok(None);
+        }
+        state::encode(codec, state, &children()?, next_key).map(Some)
+    }
     fn encode(
         &self,
         p: &Self::State,

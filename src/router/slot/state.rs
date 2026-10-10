@@ -3,21 +3,53 @@ use crate::router::engine::SavedState;
 use std::{collections::BTreeMap, rc::Rc};
 type Encode<C> = dyn Fn(&C) -> Result<Vec<u8>, String>;
 type Decode<C> = dyn Fn(&[u8]) -> Result<C, String>;
+type Policy<C> = dyn Fn(Option<&C>) -> bool;
 /// Explicit serialization of a populated slot's configuration, without serde.
-/// Empty slots never invoke either callback; membership and child state are framed separately.
+/// Empty slots never invoke configuration encoding or decoding; membership and child
+/// state are framed separately. Persistence predicates still receive `None`.
 pub struct SlotCodec<C> {
     encode: Rc<Encode<C>>,
     decode: Rc<Decode<C>>,
+    should_save: Option<Rc<Policy<C>>>,
+    should_restore: Option<Rc<Policy<C>>>,
 }
 impl<C> Clone for SlotCodec<C> {
     fn clone(&self) -> Self {
         Self {
             encode: self.encode.clone(),
             decode: self.decode.clone(),
+            should_save: self.should_save.clone(),
+            should_restore: self.should_restore.clone(),
         }
     }
 }
 impl<C> SlotCodec<C> {
+    /// Chooses whether each save includes this router and its nested child states.
+    /// Returning false skips the encoder and child state providers for that save.
+    /// Defaults to true. Called synchronously on the current navigation snapshot.
+    pub fn should_save(mut self, predicate: impl Fn(Option<&C>) -> bool + 'static) -> Self {
+        self.should_save = Some(Rc::new(predicate));
+        self
+    }
+    /// Chooses whether to accept fully decoded, validated saved navigation.
+    /// Returning false uses the lazy initializer and discards saved child state.
+    /// Corrupt data and codec errors remain errors and never call this predicate.
+    /// Defaults to true; an absent saved state never calls this predicate.
+    pub fn should_restore(mut self, predicate: impl Fn(Option<&C>) -> bool + 'static) -> Self {
+        self.should_restore = Some(Rc::new(predicate));
+        self
+    }
+    pub(super) fn can_save(&self, state: Option<&C>) -> bool {
+        self.should_save
+            .as_ref()
+            .is_none_or(|predicate| predicate(state))
+    }
+    pub(super) fn can_restore(&self, state: Option<&C>) -> bool {
+        self.should_restore
+            .as_ref()
+            .is_none_or(|predicate| predicate(state))
+    }
+
     /// Supplies configuration encoding and decoding callbacks.
     pub fn new(
         encode: impl Fn(&C) -> Result<Vec<u8>, String> + 'static,
@@ -26,6 +58,8 @@ impl<C> SlotCodec<C> {
         Self {
             encode: Rc::new(encode),
             decode: Rc::new(decode),
+            should_save: None,
+            should_restore: None,
         }
     }
 }

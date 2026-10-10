@@ -8,13 +8,48 @@ use std::{
 
 type Encode<MC, DC, EC> = dyn Fn(&MC, Option<&DC>, Option<&EC>) -> Result<Vec<u8>, String>;
 type Decode<MC, DC, EC> = dyn Fn(&[u8]) -> Result<(MC, Option<DC>, Option<EC>), String>;
+type Policy<MC, DC, EC> = dyn Fn(&Panels<MC, DC, EC>) -> bool;
 /// Explicit whole-membership serialization, independent of mode and child state.
 /// The decoder must return the same optional-role presence encoded in the envelope.
 pub struct PanelsCodec<MC, DC, EC = Infallible> {
     encode: Rc<Encode<MC, DC, EC>>,
     decode: Rc<Decode<MC, DC, EC>>,
+    should_save: Option<Rc<Policy<MC, DC, EC>>>,
+    should_restore: Option<Rc<Policy<MC, DC, EC>>>,
 }
 impl<MC, DC, EC> PanelsCodec<MC, DC, EC> {
+    /// Chooses whether each save includes this router and its nested child states.
+    /// Returning false skips the encoder and child state providers for that save.
+    /// Defaults to true. Called synchronously on the current navigation snapshot.
+    pub fn should_save(
+        mut self,
+        predicate: impl Fn(&Panels<MC, DC, EC>) -> bool + 'static,
+    ) -> Self {
+        self.should_save = Some(Rc::new(predicate));
+        self
+    }
+    /// Chooses whether to accept fully decoded, validated saved navigation.
+    /// Returning false uses the lazy initializer and discards saved child state.
+    /// Corrupt data and codec errors remain errors and never call this predicate.
+    /// Defaults to true; an absent saved state never calls this predicate.
+    pub fn should_restore(
+        mut self,
+        predicate: impl Fn(&Panels<MC, DC, EC>) -> bool + 'static,
+    ) -> Self {
+        self.should_restore = Some(Rc::new(predicate));
+        self
+    }
+    pub(super) fn can_save(&self, state: &Panels<MC, DC, EC>) -> bool {
+        self.should_save
+            .as_ref()
+            .is_none_or(|predicate| predicate(state))
+    }
+    pub(super) fn can_restore(&self, state: &Panels<MC, DC, EC>) -> bool {
+        self.should_restore
+            .as_ref()
+            .is_none_or(|predicate| predicate(state))
+    }
+
     /// Supplies whole-membership encoding and decoding callbacks.
     pub fn new(
         encode: impl Fn(&MC, Option<&DC>, Option<&EC>) -> Result<Vec<u8>, String> + 'static,
@@ -23,6 +58,8 @@ impl<MC, DC, EC> PanelsCodec<MC, DC, EC> {
         Self {
             encode: Rc::new(encode),
             decode: Rc::new(decode),
+            should_save: None,
+            should_restore: None,
         }
     }
 }
@@ -48,6 +85,8 @@ impl<MC, DC, EC> Clone for PanelsCodec<MC, DC, EC> {
         Self {
             encode: self.encode.clone(),
             decode: self.decode.clone(),
+            should_save: self.should_save.clone(),
+            should_restore: self.should_restore.clone(),
         }
     }
 }

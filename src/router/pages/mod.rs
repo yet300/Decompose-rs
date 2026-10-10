@@ -108,7 +108,7 @@ impl<C> Default for PagesOptions<C> {
         Self {
             key: "DefaultChildPages".into(),
             handle_back_button: false,
-            allow_duplicates: false,
+            allow_duplicates: crate::DecomposeSettings::current().duplicate_configurations_enabled,
             codec: None,
             page_status: None,
         }
@@ -171,6 +171,29 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for PagesModel<C> {
             .as_ref()
             .map(|codec| state::decode(codec, bytes))
             .transpose()
+    }
+    fn should_restore(&self, state: &Self::State) -> bool {
+        self.0
+            .codec
+            .as_ref()
+            .is_none_or(|codec| codec.can_restore(state))
+    }
+    fn encode_with_children(
+        &self,
+        state: &Self::State,
+        next_key: u64,
+        children: impl FnOnce() -> Result<
+            Vec<(String, std::collections::BTreeMap<String, Vec<u8>>)>,
+            NavigationError,
+        >,
+    ) -> Result<Option<Vec<u8>>, NavigationError> {
+        let Some(codec) = &self.0.codec else {
+            return Ok(None);
+        };
+        if !codec.can_save(state) {
+            return Ok(None);
+        }
+        state::encode(codec, state, &children()?, next_key).map(Some)
     }
     fn encode(
         &self,
