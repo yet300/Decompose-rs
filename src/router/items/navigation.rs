@@ -1,5 +1,8 @@
 use super::{ActiveLifecycleState, ItemMap, Items, NavigationError};
-use crate::router::navigation::NavigationSource;
+use crate::router::{
+    NavigationEvent,
+    children::{NavigationSource, SimpleNavigation},
+};
 use std::rc::Rc;
 /// Receiver state before and after a committed event.
 pub struct NavigationResult<C> {
@@ -76,8 +79,11 @@ fn panic_completion<C>(result: Result<NavigationResult<C>, NavigationError>) {
     }
 }
 /// Shared synchronous event source; events without receivers are discarded.
+///
+/// Events are shared by `Rc` and never replayed. Nested broadcasts are FIFO.
+/// Panics abandon queued events and propagate; the source remains usable afterward.
 pub struct ItemsNavigation<C> {
-    pub(crate) source: NavigationSource<Items<C>>,
+    source: SimpleNavigation<ItemsEvent<C>>,
 }
 impl<C> Clone for ItemsNavigation<C> {
     fn clone(&self) -> Self {
@@ -95,7 +101,7 @@ impl<C: 'static> ItemsNavigation<C> {
     /// Creates an empty source.
     pub fn new() -> Self {
         Self {
-            source: NavigationSource::new(),
+            source: SimpleNavigation::new(),
         }
     }
 }
@@ -105,12 +111,8 @@ impl<C: 'static> ItemsNavigator<C> for ItemsNavigation<C> {
         transformer: impl Fn(Items<C>) -> Items<C> + 'static,
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     ) {
-        self.source.navigate_with(transformer, move |r| {
-            completion(r.map(|r| NavigationResult {
-                old_items: r.old_stack,
-                new_items: r.new_stack,
-            }))
-        });
+        self.source
+            .navigate(ItemsEvent::with_completion(transformer, completion));
     }
 }
 macro_rules! inherent_navigation {
@@ -132,4 +134,12 @@ macro_rules! inherent_navigation {
 pub(crate) use inherent_navigation;
 impl<C: 'static> ItemsNavigation<C> {
     inherent_navigation!();
+}
+
+/// Public Items state transformation and per-receiver completion.
+pub type ItemsEvent<C> = NavigationEvent<Items<C>, NavigationResult<C>>;
+impl<C: 'static> NavigationSource<ItemsEvent<C>> for ItemsNavigation<C> {
+    fn subscribe(&self, observer: Rc<dyn Fn(Rc<ItemsEvent<C>>)>) -> crate::value::Subscription {
+        self.source.subscribe(observer)
+    }
 }

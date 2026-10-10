@@ -1,4 +1,4 @@
-use super::navigation::{Event, NavigationResult, NavigationSource};
+use super::navigation::{Event, NavigationResult};
 type ChildFactory<Ctx, C, T> = Rc<dyn Fn(&C, Ctx) -> T>;
 type SavedChildren = Vec<(String, BTreeMap<String, Vec<u8>>)>;
 use super::{Child, NavigationError};
@@ -752,48 +752,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
     }
 }
 
-pub(crate) fn build<Ctx, C, T, M>(
-    context: &Ctx,
-    navigation: &NavigationSource<M::State>,
-    initial: M::State,
-    key: String,
-    model: M,
-    factory: impl Fn(&C, Ctx) -> T + 'static,
-) -> Result<Value<M::Snapshot>, NavigationError>
-where
-    Ctx: ComponentContext + 'static,
-    C: Eq + 'static,
-    T: 'static,
-    M: Model<C, T>,
-{
-    build_with_control(context, navigation, initial, key, model, factory).map(|(value, _)| value)
-}
-
 type ControlledValue<S, V> = (Value<V>, NavigationControl<S>);
-
-pub(crate) fn build_with_control<Ctx, C, T, M>(
-    context: &Ctx,
-    navigation: &NavigationSource<M::State>,
-    initial: M::State,
-    key: String,
-    model: M,
-    factory: impl Fn(&C, Ctx) -> T + 'static,
-) -> Result<ControlledValue<M::State, M::Snapshot>, NavigationError>
-where
-    Ctx: ComponentContext + 'static,
-    C: Eq + 'static,
-    T: 'static,
-    M: Model<C, T>,
-{
-    build_with_subscriber(
-        context,
-        |callback| navigation.subscribe(move |event| callback(event)),
-        || initial,
-        key,
-        model,
-        factory,
-    )
-}
 
 type EventReceiver<S> = Rc<dyn Fn(Event<S>)>;
 

@@ -62,6 +62,37 @@ typed events, metadata, lazy child state, conditional Back and restoration.
 Run `cargo run --example observable_values` for cached mapping, identity-based
 updates and lifecycle-bound subscriptions.
 
+## Standard navigation extension points
+
+The crate provides public `StackEvent`, `SlotEvent`, `PagesEvent`,
+`PanelsEvent` and `ItemsEvent` aliases. Each describes a shared
+`NavigationEvent<State, Result>` with `new`, `with_completion`, `transform` and
+`complete`. `new` uses a no-op completion; navigator convenience methods panic on
+transition errors, while `navigate_with` reports typed errors per receiver.
+
+Standard child factories accept `NavigationSource<FamilyEvent>`, including
+`dyn NavigationSource`. A custom source can wrap `SimpleNavigation` to filter,
+log or generate events. The concrete navigation constructors implement the same
+protocol. Connected receivers apply events to their own current state, complete
+after publication and cancel their connection when the hosting lifecycle ends.
+
+`StackNavigator`, `SlotNavigator`, `PagesNavigator`, `PanelsNavigator` and
+`ItemsNavigator` expose reusable operations. Custom implementations supply
+`navigate_with` and inherit the family helpers. These traits use static dispatch
+because their callbacks are generic; `NavigationSource` is object-safe. Existing
+inherent concrete methods remain available without importing navigator traits.
+
+The shared `SimpleNavigation` transport preserves event Rc identity, registration
+order and nested FIFO delivery. It discards disconnected events and never replays
+them. Subscription-time and construction-time events enter the engine's guarded
+queue. A custom `subscribe` that panics before returning its token is responsible
+for rolling back its own incomplete registration.
+
+Run `cargo run --example router_extension_points` for an intercepted Stack source,
+a generic navigator helper, dyn source connection, completion and teardown.
+The [design](docs/superpowers/specs/2026-10-10-router-extension-points-design.md)
+records the event, source and navigator contracts.
+
 ## Observable values
 
 `value::MutableValue<T>` owns a writable source; `value()` returns its read-only
@@ -494,6 +525,8 @@ describe configuration-keyed activity and receiver-local lazy activation.
 describe custom event/state adapters over the shared engine.
 [ADR-0011](docs/adr/0011-observable-values-completion.md) describes identity-based
 updates, cached mapping and the RAII lifecycle binding.
+[ADR-0012](docs/adr/0012-standard-router-extension-points.md) describes typed
+standard events, source adapters and reusable navigator traits.
 
 ## Verification (Rust 1.96.0)
 
@@ -510,14 +543,18 @@ cargo run --example child_panels
 cargo run --example child_items
 cargo run --example generic_navigation
 cargo run --example observable_values
+cargo run --example router_extension_points
 ```
 
-Verified on 2026-10-10: **389 unit/integration tests and 1 doctest passed**.
-Format, strict Clippy, strict rustdoc and all seven runnable examples passed. Library
+Verified on 2026-10-10: **410 unit/integration tests and 1 doctest passed**.
+Format, strict Clippy, strict rustdoc and all eight runnable examples passed. Library
 compilation passed all 24 installed targets, including WASM, Apple, Android,
-Linux and Windows. The [Observable Values implementation plan](docs/superpowers/plans/2026-10-10-observable-values.md)
+Linux and Windows. The [Router Extension Points implementation plan](docs/superpowers/plans/2026-10-10-router-extension-points.md)
 records counts, commands, target matrix and review findings.
 
+Router extension tests cover non-Clone public events, custom/dyn sources, generic
+helpers, shared event identity, FIFO, per-receiver results, construction-time
+buffering, every family's Back policy and guarded cancellation/rollback.
 Observable tests cover identity updates, stale retries, cached/chained mapping,
 mapper reentry and panic recovery, every lifecycle gate, replay shutdown,
 registration rollback and RAII/detached capture release.

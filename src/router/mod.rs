@@ -3,6 +3,7 @@ pub mod children;
 mod engine;
 pub mod items;
 mod navigation;
+pub use navigation::NavigationEvent;
 pub mod pages;
 pub mod panels;
 pub mod slot;

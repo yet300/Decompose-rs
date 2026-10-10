@@ -72,9 +72,9 @@ tests/observable_values.rs. Controller owns docs/example/lib documentation.
 - [x] Fresh whole-stage quality review after spec PASS; repeat both on source fixes.
 - [x] Controller independently tests full suite/doc/fmt/strict Clippy/rustdoc,
   seven examples, installed targets and diff check; record actual results.
-- [ ] Commit completed observable values; merge accumulated branch into main
+- [x] Commit completed observable values; merge accumulated branch into main
   after checking ancestry/clean state, preferably fast-forward, verify on main.
-- [ ] Create codex/router-extension-points from merged main and begin the separate
+- [x] Create codex/router-extension-points from merged main and begin the separate
   authorized router-source/Navigator abstraction stage; no push/branch deletion.
 
 ## Verification record (2026-10-10, before independent review)
@@ -149,3 +149,11 @@ probes covered borrowed payload compatibility, reentrant cache payload Drop,
 mapped lifecycle rollback with reentrant capture destruction, and active chains
 with nested reads/updates. The stage is ready for the authorized local commit
 and fast-forward merge into main.
+
+## Delivery
+
+Observable values committed as 9a70ae0. Main fast-forwarded from e96eaf1 to
+9a70ae0, including ChildSlot, Pages, Panels, Items and Generic Navigation. The
+merged main independently passed 389 tests and 1 doctest and had a clean tree.
+Then codex/router-extension-points was created from that main for the authorized
+next stage. Previous branches were preserved; no remote is configured.

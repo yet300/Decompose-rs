@@ -1,12 +1,47 @@
 use super::NavigationError;
-use crate::value::Subscription;
-use std::{
-    cell::{Cell, RefCell},
-    collections::VecDeque,
-    rc::Rc,
-};
+use crate::{router::children::NavigationSource, value::Subscription};
+use std::rc::Rc;
 
-type Transformer<S> = dyn Fn(S) -> S;
+/// A shared state transformation and per-receiver completion callback.
+///
+/// Cloning shares the callbacks without cloning state or result payloads.
+/// Each receiver transforms its own state and completes after publication.
+pub struct NavigationEvent<S, R> {
+    transformer: Rc<dyn Fn(S) -> S>,
+    completion: Rc<dyn Fn(Result<R, NavigationError>)>,
+}
+impl<S, R> Clone for NavigationEvent<S, R> {
+    fn clone(&self) -> Self {
+        Self {
+            transformer: self.transformer.clone(),
+            completion: self.completion.clone(),
+        }
+    }
+}
+impl<S, R> NavigationEvent<S, R> {
+    /// Creates an event with no completion action, including on errors.
+    pub fn new(transformer: impl Fn(S) -> S + 'static) -> Self {
+        Self::with_completion(transformer, |_| {})
+    }
+    /// Creates an event with a completion invoked separately by each receiver.
+    pub fn with_completion(
+        transformer: impl Fn(S) -> S + 'static,
+        completion: impl Fn(Result<R, NavigationError>) + 'static,
+    ) -> Self {
+        Self {
+            transformer: Rc::new(transformer),
+            completion: Rc::new(completion),
+        }
+    }
+    /// Applies the shared transformer to a receiver's state.
+    pub fn transform(&self, state: S) -> S {
+        (self.transformer)(state)
+    }
+    /// Reports one receiver's committed result or transition error.
+    pub fn complete(&self, result: Result<R, NavigationError>) {
+        (self.completion)(result)
+    }
+}
 
 /// Configuration snapshots before and after a successful navigation event.
 pub struct NavigationResult<C> {
@@ -24,7 +59,7 @@ impl<C: Clone> Clone for NavigationResult<C> {
     }
 }
 pub(crate) struct Event<C> {
-    pub(crate) transformer: Rc<Transformer<C>>,
+    pub(crate) transformer: Rc<dyn Fn(C) -> C>,
     pub(crate) completion: Rc<dyn Fn(Result<NavigationResult<C>, NavigationError>)>,
 }
 impl<C> Clone for Event<C> {
@@ -35,116 +70,36 @@ impl<C> Clone for Event<C> {
         }
     }
 }
-struct Observer<C> {
-    callback: Box<dyn Fn(Event<C>)>,
-    active: Cell<bool>,
-}
-struct Source<C> {
-    observers: RefCell<Vec<Rc<Observer<C>>>>,
-    pending: RefCell<VecDeque<Event<C>>>,
-    emitting: Cell<bool>,
-}
-/// Shared event broadcasting for child-navigation models.
-///
-/// Each connected receiver applies the transformer to its own current snapshot
-/// and reports its own result. Events with no connected receivers are discarded.
-/// Nested events are delivered in FIFO order after the current broadcast.
-pub(crate) struct NavigationSource<C> {
-    source: Rc<Source<C>>,
-}
-impl<C> Clone for NavigationSource<C> {
-    fn clone(&self) -> Self {
-        Self {
-            source: self.source.clone(),
-        }
-    }
-}
-impl<C: 'static> Default for NavigationSource<C> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl<C: 'static> NavigationSource<C> {
-    /// Creates an empty navigation source, ready to connect to child navigation models.
-    pub(crate) fn new() -> Self {
-        Self {
-            source: Rc::new(Source {
-                observers: RefCell::new(Vec::new()),
-                pending: RefCell::new(VecDeque::new()),
-                emitting: Cell::new(false),
-            }),
-        }
-    }
-    /// Transforms each connected receiver and receives its committed result.
-    ///
-    /// Completion runs once per connected stack, after that receiver publishes
-    /// its updated children. A panic interrupts the current broadcast, drops
-    /// queued events, and propagates; the source remains usable afterward.
-    pub(crate) fn navigate_with(
-        &self,
-        transformer: impl Fn(C) -> C + 'static,
-        completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
-    ) {
-        self.source.pending.borrow_mut().push_back(Event {
-            transformer: Rc::new(transformer),
-            completion: Rc::new(completion),
+
+// Public sources use family state and result types. The engine's internal state
+// adapter owns only callbacks and events; it never retains the source reference.
+pub(crate) fn subscribe<S: 'static, R: 'static, I: 'static>(
+    source: &(impl NavigationSource<NavigationEvent<S, R>> + ?Sized),
+    receiver: Rc<dyn Fn(Event<I>)>,
+    to_public: impl Fn(I) -> S + 'static,
+    to_internal: impl Fn(S) -> I + 'static,
+    to_result: impl Fn(NavigationResult<I>) -> R + 'static,
+) -> Subscription {
+    let to_public = Rc::new(to_public);
+    let to_internal = Rc::new(to_internal);
+    let to_result = Rc::new(to_result);
+    source.subscribe(Rc::new(move |event| {
+        let transform = event.clone();
+        let to_public = to_public.clone();
+        let to_internal = to_internal.clone();
+        let to_result = to_result.clone();
+        receiver(Event {
+            transformer: Rc::new(move |state| to_internal(transform.transform(to_public(state)))),
+            completion: Rc::new(move |result| event.complete(result.map(|r| to_result(r)))),
         });
-        if self.source.emitting.replace(true) {
-            return;
-        }
-        struct Guard<'a, C>(&'a Source<C>);
-        impl<C> Drop for Guard<'_, C> {
-            fn drop(&mut self) {
-                let abandoned = std::mem::take(&mut *self.0.pending.borrow_mut());
-                self.0.emitting.set(false);
-                drop(abandoned);
-            }
-        }
-        let _guard = Guard(&self.source);
-        loop {
-            let event = self.source.pending.borrow_mut().pop_front();
-            let Some(event) = event else {
-                break;
-            };
-            let observers = self.source.observers.borrow().clone();
-            for observer in observers {
-                if observer.active.get() {
-                    (observer.callback)(event.clone());
-                }
-            }
-        }
-    }
-    pub(crate) fn subscribe(&self, callback: impl Fn(Event<C>) + 'static) -> Subscription {
-        let observer = Rc::new(Observer {
-            callback: Box::new(callback),
-            active: Cell::new(true),
-        });
-        self.source.observers.borrow_mut().push(observer.clone());
-        let source = Rc::downgrade(&self.source);
-        let observer = Rc::downgrade(&observer);
-        Subscription::from_cancel(move || {
-            let Some(observer) = observer.upgrade() else {
-                return;
-            };
-            observer.active.set(false);
-            if let Some(source) = source.upgrade() {
-                let removed = {
-                    let mut observers = source.observers.borrow_mut();
-                    observers
-                        .iter()
-                        .position(|entry| Rc::ptr_eq(entry, &observer))
-                        .map(|index| observers.remove(index))
-                };
-                drop(removed);
-            }
-        })
-    }
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::router::stack::StackNavigation;
+    use std::cell::{Cell, RefCell};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     type Connected = (StackNavigation<u8>, Rc<RefCell<Vec<Rc<u8>>>>, Subscription);

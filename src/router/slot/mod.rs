@@ -1,7 +1,9 @@
 //! An optional lifecycle-aware child component.
+mod navigation;
 mod state;
 pub use super::{Child, NavigationError};
 use crate::{ComponentContext, value::Value};
+pub use navigation::{SlotEvent, SlotNavigation, SlotNavigator};
 pub use state::SlotCodec;
 use std::rc::Rc;
 
@@ -46,81 +48,6 @@ impl<C> Clone for NavigationResult<C> {
     }
 }
 
-/// Shared, single-threaded navigation source. Each connected slot reports its own result.
-/// Reentrant events are delivered FIFO after the current broadcast completes.
-pub struct SlotNavigation<C> {
-    navigation: super::navigation::NavigationSource<Vec<Rc<C>>>,
-}
-impl<C> Clone for SlotNavigation<C> {
-    fn clone(&self) -> Self {
-        Self {
-            navigation: self.navigation.clone(),
-        }
-    }
-}
-impl<C: 'static> Default for SlotNavigation<C> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl<C: 'static> SlotNavigation<C> {
-    /// Creates an empty source. Events without connected slots are discarded.
-    pub fn new() -> Self {
-        Self {
-            navigation: super::navigation::NavigationSource::new(),
-        }
-    }
-    /// Transforms every connected slot. Panics on transition errors.
-    pub fn navigate(&self, transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static) {
-        self.navigate_with(transformer, |result| {
-            if let Err(error) = result {
-                panic!("slot navigation failed: {error:?}");
-            }
-        });
-    }
-    /// Transforms each connected slot, reporting its committed result after publication.
-    /// A panic clears queued events and propagates; the source remains usable.
-    pub fn navigate_with(
-        &self,
-        transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static,
-        completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
-    ) {
-        self.navigation.navigate_with(
-            move |mut old| transformer(old.pop()).into_iter().collect(),
-            move |result| {
-                completion(result.map(|mut result| NavigationResult {
-                    old_configuration: result.old_stack.pop(),
-                    new_configuration: result.new_stack.pop(),
-                }))
-            },
-        );
-    }
-    /// Activates a configuration; equality preserves the child identity and instance.
-    pub fn activate(&self, configuration: C) {
-        let configuration = Rc::new(configuration);
-        self.navigate(move |_| Some(configuration.clone()));
-    }
-    /// Activates a configuration and reports the old and new configurations.
-    pub fn activate_with(
-        &self,
-        configuration: C,
-        completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
-    ) {
-        let configuration = Rc::new(configuration);
-        self.navigate_with(move |_| Some(configuration.clone()), completion);
-    }
-    /// Dismisses the active child, if any.
-    pub fn dismiss(&self) {
-        self.navigate(|_| None);
-    }
-    /// Dismisses, reporting true if a child existed before this event.
-    pub fn dismiss_with(&self, completion: impl Fn(Result<bool, NavigationError>) + 'static) {
-        self.navigate_with(
-            |_| None,
-            move |result| completion(result.map(|result| result.old_configuration.is_some())),
-        );
-    }
-}
 struct SlotModel<C>(SlotOptions<C>);
 impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
     type State = Vec<Rc<C>>;
@@ -188,17 +115,29 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
 /// The hosting lifecycle owns navigation even when all observable views are dropped.
 pub fn child_slot<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
     context: &Ctx,
-    navigation: &SlotNavigation<C>,
+    navigation: &(impl super::children::NavigationSource<SlotEvent<C>> + ?Sized),
     initial: Option<C>,
     options: SlotOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<Value<ChildSlot<C, T>>, NavigationError> {
-    super::engine::build(
+    super::engine::build_with_subscriber(
         context,
-        &navigation.navigation,
-        initial.into_iter().map(Rc::new).collect(),
+        |receiver| {
+            super::navigation::subscribe(
+                navigation,
+                receiver,
+                |mut state: Vec<Rc<C>>| state.pop(),
+                |state| state.into_iter().collect(),
+                |mut result| NavigationResult {
+                    old_configuration: result.old_stack.pop(),
+                    new_configuration: result.new_stack.pop(),
+                },
+            )
+        },
+        || initial.into_iter().map(Rc::new).collect(),
         options.key.clone(),
         SlotModel(options),
         factory,
     )
+    .map(|(value, _)| value)
 }

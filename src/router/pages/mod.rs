@@ -3,7 +3,7 @@ mod navigation;
 mod state;
 pub use super::{Child, NavigationError};
 use crate::{ComponentContext, value::Value};
-pub use navigation::{NavigationResult, PagesNavigation};
+pub use navigation::{NavigationResult, PagesEvent, PagesNavigation, PagesNavigator};
 pub use state::PagesCodec;
 use std::rc::Rc;
 /// Configuration membership and its numeric selection.
@@ -189,17 +189,29 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for PagesModel<C> {
 /// Reentrant events are FIFO; the parent owns navigation even after views are dropped.
 pub fn child_pages<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
     context: &Ctx,
-    navigation: &PagesNavigation<C>,
+    navigation: &(impl super::children::NavigationSource<PagesEvent<C>> + ?Sized),
     initial: Pages<C>,
     options: PagesOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<Value<ChildPages<C, T>>, NavigationError> {
-    super::engine::build(
+    super::engine::build_with_subscriber(
         context,
-        &navigation.source,
-        initial,
+        |receiver| {
+            super::navigation::subscribe(
+                navigation,
+                receiver,
+                std::convert::identity,
+                std::convert::identity,
+                |result| NavigationResult {
+                    old_pages: result.old_stack,
+                    new_pages: result.new_stack,
+                },
+            )
+        },
+        || initial,
         options.key.clone(),
         PagesModel(options),
         factory,
     )
+    .map(|(value, _)| value)
 }

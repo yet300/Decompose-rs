@@ -1,5 +1,8 @@
 use super::{ChildPanelsMode, NavigationError, Panels};
-use crate::router::navigation::NavigationSource;
+use crate::router::{
+    NavigationEvent,
+    children::{NavigationSource, SimpleNavigation},
+};
 use std::{convert::Infallible, rc::Rc};
 /// Actual receiver membership before and after a committed event.
 pub struct NavigationResult<MC, DC, EC = Infallible> {
@@ -16,55 +19,31 @@ impl<MC, DC, EC> Clone for NavigationResult<MC, DC, EC> {
         }
     }
 }
-/// Shared synchronous navigation; each receiver applies events to its own state.
-pub struct PanelsNavigation<MC, DC, EC = Infallible> {
-    pub(crate) source: NavigationSource<Panels<MC, DC, EC>>,
-}
-impl<MC, DC, EC> Clone for PanelsNavigation<MC, DC, EC> {
-    fn clone(&self) -> Self {
-        Self {
-            source: self.source.clone(),
-        }
-    }
-}
-impl<MC: 'static, DC: 'static, EC: 'static> Default for PanelsNavigation<MC, DC, EC> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
-    /// Creates a source. Events without receivers are discarded.
-    pub fn new() -> Self {
-        Self {
-            source: NavigationSource::new(),
-        }
-    }
+/// Public panels state transformation and per-receiver completion.
+pub type PanelsEvent<MC, DC, EC = Infallible> =
+    NavigationEvent<Panels<MC, DC, EC>, NavigationResult<MC, DC, EC>>;
+
+/// Standard panels operations shared by sources and custom navigators.
+///
+/// Implement `navigate_with` to inherit the standard helper policies.
+/// Generic callbacks use static dispatch; this trait is not object-safe.
+pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
     /// Applies a transformer, panicking on transition errors.
-    pub fn navigate(
-        &self,
-        transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static,
-    ) {
+    fn navigate(&self, transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static) {
         self.navigate_with(transformer, panic_completion)
     }
     /// Completes per receiver after publication and state-change notification.
-    pub fn navigate_with(
+    fn navigate_with(
         &self,
         transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
-    ) {
-        self.source.navigate_with(transformer, move |r| {
-            completion(r.map(|r| NavigationResult {
-                old_panels: r.old_stack,
-                new_panels: r.new_stack,
-            }))
-        });
-    }
+    );
     /// Sets all three configurations, preserving the current mode.
-    pub fn set_panels(&self, main: MC, details: Option<DC>, extra: Option<EC>) {
+    fn set_panels(&self, main: MC, details: Option<DC>, extra: Option<EC>) {
         self.set_panels_with(main, details, extra, panic_completion)
     }
     /// Sets all three configurations, preserving the current mode. Reports each receiver's committed result.
-    pub fn set_panels_with(
+    fn set_panels_with(
         &self,
         main: MC,
         details: Option<DC>,
@@ -85,11 +64,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Sets Details and Extra independently.
-    pub fn set_details_extra(&self, details: Option<DC>, extra: Option<EC>) {
+    fn set_details_extra(&self, details: Option<DC>, extra: Option<EC>) {
         self.set_details_extra_with(details, extra, panic_completion)
     }
     /// Sets Details and Extra independently. Reports each receiver's committed result.
-    pub fn set_details_extra_with(
+    fn set_details_extra_with(
         &self,
         details: Option<DC>,
         extra: Option<EC>,
@@ -107,11 +86,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Sets or dismisses Extra.
-    pub fn set_extra(&self, extra: Option<EC>) {
+    fn set_extra(&self, extra: Option<EC>) {
         self.set_extra_with(extra, panic_completion)
     }
     /// Sets or dismisses Extra. Reports each receiver's committed result.
-    pub fn set_extra_with(
+    fn set_extra_with(
         &self,
         extra: Option<EC>,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
@@ -126,11 +105,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Replaces Main, preserving Details and Extra.
-    pub fn activate_main(&self, main: MC) {
+    fn activate_main(&self, main: MC) {
         self.activate_main_with(main, panic_completion)
     }
     /// Replaces Main, preserving Details and Extra. Reports each receiver's committed result.
-    pub fn activate_main_with(
+    fn activate_main_with(
         &self,
         main: MC,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
@@ -145,11 +124,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Replaces Details, preserving Extra.
-    pub fn activate_details(&self, details: DC) {
+    fn activate_details(&self, details: DC) {
         self.activate_details_with(details, panic_completion)
     }
     /// Replaces Details, preserving Extra. Reports each receiver's committed result.
-    pub fn activate_details_with(
+    fn activate_details_with(
         &self,
         details: DC,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
@@ -164,11 +143,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Replaces Extra, preserving Details.
-    pub fn activate_extra(&self, extra: EC) {
+    fn activate_extra(&self, extra: EC) {
         self.activate_extra_with(extra, panic_completion)
     }
     /// Replaces Extra, preserving Details. Reports each receiver's committed result.
-    pub fn activate_extra_with(
+    fn activate_extra_with(
         &self,
         extra: EC,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
@@ -183,11 +162,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Dismisses Details without dismissing Extra.
-    pub fn dismiss_details(&self) {
+    fn dismiss_details(&self) {
         self.dismiss_details_with(panic_completion)
     }
     /// Dismisses Details without dismissing Extra. Reports each receiver's committed result.
-    pub fn dismiss_details_with(
+    fn dismiss_details_with(
         &self,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     ) {
@@ -200,11 +179,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Dismisses Extra without dismissing Details.
-    pub fn dismiss_extra(&self) {
+    fn dismiss_extra(&self) {
         self.dismiss_extra_with(panic_completion)
     }
     /// Dismisses Extra without dismissing Details. Reports each receiver's committed result.
-    pub fn dismiss_extra_with(
+    fn dismiss_extra_with(
         &self,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     ) {
@@ -217,11 +196,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Dismisses Extra first, otherwise Details, in any mode.
-    pub fn pop(&self) {
+    fn pop(&self) {
         self.pop_with(panic_completion)
     }
     /// Dismisses Extra first, otherwise Details, in any mode. Reports each receiver's committed result.
-    pub fn pop_with(
+    fn pop_with(
         &self,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     ) {
@@ -236,11 +215,11 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         )
     }
     /// Changes lifecycle mode, retaining child identities.
-    pub fn set_mode(&self, mode: ChildPanelsMode) {
+    fn set_mode(&self, mode: ChildPanelsMode) {
         self.set_mode_with(mode, panic_completion)
     }
     /// Changes lifecycle mode, retaining child identities. Reports each receiver's committed result.
-    pub fn set_mode_with(
+    fn set_mode_with(
         &self,
         mode: ChildPanelsMode,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
@@ -252,6 +231,192 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
             },
             completion,
         )
+    }
+}
+
+/// Shared synchronous navigation; each receiver applies events to its own state.
+///
+/// Events are shared by `Rc`, never replayed, and discarded without receivers.
+/// Nested broadcasts are FIFO. Panics abandon queued events and propagate;
+/// the source remains usable afterward.
+pub struct PanelsNavigation<MC, DC, EC = Infallible> {
+    source: SimpleNavigation<PanelsEvent<MC, DC, EC>>,
+}
+impl<MC, DC, EC> Clone for PanelsNavigation<MC, DC, EC> {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+        }
+    }
+}
+impl<MC: 'static, DC: 'static, EC: 'static> Default for PanelsNavigation<MC, DC, EC> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
+    /// Creates an empty source. Events without receivers are discarded.
+    pub fn new() -> Self {
+        Self {
+            source: SimpleNavigation::new(),
+        }
+    }
+    /// Applies a transformer, panicking on transition errors.
+    pub fn navigate(
+        &self,
+        transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static,
+    ) {
+        PanelsNavigator::navigate(self, transformer)
+    }
+    /// Completes per receiver after publication and state-change notification.
+    pub fn navigate_with(
+        &self,
+        transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::navigate_with(self, transformer, completion)
+    }
+    /// Sets all three configurations, preserving the current mode.
+    pub fn set_panels(&self, main: MC, details: Option<DC>, extra: Option<EC>) {
+        PanelsNavigator::set_panels(self, main, details, extra)
+    }
+    /// Sets all three configurations, preserving the current mode. Reports each receiver's committed result.
+    pub fn set_panels_with(
+        &self,
+        main: MC,
+        details: Option<DC>,
+        extra: Option<EC>,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::set_panels_with(self, main, details, extra, completion)
+    }
+    /// Sets Details and Extra independently.
+    pub fn set_details_extra(&self, details: Option<DC>, extra: Option<EC>) {
+        PanelsNavigator::set_details_extra(self, details, extra)
+    }
+    /// Sets Details and Extra independently. Reports each receiver's committed result.
+    pub fn set_details_extra_with(
+        &self,
+        details: Option<DC>,
+        extra: Option<EC>,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::set_details_extra_with(self, details, extra, completion)
+    }
+    /// Sets or dismisses Extra.
+    pub fn set_extra(&self, extra: Option<EC>) {
+        PanelsNavigator::set_extra(self, extra)
+    }
+    /// Sets or dismisses Extra. Reports each receiver's committed result.
+    pub fn set_extra_with(
+        &self,
+        extra: Option<EC>,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::set_extra_with(self, extra, completion)
+    }
+    /// Replaces Main, preserving Details and Extra.
+    pub fn activate_main(&self, main: MC) {
+        PanelsNavigator::activate_main(self, main)
+    }
+    /// Replaces Main, preserving Details and Extra. Reports each receiver's committed result.
+    pub fn activate_main_with(
+        &self,
+        main: MC,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::activate_main_with(self, main, completion)
+    }
+    /// Replaces Details, preserving Extra.
+    pub fn activate_details(&self, details: DC) {
+        PanelsNavigator::activate_details(self, details)
+    }
+    /// Replaces Details, preserving Extra. Reports each receiver's committed result.
+    pub fn activate_details_with(
+        &self,
+        details: DC,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::activate_details_with(self, details, completion)
+    }
+    /// Replaces Extra, preserving Details.
+    pub fn activate_extra(&self, extra: EC) {
+        PanelsNavigator::activate_extra(self, extra)
+    }
+    /// Replaces Extra, preserving Details. Reports each receiver's committed result.
+    pub fn activate_extra_with(
+        &self,
+        extra: EC,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::activate_extra_with(self, extra, completion)
+    }
+    /// Dismisses Details without dismissing Extra.
+    pub fn dismiss_details(&self) {
+        PanelsNavigator::dismiss_details(self)
+    }
+    /// Dismisses Details without dismissing Extra. Reports each receiver's committed result.
+    pub fn dismiss_details_with(
+        &self,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::dismiss_details_with(self, completion)
+    }
+    /// Dismisses Extra without dismissing Details.
+    pub fn dismiss_extra(&self) {
+        PanelsNavigator::dismiss_extra(self)
+    }
+    /// Dismisses Extra without dismissing Details. Reports each receiver's committed result.
+    pub fn dismiss_extra_with(
+        &self,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::dismiss_extra_with(self, completion)
+    }
+    /// Dismisses Extra first, otherwise Details, in any mode.
+    pub fn pop(&self) {
+        PanelsNavigator::pop(self)
+    }
+    /// Dismisses Extra first, otherwise Details, in any mode. Reports each receiver's committed result.
+    pub fn pop_with(
+        &self,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::pop_with(self, completion)
+    }
+    /// Changes lifecycle mode, retaining child identities.
+    pub fn set_mode(&self, mode: ChildPanelsMode) {
+        PanelsNavigator::set_mode(self, mode)
+    }
+    /// Changes lifecycle mode, retaining child identities. Reports each receiver's committed result.
+    pub fn set_mode_with(
+        &self,
+        mode: ChildPanelsMode,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        PanelsNavigator::set_mode_with(self, mode, completion)
+    }
+}
+impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigator<MC, DC, EC>
+    for PanelsNavigation<MC, DC, EC>
+{
+    fn navigate_with(
+        &self,
+        transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static,
+        completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
+    ) {
+        self.source
+            .navigate(PanelsEvent::with_completion(transformer, completion));
+    }
+}
+impl<MC: 'static, DC: 'static, EC: 'static> NavigationSource<PanelsEvent<MC, DC, EC>>
+    for PanelsNavigation<MC, DC, EC>
+{
+    fn subscribe(
+        &self,
+        observer: Rc<dyn Fn(Rc<PanelsEvent<MC, DC, EC>>)>,
+    ) -> crate::value::Subscription {
+        self.source.subscribe(observer)
     }
 }
 fn panic_completion<MC, DC, EC>(r: Result<NavigationResult<MC, DC, EC>, NavigationError>) {

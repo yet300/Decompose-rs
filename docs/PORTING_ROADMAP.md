@@ -13,8 +13,10 @@
 > receiver-local navigation documented in ADR-0009. Public Generic Navigation
 > over the shared engine (ADR-0010) adds custom event
 > sources, state projections, conditional Back and whole-state codecs.
-> Observable value completion (ADR-0011) is the current authorized stage, followed
-> by standard-router extension points after merging accumulated work into main.
+> Observable values (ADR-0011) are complete and all accumulated stages are merged
+> into main at 9a70ae0. Standard-router extension points (ADR-0012) are implemented
+> and independently reviewed on codex/router-extension-points; the user has
+> authorized committing this stage and merging it into main.
 > Platform integrations remain outside scope.
 
 ## Research identity
@@ -164,6 +166,7 @@ CHILD PANELS: IMPLEMENTED (typed roles, lifecycle modes, independent dismissal, 
 CHILD ITEMS: IMPLEMENTED (configuration-keyed activity, lazy instances, receiver-local navigation, DPI1 persistence)
 GENERIC NAVIGATION: IMPLEMENTED (custom NavState/events, neutral child types, DCH1 persistence)
 OBSERVABLE VALUES: IMPLEMENTED (cached map, lifecycle observation, identity CAS/update)
+STANDARD ROUTER EXTENSION POINTS: IMPLEMENTED (typed events, custom sources, navigator traits; reviewed feature branch)
 PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
 ESSENTY-RS CHANGES: NONE REQUIRED
 ```

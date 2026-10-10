@@ -6,7 +6,7 @@ mod state;
 
 use crate::ComponentContext;
 use crate::value::Value;
-pub use navigation::{NavigationResult, StackNavigation};
+pub use navigation::{NavigationResult, StackEvent, StackNavigation, StackNavigator};
 pub use state::StackCodec;
 
 pub use super::{Child, NavigationError};
@@ -52,7 +52,7 @@ impl<C> Default for StackOptions<C> {
 /// dropping an observable view does not destroy child scopes.
 pub fn child_stack<Ctx, C, T>(
     context: &Ctx,
-    navigation: &StackNavigation<C>,
+    navigation: &(impl super::children::NavigationSource<StackEvent<C>> + ?Sized),
     initial: Vec<C>,
     options: StackOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,

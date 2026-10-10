@@ -10,7 +10,7 @@ use crate::{
     value::{Subscription, Value},
 };
 pub use map::ItemMap;
-pub use navigation::{ItemsNavigation, ItemsNavigator, NavigationResult};
+pub use navigation::{ItemsEvent, ItemsNavigation, ItemsNavigator, NavigationResult};
 pub use state::ItemsCodec;
 use std::rc::Rc;
 /// Requested child lifecycle, bounded by the hosting lifecycle.
@@ -306,15 +306,26 @@ impl<C: Eq + 'static, T: 'static> ItemsNavigator<C> for LazyChildItems<C, T> {
 /// Builds unique ordered children using the hosting context's factory and services.
 pub fn child_items<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
     context: &Ctx,
-    navigation: &ItemsNavigation<C>,
+    navigation: &(impl super::children::NavigationSource<ItemsEvent<C>> + ?Sized),
     initial: Items<C>,
     options: ItemsOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<LazyChildItems<C, T>, NavigationError> {
-    let (value, control) = super::engine::build_with_control(
+    let (value, control) = super::engine::build_with_subscriber(
         context,
-        &navigation.source,
-        initial,
+        |receiver| {
+            super::navigation::subscribe(
+                navigation,
+                receiver,
+                std::convert::identity,
+                std::convert::identity,
+                |result| NavigationResult {
+                    old_items: result.old_stack,
+                    new_items: result.new_stack,
+                },
+            )
+        },
+        || initial,
         options.key.clone(),
         ItemsModel(options),
         factory,

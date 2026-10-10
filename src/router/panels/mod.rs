@@ -4,7 +4,7 @@ mod navigation;
 mod state;
 use super::{Child, NavigationError};
 use crate::{ComponentContext, value::Value};
-pub use navigation::{NavigationResult, PanelsNavigation};
+pub use navigation::{NavigationResult, PanelsEvent, PanelsNavigation, PanelsNavigator};
 pub use state::PanelsCodec;
 use std::{convert::Infallible, rc::Rc};
 
@@ -103,7 +103,7 @@ impl<MC, DC, EC> Default for PanelsOptions<MC, DC, EC> {
 #[allow(clippy::type_complexity)]
 pub fn child_panels<Ctx, MC, MT, DC, DT, EC, ET>(
     context: &Ctx,
-    navigation: &PanelsNavigation<MC, DC, EC>,
+    navigation: &(impl super::children::NavigationSource<PanelsEvent<MC, DC, EC>> + ?Sized),
     initial: Panels<MC, DC, EC>,
     options: PanelsOptions<MC, DC, EC>,
     main_factory: impl Fn(&MC, Ctx) -> MT + 'static,
@@ -134,7 +134,7 @@ where
 #[allow(clippy::type_complexity)]
 pub fn child_panels_without_extra<Ctx, MC, MT, DC, DT>(
     context: &Ctx,
-    navigation: &PanelsNavigation<MC, DC>,
+    navigation: &(impl super::children::NavigationSource<PanelsEvent<MC, DC>> + ?Sized),
     initial: Panels<MC, DC>,
     options: PanelsOptions<MC, DC>,
     main_factory: impl Fn(&MC, Ctx) -> MT + 'static,

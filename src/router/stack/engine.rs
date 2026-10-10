@@ -1,4 +1,4 @@
-use super::{ChildStack, NavigationError, StackNavigation, StackOptions};
+use super::{ChildStack, NavigationError, StackEvent, StackOptions};
 use crate::{
     ComponentContext,
     router::{
@@ -93,17 +93,26 @@ impl<C: Eq + 'static, T: 'static> Model<C, T> for StackModel<C> {
 }
 pub(super) fn build<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
     context: &Ctx,
-    navigation: &StackNavigation<C>,
+    navigation: &(impl crate::router::children::NavigationSource<StackEvent<C>> + ?Sized),
     initial: Vec<C>,
     options: StackOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<Value<ChildStack<C, T>>, NavigationError> {
-    crate::router::engine::build(
+    crate::router::engine::build_with_subscriber(
         context,
-        &navigation.source,
-        initial.into_iter().map(Rc::new).collect(),
+        |receiver| {
+            crate::router::navigation::subscribe(
+                navigation,
+                receiver,
+                std::convert::identity,
+                std::convert::identity,
+                std::convert::identity,
+            )
+        },
+        || initial.into_iter().map(Rc::new).collect(),
         options.key.clone(),
         StackModel(options),
         factory,
     )
+    .map(|(value, _)| value)
 }

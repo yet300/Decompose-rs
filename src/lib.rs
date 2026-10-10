@@ -4,7 +4,9 @@
 //! [`ComponentContext`], [`DefaultComponentContext`], [`ContextFactory`] and
 //! [`router::stack`], [`router::slot`], [`router::pages`], [`router::panels`] and
 //! [`router::items`] with navigation operations, Back handling and explicit
-//! configuration codecs. [`router::children`] connects custom immutable state
+//! configuration codecs. Standard factories also accept typed custom navigation
+//! sources, and navigator traits provide reusable family operations.
+//! [`router::children`] connects custom immutable state
 //! and event sources to the same child lifecycle engine. [`value`] supplies
 //! synchronous observable snapshots, cached mapping, identity updates and
 //! lifecycle observation.
@@ -25,7 +27,8 @@
 //! repository README and `examples/child_stack.rs`, `examples/child_slot.rs`,
 //! `examples/child_pages.rs`, `examples/child_panels.rs` and
 //! `examples/child_items.rs`, `examples/generic_navigation.rs` and
-//! `examples/observable_values.rs` for usage, and `NOTICE`
+//! `examples/observable_values.rs` and `examples/router_extension_points.rs`
+//! for usage, and `NOTICE`
 //! for attribution. This project has no official upstream affiliation.
 
 mod child;

@@ -1,5 +1,5 @@
 use super::{
-    ChildPanels, ChildPanelsMode, NavigationError, Panels, PanelsNavigation, PanelsOptions, state,
+    ChildPanels, ChildPanelsMode, NavigationError, Panels, PanelsEvent, PanelsOptions, state,
 };
 use crate::{
     ComponentContext,
@@ -157,7 +157,7 @@ impl<MC: Eq + 'static, DC: Eq + 'static, EC: Eq + 'static, MT: 'static, DT: 'sta
 #[allow(clippy::type_complexity)]
 pub(super) fn build<Ctx, MC, MT, DC, DT, EC, ET>(
     context: &Ctx,
-    navigation: &PanelsNavigation<MC, DC, EC>,
+    navigation: &(impl crate::router::children::NavigationSource<PanelsEvent<MC, DC, EC>> + ?Sized),
     initial: Panels<MC, DC, EC>,
     options: PanelsOptions<MC, DC, EC>,
     main: impl Fn(&MC, Ctx) -> MT + 'static,
@@ -173,10 +173,21 @@ where
     DT: 'static,
     ET: 'static,
 {
-    crate::router::engine::build(
+    crate::router::engine::build_with_subscriber(
         context,
-        &navigation.source,
-        initial,
+        |receiver| {
+            crate::router::navigation::subscribe(
+                navigation,
+                receiver,
+                std::convert::identity,
+                std::convert::identity,
+                |result| super::NavigationResult {
+                    old_panels: result.old_stack,
+                    new_panels: result.new_stack,
+                },
+            )
+        },
+        || initial,
         options.key.clone(),
         PanelsModel(options),
         move |c, ctx| match c {
@@ -185,4 +196,5 @@ where
             RoleConfig::Extra(c) => RoleComponent::Extra(Rc::new(extra(c, ctx))),
         },
     )
+    .map(|(value, _)| value)
 }
