@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::stack::*;
 use decompose_rs::*;
 use std::{cell::RefCell, rc::Rc};
@@ -23,7 +22,7 @@ fn stack_preserves_survivors_and_destroys_removed_snapshots() {
     .unwrap();
     let first = stack.get();
     let first_instance = first.active.instance.clone();
-    navigation.push(2);
+    navigation.push_or_panic(2);
     let second = stack.get();
     assert_eq!(*second.active.configuration, 2);
     assert!(Rc::ptr_eq(&second.back_stack[0].instance, &first_instance));
@@ -32,7 +31,7 @@ fn stack_preserves_survivors_and_destroys_removed_snapshots() {
         second.active.instance.lifecycle().state(),
         LifecycleState::Resumed
     );
-    navigation.pop();
+    navigation.pop_or_panic();
     assert!(Rc::ptr_eq(&stack.get().active.instance, &first_instance));
     assert_eq!(
         second.active.instance.lifecycle().state(),
@@ -92,10 +91,10 @@ fn observer_navigation_is_queued_until_the_current_stack_is_published() {
     let _subscription = stack.subscribe(move |state| {
         peer.borrow_mut().push(*state.active.configuration);
         if *state.active.configuration == 2 {
-            nav.push(3);
+            nav.push_or_panic(3);
         }
     });
-    navigation.push(2);
+    navigation.push_or_panic(2);
     assert_eq!(&*log.borrow(), &[1, 2, 3]);
     assert_eq!(stack.get().items().count(), 3);
 }
@@ -114,7 +113,7 @@ fn back_prefers_child_then_pops_and_allows_callback_navigation() {
         ctx.back_handler()
             .register(0, true, move |_, back| {
                 back.set_enabled(0, false);
-                nav.push(3);
+                nav.push_or_panic(3);
             })
             .unwrap();
         ctx
@@ -153,7 +152,7 @@ fn parent_lifecycle_bounds_all_children() {
             .items()
             .all(|item| item.instance.lifecycle().state().is_destroyed())
     );
-    navigation.push(3);
+    navigation.push_or_panic(3);
     assert_eq!(*stack.get().active.configuration, 2);
 }
 
@@ -243,7 +242,7 @@ fn persistent_stack_restores_order_child_state_keys_and_retained_instances() {
             .unwrap(),
         Some(vec![9])
     );
-    nav.push(3);
+    nav.push_or_panic(3);
     assert_ne!(after.get().active.key, before.active.key);
     let fresh = DefaultComponentContext::with_state_store(
         root().lifecycle(),
@@ -348,8 +347,8 @@ fn no_op_navigation_does_not_stop_and_resume_the_active_component() {
     )
     .unwrap();
     log.borrow_mut().clear();
-    nav.push_new(1);
-    nav.pop();
+    nav.push_new_or_panic(1);
+    nav.pop_or_panic();
     assert!(log.borrow().is_empty());
     assert_eq!(
         stack.get().active.instance.lifecycle().state(),
@@ -442,17 +441,17 @@ fn panicking_back_callback_discards_deferred_navigation() {
     root.back_handler()
         .register(2, true, move |_, _| {
             if peer.replace(false) {
-                source.push(2);
+                source.push_or_panic(2);
                 panic!("back failed");
             }
-            source.push(3);
+            source.push_or_panic(3);
         })
         .unwrap();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| root.back_handler().back()))
             .is_err()
     );
-    nav.push(4);
+    nav.push_or_panic(4);
     assert_eq!(
         stack
             .get()
@@ -504,12 +503,14 @@ fn panic_in_later_factory_releases_prepared_retained_services() {
     )
     .unwrap();
     assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.replace_all(vec![2, 3])))
-            .is_err()
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || nav.replace_all_or_panic(vec![2, 3])
+        ))
+        .is_err()
     );
     assert_eq!(drops.get(), 1);
     assert_eq!(*stack.get().active.configuration, 1);
-    nav.push(4);
+    nav.push_or_panic(4);
     assert_eq!(*stack.get().active.configuration, 4);
 }
 
@@ -539,7 +540,7 @@ fn inactive_child_cannot_reenable_its_back_bridge_while_pausing() {
         ctx
     })
     .unwrap();
-    nav.push(2);
+    nav.push_or_panic(2);
     assert!(root.back_handler().back());
     assert_eq!(handled.get(), 0);
     assert_eq!(*stack.get().active.configuration, 1);
@@ -588,7 +589,7 @@ fn earlier_saved_snapshot_does_not_reuse_a_removed_childs_retained_scope() {
     };
     let stack = child_stack(&root, &nav, vec![1u32], options, |_, ctx| ctx).unwrap();
     let saved = root.state_store().save().unwrap();
-    nav.push(2);
+    nav.push_or_panic(2);
     let removed = stack.get().active.instance.instance_store();
     root.lifecycle().destroy().unwrap();
     let restored = DefaultComponentContext::with_stores(
@@ -604,7 +605,7 @@ fn earlier_saved_snapshot_does_not_reuse_a_removed_childs_retained_scope() {
     };
     let stack = child_stack(&restored, &nav, vec![99], options, |_, ctx| ctx).unwrap();
     assert!(removed.is_destroyed().unwrap());
-    nav.push(3);
+    nav.push_or_panic(3);
     assert!(!removed.ptr_eq(&stack.get().active.instance.instance_store()));
 }
 
@@ -649,7 +650,7 @@ fn back_enabled_state_is_ready_when_a_value_observer_runs() {
             peer.set(back.back());
         }
     });
-    nav.push(2);
+    nav.push_or_panic(2);
     assert!(handled.get());
     assert_eq!(*stack.get().active.configuration, 1);
 }
@@ -742,7 +743,7 @@ fn panicking_navigation_queued_by_initial_factory_rolls_back_constructor() {
             StackOptions::default(),
             move |config, ctx| {
                 if *config == 1 {
-                    source.push(2);
+                    source.push_or_panic(2);
                 } else {
                     panic!("queued factory failure");
                 }
@@ -850,7 +851,7 @@ fn dropping_views_keeps_navigation_alive_until_parent_destroy_without_a_cycle() 
     )
     .unwrap();
     drop(stack);
-    nav.push(2);
+    nav.push_or_panic(2);
     assert!(weak.upgrade().is_some());
     root.lifecycle().destroy().unwrap();
     assert!(weak.upgrade().is_none());
@@ -874,7 +875,7 @@ fn saves_use_one_membership_snapshot_even_when_a_provider_navigates() {
             ctx.state_store()
                 .register("state", move || {
                     if once.replace(false) {
-                        nav.replace_current(2);
+                        nav.replace_current_or_panic(2);
                     }
                     vec![11]
                 })
@@ -979,7 +980,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
     let old = stack.get().active.clone();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || navigation.replace_current(2)
+            || navigation.replace_current_or_panic(2)
         ))
         .is_err()
     );
@@ -1005,7 +1006,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
     assert_eq!(calls.get(), 3);
     assert!(old.instance.instance_store().is_destroyed().unwrap());
     assert!(!retried.instance.instance_store().is_destroyed().unwrap());
-    navigation.replace_current(1);
+    navigation.replace_current_or_panic(1);
     assert!(Rc::ptr_eq(&retried.instance, &stack.get().active.instance));
     assert_eq!(calls.get(), 3);
 }

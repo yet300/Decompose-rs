@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::{
     slot::{SlotCodec, SlotNavigation, SlotOptions, child_slot},
     stack::{StackNavigation, StackOptions, child_stack},

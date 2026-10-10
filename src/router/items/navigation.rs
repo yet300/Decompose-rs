@@ -27,18 +27,6 @@ pub trait ItemsNavigator<C: 'static> {
         transformer: impl Fn(Items<C>) -> Items<C> + 'static,
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     );
-    /// Applies a transformer, panicking on errors.
-    #[deprecated(note = "use try_navigate or navigate_or_panic")]
-    #[track_caller]
-    fn navigate(&self, transformer: impl Fn(Items<C>) -> Items<C> + 'static) {
-        self.navigate_with(transformer, panic_completion)
-    }
-    /// Transforms ordered membership.
-    #[deprecated(note = "use try_set_items or set_items_or_panic")]
-    #[track_caller]
-    fn set_items(&self, transformer: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static) {
-        self.set_items_with(transformer, panic_completion)
-    }
     /// Transforms membership and reports the receiver result.
     fn set_items_with(
         &self,
@@ -52,16 +40,6 @@ pub trait ItemsNavigator<C: 'static> {
             },
             completion,
         )
-    }
-    /// Transforms requested active targets.
-    #[deprecated(note = "use try_set_active_items or set_active_items_or_panic")]
-    #[track_caller]
-    fn set_active_items(
-        &self,
-        transformer: impl Fn(ItemMap<C, ActiveLifecycleState>) -> ItemMap<C, ActiveLifecycleState>
-        + 'static,
-    ) {
-        self.set_active_items_with(transformer, panic_completion)
     }
     /// Transforms requested targets and reports the receiver result.
     fn set_active_items_with(
@@ -177,22 +155,10 @@ impl<C: 'static> ItemsNavigator<C> for ItemsNavigation<C> {
 }
 macro_rules! inherent_navigation {
  () => {
- /// Applies a state transformer, panicking on errors.
- #[deprecated(note = "use try_navigate or navigate_or_panic")]
- #[track_caller]
- pub fn navigate(&self,transformer:impl Fn(Items<C>)->Items<C>+'static) {ItemsNavigator::navigate(self,transformer)}
  /// Applies a state transformer, completing after publication.
  pub fn navigate_with(&self,transformer:impl Fn(Items<C>)->Items<C>+'static,completion:impl Fn(Result<NavigationResult<C>,NavigationError>)+'static) {ItemsNavigator::navigate_with(self,transformer,completion)}
- /// Transforms ordered membership.
- #[deprecated(note = "use try_set_items or set_items_or_panic")]
- #[track_caller]
- pub fn set_items(&self,transformer:impl Fn(Vec<Rc<C>>)->Vec<Rc<C>>+'static) {ItemsNavigator::set_items(self,transformer)}
  /// Transforms membership and receives completion.
  pub fn set_items_with(&self,transformer:impl Fn(Vec<Rc<C>>)->Vec<Rc<C>>+'static,completion:impl Fn(Result<NavigationResult<C>,NavigationError>)+'static) {ItemsNavigator::set_items_with(self,transformer,completion)}
- /// Transforms requested active targets.
- #[deprecated(note = "use try_set_active_items or set_active_items_or_panic")]
- #[track_caller]
- pub fn set_active_items(&self,transformer:impl Fn(ItemMap<C,ActiveLifecycleState>)->ItemMap<C,ActiveLifecycleState>+'static) {ItemsNavigator::set_active_items(self,transformer)}
  /// Transforms requested targets and receives completion.
  pub fn set_active_items_with(&self,transformer:impl Fn(ItemMap<C,ActiveLifecycleState>)->ItemMap<C,ActiveLifecycleState>+'static,completion:impl Fn(Result<NavigationResult<C>,NavigationError>)+'static) {ItemsNavigator::set_active_items_with(self,transformer,completion)}
 

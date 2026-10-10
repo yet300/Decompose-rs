@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::webhistory::*;
 use decompose_rs::value::MutableValue;
 use decompose_rs::{ComponentContext, DefaultComponentContext};
@@ -214,7 +213,7 @@ fn stack_adapter_supports_nonclone_config_and_queued_back_in_observer() {
     let _binding = HistoryController::attach(Rc::new(web), backend.clone())
         .unwrap()
         .with_lifecycle(&context.lifecycle());
-    navigator.push(Config(2));
+    navigator.push_or_panic(Config(2));
     let host = backend.clone();
     let once = Cell::new(true);
     let _observer = stack.subscribe(move |state| {
@@ -222,7 +221,7 @@ fn stack_adapter_supports_nonclone_config_and_queued_back_in_observer() {
             host.go(-1, Box::new(|r| r.unwrap()));
         }
     });
-    navigator.push(Config(3));
+    navigator.push_or_panic(Config(3));
     assert_eq!(stack.get().active.configuration.0, 2);
     assert_eq!(backend.entries().len(), 3);
     assert_eq!(backend.position(), 1);
@@ -448,13 +447,13 @@ fn pages_adapter_replaces_selection_and_restores_whole_state() {
     let backend = Rc::new(MemoryHistoryBackend::new());
     let web = Rc::new(web);
     let _binding = HistoryController::attach(web.clone(), backend.clone()).unwrap();
-    nav.select(1);
+    nav.select_or_panic(1);
     assert_eq!(backend.entries().len(), 1);
     assert_eq!(backend.entries()[0].url, "/page/1");
     web.navigate(vec![saved], Box::new(|r| r.unwrap()));
     assert_eq!(pages.get().selected_index, Some(0));
     assert_eq!(pages.get().items.len(), 2);
-    nav.clear();
+    nav.clear_or_panic();
     assert_eq!(web.history().unwrap().len(), 1);
 }
 
@@ -501,8 +500,8 @@ fn panels_adapter_restores_membership_preserving_current_mode() {
     let saved = web.history().unwrap()[0].key.clone();
     let backend = Rc::new(MemoryHistoryBackend::new());
     let _binding = HistoryController::attach(web.clone(), backend.clone()).unwrap();
-    nav.set_panels(7, None, None);
-    nav.set_mode(ChildPanelsMode::Single);
+    nav.set_panels_or_panic(7, None, None);
+    nav.set_mode_or_panic(ChildPanelsMode::Single);
     assert_eq!(backend.entries().len(), 1);
     web.navigate(vec![saved], Box::new(|r| r.unwrap()));
     assert_eq!(*panels.get().main.configuration, 1);
@@ -546,7 +545,7 @@ fn startup_keeps_existing_managed_state_and_history_disabled_stack_uses_active_o
     let _binding = HistoryController::attach(web, backend.clone()).unwrap();
     assert_eq!(backend.entries()[0], original); // upstream does not restore startup entry
     assert_eq!(*stack.get().active.configuration, 2);
-    nav.push(3);
+    nav.push_or_panic(3);
     assert_eq!(backend.entries().len(), 1);
     backend.replace(original).unwrap();
     backend.go(0, Box::new(|r| r.unwrap()));
@@ -727,12 +726,12 @@ fn legacy_stack_initializes_all_paths_and_replaces_only_changed_suffix() {
         .unwrap();
     assert_eq!(backend.entries().len(), 3);
     assert_eq!(facade.history_paths().unwrap(), ["/1", "/2", "/3"]);
-    nav.replace_all(vec![1, 2, 4, 5]);
+    nav.replace_all_or_panic(vec![1, 2, 4, 5]);
     assert_eq!(backend.entries().len(), 4);
     assert_eq!(backend.entries()[0].url, "/1");
     assert_eq!(backend.entries()[1].url, "/2");
     assert_eq!(facade.history_paths().unwrap(), ["/1", "/2", "/4", "/5"]);
-    nav.replace_all(vec![1, 8]);
+    nav.replace_all_or_panic(vec![1, 8]);
     assert_eq!(backend.position(), 1);
     assert_eq!(backend.entries().len(), 2);
     assert_eq!(backend.entries()[1].url, "/8");
@@ -780,7 +779,7 @@ fn legacy_stack_forward_uses_saved_path_mapper_and_target_guard() {
             allow.get()
         })
         .unwrap();
-    nav.push(2);
+    nav.push_or_panic(2);
     backend.go(-1, Box::new(|r| r.unwrap()));
     assert_eq!(parsed.get(), 0);
     backend.go(1, Box::new(|r| r.unwrap()));
@@ -820,7 +819,7 @@ fn legacy_rewrite_first_keeps_forward_and_restore_active_match_ignores_lower_sta
     let binding = facade
         .attach(nav.clone(), stack.clone(), |_, _| true)
         .unwrap();
-    nav.replace_all(vec![8]);
+    nav.replace_all_or_panic(vec![8]);
     assert_eq!(backend.position(), 0);
     assert_eq!(backend.entries().len(), 3); // old controller intentionally retains forward entries
     assert_eq!(backend.entries()[0].url, "/8");

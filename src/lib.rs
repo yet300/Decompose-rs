@@ -40,10 +40,6 @@
 //! [`TestComponentContext`] supplies a public lifecycle/recreation harness.
 //! `docs/COMPATIBILITY.md` records Rust adaptations and excluded integrations.
 
-// Router compatibility forwarding uses deprecated panicking aliases until
-// their callers migrate to try_* / *_or_panic.
-#![allow(deprecated)]
-
 mod child;
 mod context;
 mod error;

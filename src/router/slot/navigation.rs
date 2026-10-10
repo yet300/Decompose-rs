@@ -12,29 +12,12 @@ pub type SlotEvent<C> = NavigationEvent<Option<Rc<C>>, NavigationResult<C>>;
 /// Implement `navigate_with` to inherit the standard helper policies.
 /// Generic callbacks use static dispatch; this trait is not object-safe.
 pub trait SlotNavigator<C: 'static> {
-    /// Transforms every connected slot. Panics on transition errors.
-    #[deprecated(note = "use try_navigate or navigate_or_panic")]
-    #[track_caller]
-    fn navigate(&self, transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static) {
-        self.navigate_with(transformer, |result| {
-            if let Err(error) = result {
-                panic!("slot navigation failed: {error:?}");
-            }
-        });
-    }
     /// Transforms each connected slot, reporting its committed result after publication.
     fn navigate_with(
         &self,
         transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static,
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     );
-    /// Activates a configuration; equality preserves the child identity and instance.
-    #[deprecated(note = "use try_activate or activate_or_panic")]
-    #[track_caller]
-    fn activate(&self, configuration: C) {
-        let configuration = Rc::new(configuration);
-        self.navigate(move |_| Some(configuration.clone()));
-    }
     /// Activates a configuration and reports the old and new configurations.
     fn activate_with(
         &self,
@@ -43,12 +26,6 @@ pub trait SlotNavigator<C: 'static> {
     ) {
         let configuration = Rc::new(configuration);
         self.navigate_with(move |_| Some(configuration.clone()), completion);
-    }
-    /// Dismisses the active child, if any.
-    #[deprecated(note = "use try_dismiss or dismiss_or_panic")]
-    #[track_caller]
-    fn dismiss(&self) {
-        self.navigate(|_| None);
     }
     /// Dismisses, reporting true if a child existed before this event.
     fn dismiss_with(&self, completion: impl Fn(Result<bool, NavigationError>) + 'static) {
@@ -133,12 +110,6 @@ impl<C: 'static> SlotNavigation<C> {
             source: SimpleNavigation::new(),
         }
     }
-    /// Transforms every connected slot. Panics on transition errors.
-    #[deprecated(note = "use try_navigate or navigate_or_panic")]
-    #[track_caller]
-    pub fn navigate(&self, transformer: impl Fn(Option<Rc<C>>) -> Option<Rc<C>> + 'static) {
-        SlotNavigator::navigate(self, transformer)
-    }
     /// Transforms each connected slot, reporting its committed result after publication.
     /// A panic clears queued events and propagates; the source remains usable.
     pub fn navigate_with(
@@ -148,12 +119,6 @@ impl<C: 'static> SlotNavigation<C> {
     ) {
         SlotNavigator::navigate_with(self, transformer, completion)
     }
-    /// Activates a configuration; equality preserves the child identity and instance.
-    #[deprecated(note = "use try_activate or activate_or_panic")]
-    #[track_caller]
-    pub fn activate(&self, configuration: C) {
-        SlotNavigator::activate(self, configuration)
-    }
     /// Activates a configuration and reports the old and new configurations.
     pub fn activate_with(
         &self,
@@ -161,12 +126,6 @@ impl<C: 'static> SlotNavigation<C> {
         completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
     ) {
         SlotNavigator::activate_with(self, configuration, completion)
-    }
-    /// Dismisses the active child, if any.
-    #[deprecated(note = "use try_dismiss or dismiss_or_panic")]
-    #[track_caller]
-    pub fn dismiss(&self) {
-        SlotNavigator::dismiss(self)
     }
     /// Dismisses, reporting true if a child existed before this event.
     pub fn dismiss_with(&self, completion: impl Fn(Result<bool, NavigationError>) + 'static) {

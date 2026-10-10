@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::{
     router::{
         self,
@@ -274,9 +273,9 @@ fn custom_navigators_inherit_standard_helpers_and_local_items_still_work() {
         |c, _| Component(c.0),
     )
     .unwrap();
-    stack.push_new(Config(2));
-    stack.push_new(Config(2));
-    stack.push_to_front(Config(1));
+    stack.push_new_or_panic(Config(2));
+    stack.push_new_or_panic(Config(2));
+    stack.push_to_front_or_panic(Config(1));
     assert_eq!(
         value
             .get()
@@ -285,15 +284,15 @@ fn custom_navigators_inherit_standard_helpers_and_local_items_still_work() {
             .collect::<Vec<_>>(),
         [2, 1]
     );
-    stack.pop_to_first();
-    stack.replace_current(Config(3));
+    stack.pop_to_first_or_panic();
+    stack.replace_current_or_panic(Config(3));
     assert_eq!(value.get().active.instance.0, 3);
     let slot = SlotWrapper(SlotNavigation::new());
     let value = child_slot(&parent, &slot.0, None, SlotOptions::default(), |c, _| {
         Component(c.0)
     })
     .unwrap();
-    slot.activate(Config(4));
+    slot.activate_or_panic(Config(4));
     slot.dismiss_with(|result| assert!(result.unwrap()));
     assert!(value.get().child.is_none());
     let pages = PagesWrapper(PagesNavigation::new());
@@ -305,11 +304,11 @@ fn custom_navigators_inherit_standard_helpers_and_local_items_still_work() {
         |c, _| Component(c.0),
     )
     .unwrap();
-    pages.select_next(true);
-    pages.select_prev(false);
-    pages.select_last();
+    pages.select_next_or_panic(true);
+    pages.select_prev_or_panic(false);
+    pages.select_last_or_panic();
     assert_eq!(value.get().selected_index, Some(1));
-    pages.clear();
+    pages.clear_or_panic();
     assert!(value.get().items.is_empty());
     let panels = PanelsWrapper(PanelsNavigation::new());
     let value = child_panels(
@@ -322,10 +321,10 @@ fn custom_navigators_inherit_standard_helpers_and_local_items_still_work() {
         |c, _| Component(c.0),
     )
     .unwrap();
-    panels.activate_details(Config(8));
-    panels.activate_extra(Config(9));
-    panels.pop();
-    panels.set_mode(ChildPanelsMode::Triple);
+    panels.activate_details_or_panic(Config(8));
+    panels.activate_extra_or_panic(Config(9));
+    panels.pop_or_panic();
+    panels.set_mode_or_panic(ChildPanelsMode::Triple);
     assert!(value.get().extra.is_none());
     assert_eq!(value.get().details.as_ref().unwrap().instance.0, 8);
     let items = ItemsWrapper(ItemsNavigation::new());
@@ -337,7 +336,7 @@ fn custom_navigators_inherit_standard_helpers_and_local_items_still_work() {
         |c, _| Component(c.0),
     )
     .unwrap();
-    items.set_active_items(|_| {
+    items.set_active_items_or_panic(|_| {
         [(Rc::new(Config(10)), ActiveLifecycleState::Resumed)]
             .into_iter()
             .collect()
@@ -353,7 +352,7 @@ fn custom_navigators_inherit_standard_helpers_and_local_items_still_work() {
             .0,
         10
     );
-    value.set_items(|mut c| {
+    value.set_items_or_panic(|mut c| {
         c.push(Rc::new(Config(11)));
         c
     });
@@ -379,15 +378,15 @@ fn assert_shared_event<E: 'static>(source: &impl NavigationSource<E>, emit: impl
 fn every_builtin_implements_public_source_with_shared_rc_identity() {
     struct NoEq;
     let stack = StackNavigation::<NoEq>::new();
-    assert_shared_event(&stack, || stack.navigate(|s| s));
+    assert_shared_event(&stack, || stack.navigate_or_panic(|s| s));
     let slot = SlotNavigation::<NoEq>::new();
-    assert_shared_event(&slot, || slot.navigate(|s| s));
+    assert_shared_event(&slot, || slot.navigate_or_panic(|s| s));
     let pages = PagesNavigation::<NoEq>::new();
-    assert_shared_event(&pages, || pages.navigate(|s| s));
+    assert_shared_event(&pages, || pages.navigate_or_panic(|s| s));
     let panels = PanelsNavigation::<NoEq, NoEq, NoEq>::new();
-    assert_shared_event(&panels, || panels.navigate(|s| s));
+    assert_shared_event(&panels, || panels.navigate_or_panic(|s| s));
     let items = ItemsNavigation::<NoEq>::new();
-    assert_shared_event(&items, || items.navigate(|s| s));
+    assert_shared_event(&items, || items.navigate_or_panic(|s| s));
 }
 
 #[test]
@@ -412,7 +411,7 @@ fn builtin_public_receivers_apply_own_state_complete_in_order_and_nested_events_
                 output.borrow_mut().push((id, last));
                 identities.borrow_mut().push((last, Rc::as_ptr(&event)));
                 if id == 1 && last == 1 {
-                    nested.push(Config(2));
+                    nested.push_or_panic(Config(2));
                 }
                 event.complete(Ok(decompose_rs::router::stack::NavigationResult {
                     old_stack,
@@ -472,10 +471,10 @@ fn public_sources_discard_disconnected_events_without_replay_and_release_capture
     let token =
         NavigationSource::subscribe(&navigation, Rc::new(move |_| output.set(output.get() + 1)));
     assert_eq!(count.get(), 0);
-    navigation.dismiss();
+    navigation.dismiss_or_panic();
     assert_eq!(count.get(), 1);
     token.cancel();
-    navigation.dismiss();
+    navigation.dismiss_or_panic();
     assert_eq!(count.get(), 1);
 }
 
@@ -503,7 +502,7 @@ fn public_cancellation_skips_captured_receiver_and_late_receiver_starts_next_rou
                         output.borrow_mut().push((3, *event.transform(vec![])[0]))
                     }),
                 ));
-                nested.push(2);
+                nested.push_or_panic(2);
             }
         }),
     );
@@ -512,7 +511,7 @@ fn public_cancellation_skips_captured_receiver_and_late_receiver_starts_next_rou
         &navigation,
         Rc::new(move |_| output.borrow_mut().push((2, 0))),
     ));
-    navigation.push(1);
+    navigation.push_or_panic(1);
     assert_eq!(*log.borrow(), [(1, 1), (1, 2), (3, 2)]);
 }
 
@@ -522,7 +521,7 @@ fn public_observer_panic_clears_queue_recovers_and_drops_captures_outside_borrow
     impl Drop for EmitOnDrop {
         fn drop(&mut self) {
             self.1.set(self.1.get() + 1);
-            self.0.push(9);
+            self.0.push_or_panic(9);
         }
     }
     let navigation = StackNavigation::<u8>::new();
@@ -534,7 +533,7 @@ fn public_observer_panic_clears_queue_recovers_and_drops_captures_outside_borrow
         Rc::new(move |event: Rc<StackEvent<u8>>| {
             if *event.transform(vec![])[0] == 1 {
                 let capture = EmitOnDrop(nested.clone(), count.clone());
-                nested.navigate(move |_| {
+                nested.navigate_or_panic(move |_| {
                     let _ = &capture;
                     vec![Rc::new(2)]
                 });
@@ -551,10 +550,11 @@ fn public_observer_panic_clears_queue_recovers_and_drops_captures_outside_borrow
         }),
     );
     let panic =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| navigation.push(1))).unwrap_err();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| navigation.push_or_panic(1)))
+            .unwrap_err();
     assert_eq!(panic.downcast_ref::<&str>(), Some(&"public observer panic"));
     assert_eq!(dropped.get(), 1);
-    navigation.push(3);
+    navigation.push_or_panic(3);
     assert_eq!(*seen.borrow(), [9, 3]);
 }
 

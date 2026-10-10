@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::children::*;
 use decompose_rs::*;
 use std::{

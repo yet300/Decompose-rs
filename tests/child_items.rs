@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::items::*;
 use decompose_rs::*;
 use std::{
@@ -220,7 +219,7 @@ fn persistent_live_and_inactive_state_survives_repeated_saves() {
         .register("payload", || vec![4, 5])
         .unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
-    lazy.set_active_items(|_| ItemMap::new());
+    lazy.set_active_items_or_panic(|_| ItemMap::new());
     assert!(old.lifecycle().state().is_destroyed());
     let saved = parent.state_store().save().unwrap();
     assert_eq!(saved, parent.state_store().save().unwrap());
@@ -282,7 +281,7 @@ fn reorders_and_status_changes_preserve_live_identity_and_canonical_handles() {
     .unwrap();
     let old = lazy.get_or_create(&0).unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
-    lazy.navigate(|mut s| {
+    lazy.navigate_or_panic(|mut s| {
         s.items = vec![Rc::new(1), Rc::new(0)];
         s.active_items = ItemMap::from_owned([
             (0, ActiveLifecycleState::Started),
@@ -316,7 +315,7 @@ fn deactivate_recreates_keeper_and_component_under_same_key_then_removal_discard
     let old = lazy.get_or_create(&0).unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
     old.state_store().register("value", || vec![8]).unwrap();
-    lazy.set_active_items(|_| ItemMap::new());
+    lazy.set_active_items_or_panic(|_| ItemMap::new());
     assert!(old.instance_store().is_destroyed().unwrap());
     let fresh = lazy.get_or_create(&0).unwrap();
     assert!(!Rc::ptr_eq(&old, &fresh));
@@ -327,8 +326,8 @@ fn deactivate_recreates_keeper_and_component_under_same_key_then_removal_discard
     );
     assert_eq!(lazy.get().active_items.get(&0).unwrap().child.key, key);
     fresh.state_store().register("value", || vec![9]).unwrap();
-    lazy.set_items(|_| vec![]);
-    lazy.set_items(|_| vec![Rc::new(0)]);
+    lazy.set_items_or_panic(|_| vec![]);
+    lazy.set_items_or_panic(|_| vec![Rc::new(0)]);
     let third = lazy.get_or_create(&0).unwrap();
     assert_ne!(lazy.get().active_items.get(&0).unwrap().child.key, key);
     assert_eq!(third.state_store().consume_bytes("value").unwrap(), None);
@@ -408,7 +407,7 @@ fn initial_active_map_is_pruned_and_canonicalized() {
     ));
 }
 fn via_trait<N: ItemsNavigator<u32>>(n: &N) {
-    n.set_active_items(|mut m| {
+    n.set_active_items_or_panic(|mut m| {
         m.insert(Rc::new(0), ActiveLifecycleState::Resumed);
         m
     });
@@ -451,7 +450,7 @@ fn shared_completions_use_each_receivers_input_local_helpers_are_isolated() {
         },
     );
     assert_eq!(*seen.borrow(), [(1, 2), (2, 3)]);
-    a.set_active_items(|_| ItemMap::new());
+    a.set_active_items_or_panic(|_| ItemMap::new());
     assert!(a.get().active_items.is_empty());
     assert_eq!(b.get().active_items.len(), 1);
     via_trait(&a);
@@ -573,9 +572,9 @@ fn lazy_fetch_reports_unavailable_after_queued_factory_self_removal_or_deactivat
             ItemsOptions::default(),
             move |_, ctx| {
                 if remove {
-                    source.set_items(|_| vec![]);
+                    source.set_items_or_panic(|_| vec![]);
                 } else {
-                    source.set_active_items(|_| ItemMap::new());
+                    source.set_active_items_or_panic(|_| ItemMap::new());
                 }
                 ctx
             },
@@ -943,7 +942,7 @@ fn external_retention_survives_parent_recreation_only_for_live_restored_entries(
         .instance_store()
         .get_or_create("service", || Rc::new(7u32))
         .unwrap();
-    lazy.set_active_items(|mut m| {
+    lazy.set_active_items_or_panic(|mut m| {
         m.remove(&1);
         m
     });
@@ -988,7 +987,7 @@ fn coherent_save_freezes_targets_membership_keys_and_counter_before_provider_nav
         .state_store()
         .register("navigate", move || {
             if flag.replace(false) {
-                source.set_items(|_| vec![]);
+                source.set_items_or_panic(|_| vec![]);
             }
             vec![3]
         })
@@ -1016,7 +1015,7 @@ fn coherent_save_freezes_targets_membership_keys_and_counter_before_provider_nav
         lazy.get().active_items.get(&0).unwrap().child.key,
         "child/0"
     );
-    lazy.set_items(|mut v| {
+    lazy.set_items_or_panic(|mut v| {
         v.push(Rc::new(2));
         v
     });
@@ -1097,7 +1096,7 @@ fn back_is_gated_by_requested_and_parent_states_and_never_changes_membership() {
     }
     assert!(parent.back_handler().back());
     assert_eq!(*log.borrow(), [2]);
-    lazy.set_active_items(|mut m| {
+    lazy.set_active_items_or_panic(|mut m| {
         m.remove(&2);
         m
     });
@@ -1108,7 +1107,7 @@ fn back_is_gated_by_requested_and_parent_states_and_never_changes_membership() {
     parent.lifecycle().move_to(LifecycleState::Started).unwrap();
     assert!(parent.back_handler().back());
     assert_eq!(*log.borrow(), [2, 1, 1]);
-    lazy.set_active_items(|mut m| {
+    lazy.set_active_items_or_panic(|mut m| {
         m.insert(Rc::new(1), ActiveLifecycleState::Created);
         m
     });
@@ -1145,7 +1144,7 @@ fn back_priority_lifo_and_predictive_cancellation_preserve_membership() {
     }
     assert!(parent.back_handler().predictive_start());
     parent.back_handler().predictive_progress(0.5).unwrap();
-    lazy.set_active_items(|mut m| {
+    lazy.set_active_items_or_panic(|mut m| {
         m.remove(&1);
         m
     });
@@ -1170,7 +1169,7 @@ fn back_priority_lifo_and_predictive_cancellation_preserve_membership() {
     assert!(parent.back_handler().back());
     assert_eq!(log.borrow().last(), Some(&(9, BackPhase::Invoked)));
     parent.back_handler().unregister(handle.id());
-    lazy.set_active_items(|_| ItemMap::new());
+    lazy.set_active_items_or_panic(|_| ItemMap::new());
     assert!(!parent.back_handler().back());
 }
 #[test]
@@ -1235,7 +1234,7 @@ fn panicking_back_callback_discards_deferred_local_work_and_allows_retry() {
         .unwrap()
         .back_handler()
         .register(0, true, move |_, _| {
-            source.set_items(|_| vec![]);
+            source.set_items_or_panic(|_| vec![]);
             panic!("Back panic")
         })
         .unwrap();
@@ -1260,32 +1259,39 @@ fn local_factory_lifecycle_observer_completion_navigation_is_fifo() {
         None::<LazyChildItems<u32, DefaultComponentContext>>,
     ));
     let access = holder.clone();
-    let lazy = child_items(
-        &parent,
-        &ItemsNavigation::new(),
-        Items::new(vec![0u32, 1, 2, 3, 4]).unwrap(),
-        ItemsOptions::default(),
-        move |c, ctx| {
-            if *c == 0 {
-                access.borrow().as_ref().unwrap().set_active_items(|mut m| {
-                    m.insert(Rc::new(1), ActiveLifecycleState::Created);
-                    m
-                });
-                let access = access.clone();
-                let _ = ctx
-                    .lifecycle()
-                    .do_on_resume(move || {
-                        access.borrow().as_ref().unwrap().set_active_items(|mut m| {
-                            m.insert(Rc::new(2), ActiveLifecycleState::Created);
+    let lazy =
+        child_items(
+            &parent,
+            &ItemsNavigation::new(),
+            Items::new(vec![0u32, 1, 2, 3, 4]).unwrap(),
+            ItemsOptions::default(),
+            move |c, ctx| {
+                if *c == 0 {
+                    access
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .set_active_items_or_panic(|mut m| {
+                            m.insert(Rc::new(1), ActiveLifecycleState::Created);
                             m
-                        })
-                    })
-                    .detach();
-            }
-            ctx
-        },
-    )
-    .unwrap();
+                        });
+                    let access = access.clone();
+                    let _ =
+                        ctx.lifecycle()
+                            .do_on_resume(move || {
+                                access.borrow().as_ref().unwrap().set_active_items_or_panic(
+                                    |mut m| {
+                                        m.insert(Rc::new(2), ActiveLifecycleState::Created);
+                                        m
+                                    },
+                                )
+                            })
+                            .detach();
+                }
+                ctx
+            },
+        )
+        .unwrap();
     *holder.borrow_mut() = Some(lazy.clone());
     let log = Rc::new(RefCell::new(vec![]));
     let out = log.clone();
@@ -1295,7 +1301,7 @@ fn local_factory_lifecycle_observer_completion_navigation_is_fifo() {
     let token = lazy.subscribe(move |s| {
         out.borrow_mut().push(s.active_items.len());
         if s.active_items.contains_key(&0) && flag.replace(false) {
-            source.set_active_items(|mut m| {
+            source.set_active_items_or_panic(|mut m| {
                 m.insert(Rc::new(3), ActiveLifecycleState::Created);
                 m
             });
@@ -1310,7 +1316,7 @@ fn local_factory_lifecycle_observer_completion_navigation_is_fifo() {
         },
         move |r| {
             assert_eq!(r.unwrap().new_items.active_items.len(), 1);
-            source.set_active_items(|mut m| {
+            source.set_active_items_or_panic(|mut m| {
                 m.insert(Rc::new(4), ActiveLifecycleState::Created);
                 m
             });
@@ -1336,7 +1342,7 @@ fn lazy_fetch_is_unavailable_after_observer_or_lifecycle_self_deactivation() {
                     let source = source.clone();
                     let _ = ctx
                         .lifecycle()
-                        .do_on_create(move || source.set_active_items(|_| ItemMap::new()))
+                        .do_on_create(move || source.set_active_items_or_panic(|_| ItemMap::new()))
                         .detach();
                 }
                 ctx
@@ -1346,7 +1352,7 @@ fn lazy_fetch_is_unavailable_after_observer_or_lifecycle_self_deactivation() {
         let source = nav.clone();
         let _token = lazy.subscribe(move |s| {
             if !lifecycle && s.active_items.contains_key(&0) {
-                source.set_active_items(|_| ItemMap::new());
+                source.set_active_items_or_panic(|_| ItemMap::new());
             }
         });
         assert!(matches!(
@@ -1372,7 +1378,7 @@ fn local_observer_and_completion_panics_discard_nested_work_and_recover() {
         let source = lazy.clone();
         let token = lazy.subscribe(move |s| {
             if observer && s.active_items.contains_key(&0) && once.replace(false) {
-                source.set_items(|_| vec![]);
+                source.set_items_or_panic(|_| vec![]);
                 panic!("observer panic");
             }
         });
@@ -1385,7 +1391,7 @@ fn local_observer_and_completion_panics_discard_nested_work_and_recover() {
                 },
                 move |_| {
                     if !observer {
-                        source.set_items(|_| vec![]);
+                        source.set_items_or_panic(|_| vec![]);
                         panic!("completion panic");
                     }
                 }
@@ -1412,10 +1418,12 @@ fn local_transformer_panic_drops_queued_work_and_releases_processing_gate() {
     .unwrap();
     let source = lazy.clone();
     assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.navigate(move |_| {
-            source.set_items(|_| vec![]);
-            panic!("transformer panic")
-        })))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.navigate_or_panic(
+            move |_| {
+                source.set_items_or_panic(|_| vec![]);
+                panic!("transformer panic")
+            }
+        )))
         .is_err()
     );
     assert_eq!(lazy.get().items.len(), 1);
@@ -1445,12 +1453,11 @@ fn local_factory_panic_releases_prepared_scopes_and_allows_lazy_retry() {
     )
     .unwrap();
     assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.set_active_items(
-            |_| ItemMap::from_owned([
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy
+            .set_active_items_or_panic(|_| ItemMap::from_owned([
                 (0, ActiveLifecycleState::Created),
                 (1, ActiveLifecycleState::Resumed)
-            ])
-        )))
+            ]))))
         .is_err()
     );
     for (life, keeper) in capture.borrow().iter() {
@@ -1512,7 +1519,7 @@ fn failed_initial_queued_navigation_rolls_back_original_input() {
             Items::default(),
             persistent(),
             move |_, ctx| {
-                source.set_items(|v| vec![v[0].clone(), v[0].clone()]);
+                source.set_items_or_panic(|v| vec![v[0].clone(), v[0].clone()]);
                 ctx
             }
         )))
@@ -1596,7 +1603,7 @@ fn forward_factories_reverse_destruction_and_demotion_before_promotion() {
         },
     )
     .unwrap();
-    lazy.set_active_items(|_| {
+    lazy.set_active_items_or_panic(|_| {
         ItemMap::from_owned([
             (2, ActiveLifecycleState::Created),
             (0, ActiveLifecycleState::Resumed),
@@ -1612,7 +1619,7 @@ fn forward_factories_reverse_destruction_and_demotion_before_promotion() {
         [(0, "factory"), (1, "factory"), (2, "factory")]
     );
     log.borrow_mut().clear();
-    lazy.set_active_items(|mut m| {
+    lazy.set_active_items_or_panic(|mut m| {
         m.insert(Rc::new(0), ActiveLifecycleState::Created);
         m.insert(Rc::new(2), ActiveLifecycleState::Resumed);
         m
@@ -1629,7 +1636,7 @@ fn forward_factories_reverse_destruction_and_demotion_before_promotion() {
                 .unwrap()
     );
     log.borrow_mut().clear();
-    lazy.set_items(|_| vec![]);
+    lazy.set_items_or_panic(|_| vec![]);
     assert_eq!(
         log.borrow()
             .iter()
@@ -1679,11 +1686,16 @@ fn lifecycle_panic_never_reuses_ended_live_scope_and_local_retry_recovers() {
         let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy
-                .set_active_items(|_| ItemMap::from_owned([(1, ActiveLifecycleState::Resumed)]))))
+                .set_active_items_or_panic(|_| ItemMap::from_owned([(
+                    1,
+                    ActiveLifecycleState::Resumed
+                )]))))
             .is_err()
         );
         assert!(old.lifecycle().state().is_destroyed());
-        lazy.set_active_items(|_| ItemMap::from_owned([(0, ActiveLifecycleState::Resumed)]));
+        lazy.set_active_items_or_panic(|_| {
+            ItemMap::from_owned([(0, ActiveLifecycleState::Resumed)])
+        });
         let fresh = lazy.get_or_create(&0).unwrap();
         assert!(!Rc::ptr_eq(&old, &fresh));
         assert_ne!(lazy.get().active_items.get(&0).unwrap().child.key, key);
@@ -1708,7 +1720,7 @@ fn dropping_views_keeps_parent_owned_engine_without_navigation_control_cycle() {
     )
     .unwrap();
     drop(lazy);
-    nav.set_active_items(|_| ItemMap::from_owned([(0, ActiveLifecycleState::Resumed)]));
+    nav.set_active_items_or_panic(|_| ItemMap::from_owned([(0, ActiveLifecycleState::Resumed)]));
     assert!(weak.upgrade().is_some());
     parent.lifecycle().destroy().unwrap();
     assert!(weak.upgrade().is_none());
@@ -1753,9 +1765,9 @@ fn every_navigation_helper_on_trait_source_and_lazy_reports_normalized_old_new_s
                 ))
             },
         );
-        nav.navigate(|s| s);
-        nav.set_items(|v| v);
-        nav.set_active_items(|m| m);
+        nav.navigate_or_panic(|s| s);
+        nav.set_items_or_panic(|v| v);
+        nav.set_active_items_or_panic(|m| m);
     }
     for local in [false, true] {
         let parent = root();
@@ -1799,14 +1811,17 @@ fn convenience_errors_panic_and_explicit_completion_recovers() {
     .unwrap();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || lazy.set_items(|v| vec![v[0].clone(), v[0].clone()])
+            || lazy.set_items_or_panic(|v| vec![v[0].clone(), v[0].clone()])
         ))
         .is_err()
     );
     lazy.get_or_create(&0).unwrap();
     parent.lifecycle().destroy().unwrap();
     assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.navigate(|s| s))).is_err()
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || lazy.navigate_or_panic(|s| s)
+        ))
+        .is_err()
     );
     nav.navigate_with(
         |_| panic!("destroyed disconnected source"),
@@ -2006,7 +2021,7 @@ fn nested_mixed_routers_restore_after_items_deactivation_and_process_death() {
     )
     .unwrap();
     let old = lazy.get_or_create(&0).unwrap();
-    old.nav.activate(99);
+    old.nav.activate_or_panic(99);
     old.items
         .get_or_create(&30)
         .unwrap()
@@ -2014,7 +2029,7 @@ fn nested_mixed_routers_restore_after_items_deactivation_and_process_death() {
         .register("value", || vec![55])
         .unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
-    lazy.set_active_items(|_| ItemMap::new());
+    lazy.set_active_items_or_panic(|_| ItemMap::new());
     assert!(old.ctx.lifecycle().state().is_destroyed());
     let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
@@ -2136,7 +2151,7 @@ fn inactive_lazy_failure_does_not_leave_activation_in_queue() {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.get_or_create(&0))).is_err()
     );
     assert!(lazy.get().active_items.is_empty());
-    lazy.navigate(|s| s);
+    lazy.navigate_or_panic(|s| s);
     assert!(lazy.get().active_items.is_empty());
     assert_eq!(
         lazy.get_or_create(&0).unwrap().lifecycle().state(),
@@ -2158,9 +2173,9 @@ fn removal_of_inactive_member_discards_tombstone_key_and_saved_state() {
     let old = lazy.get_or_create(&0).unwrap();
     let key = lazy.get().active_items.get(&0).unwrap().child.key.clone();
     old.state_store().register("saved", || vec![7]).unwrap();
-    lazy.set_active_items(|_| ItemMap::new());
-    lazy.set_items(|_| vec![]);
-    lazy.set_items(|_| vec![Rc::new(0)]);
+    lazy.set_active_items_or_panic(|_| ItemMap::new());
+    lazy.set_items_or_panic(|_| vec![]);
+    lazy.set_items_or_panic(|_| vec![Rc::new(0)]);
     let fresh = lazy.get_or_create(&0).unwrap();
     assert_ne!(lazy.get().active_items.get(&0).unwrap().child.key, key);
     assert_eq!(fresh.state_store().consume_bytes("saved").unwrap(), None);
@@ -2178,7 +2193,7 @@ fn restoration_of_earlier_membership_discards_newer_retained_scope() {
     )
     .unwrap();
     let saved = parent.state_store().save().unwrap();
-    lazy.set_items(|mut v| {
+    lazy.set_items_or_panic(|mut v| {
         v.push(Rc::new(1));
         v
     });
@@ -2195,7 +2210,7 @@ fn restoration_of_earlier_membership_discards_newer_retained_scope() {
     .unwrap();
     assert!(newer.is_destroyed().unwrap());
     assert_eq!(lazy.get().items.len(), 1);
-    lazy.set_items(|mut v| {
+    lazy.set_items_or_panic(|mut v| {
         v.push(Rc::new(2));
         v
     });
@@ -2222,9 +2237,9 @@ fn lifecycle_deactivation_cannot_reenable_created_or_inactive_back_bridge() {
         .lifecycle()
         .do_on_stop(move || callback_back.set_enabled(handle.id(), true))
         .detach();
-    lazy.set_active_items(|_| ItemMap::from_owned([(0, ActiveLifecycleState::Created)]));
+    lazy.set_active_items_or_panic(|_| ItemMap::from_owned([(0, ActiveLifecycleState::Created)]));
     assert!(!parent.back_handler().back());
-    lazy.set_active_items(|_| ItemMap::new());
+    lazy.set_active_items_or_panic(|_| ItemMap::new());
     back.set_enabled(handle.id(), true);
     assert!(!parent.back_handler().back());
 }
@@ -2309,12 +2324,12 @@ fn reactivated_equal_configuration_uses_current_payload_with_stable_key_and_save
                 .child
                 .key
                 .clone();
-            lazy.set_active_items(|_| ItemMap::new());
+            lazy.set_active_items_or_panic(|_| ItemMap::new());
             Some(key)
         } else {
             None
         };
-        lazy.set_items(|_| {
+        lazy.set_items_or_panic(|_| {
             vec![Rc::new(Config {
                 id: 0,
                 payload: "new",
@@ -2410,7 +2425,7 @@ fn equal_live_replacement_preserves_instance_then_uses_new_payload_on_recreation
         .child
         .key
         .clone();
-    lazy.set_items(|_| {
+    lazy.set_items_or_panic(|_| {
         vec![Rc::new(Config {
             id: 0,
             payload: "new",
@@ -2428,7 +2443,7 @@ fn equal_live_replacement_preserves_instance_then_uses_new_payload_on_recreation
             .payload,
         "new"
     );
-    lazy.set_active_items(|_| ItemMap::new());
+    lazy.set_active_items_or_panic(|_| ItemMap::new());
     assert!(!Rc::ptr_eq(&old, &lazy.get_or_create(&probe).unwrap()));
     assert_eq!(calls.borrow().as_slice(), ["old", "new"]);
     assert_eq!(lazy.get().active_items.get(&probe).unwrap().child.key, key);
@@ -2449,9 +2464,9 @@ fn no_op_navigation_never_restarts_live_lifecycle() {
     let out = states.clone();
     let _token = life.subscribe(move |s| out.borrow_mut().push(s));
     states.borrow_mut().clear();
-    lazy.navigate(|s| s);
-    lazy.set_items(|v| v);
-    lazy.set_active_items(|m| m);
+    lazy.navigate_or_panic(|s| s);
+    lazy.set_items_or_panic(|v| v);
+    lazy.set_active_items_or_panic(|m| m);
     assert!(states.borrow().is_empty());
     assert_eq!(life.state(), LifecycleState::Resumed);
 }
@@ -2496,7 +2511,10 @@ fn lazy_fetch_rejects_ended_old_scope_immediately_after_caught_lifecycle_panic()
         let snapshot = lazy.get();
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy
-                .set_active_items(|_| ItemMap::from_owned([(1, ActiveLifecycleState::Resumed)]))))
+                .set_active_items_or_panic(|_| ItemMap::from_owned([(
+                    1,
+                    ActiveLifecycleState::Resumed
+                )]))))
             .is_err()
         );
         assert!(old.lifecycle().state().is_destroyed());
@@ -2505,7 +2523,7 @@ fn lazy_fetch_rejects_ended_old_scope_immediately_after_caught_lifecycle_panic()
             Err(NavigationError::ChildUnavailable)
         ));
         assert!(Rc::ptr_eq(&snapshot, &lazy.get()));
-        lazy.navigate(|s| s);
+        lazy.navigate_or_panic(|s| s);
         let repaired = lazy.get_or_create(&0).unwrap();
         assert!(!Rc::ptr_eq(&old, &repaired));
         assert_eq!(repaired.lifecycle().state(), LifecycleState::Resumed);

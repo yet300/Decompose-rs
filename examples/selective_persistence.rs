@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 //! Run with `cargo run --example selective_persistence`.
 use decompose_rs::router::stack::{
     StackCodec, StackNavigation, StackOptions, child_stack_with_initial,

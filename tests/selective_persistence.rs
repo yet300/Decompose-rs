@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::{
     router::{items::*, pages::*, panels::*, slot::*, stack::*},
     *,
@@ -550,7 +549,7 @@ fn restore_predicate_navigation_is_queued_after_the_lazy_initial_state() {
         || vec![2],
         StackOptions {
             codec: Some(StackCodec::new(encode, decode).should_restore(move |_| {
-                reentrant.push(3);
+                reentrant.push_or_panic(3);
                 false
             })),
             ..Default::default()

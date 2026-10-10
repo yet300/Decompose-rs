@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::items::{
     ActiveLifecycleState, ItemMap, Items, ItemsCodec, ItemsNavigation, ItemsOptions, child_items,
 };

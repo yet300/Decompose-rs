@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::stack::*;
 use decompose_rs::router::{children::*, items::*, pages::*, panels::*, slot::*};
 use decompose_rs::*;
@@ -59,7 +58,7 @@ fn memory_recreation_keeps_identity_nested_bytes_and_retained_instances_but_disk
         },
     )
     .unwrap();
-    navigation.push(Route(2));
+    navigation.push_or_panic(Route(2));
     let saved_child = stack.get().active.clone();
     let snapshot = parent.state_store().save_snapshot().unwrap();
     assert!(!snapshot.persistent().contains_key("DefaultChildStack"));
@@ -182,7 +181,7 @@ fn memory_router_inside_fixed_child_context_restores_through_root_snapshot() {
         |_, _| (),
     )
     .unwrap();
-    nav.push(Route(7));
+    nav.push_or_panic(Route(7));
     let snapshot = parent.state_store().save_snapshot().unwrap();
     parent.lifecycle().destroy().unwrap();
     let next = root(
@@ -213,7 +212,7 @@ fn slot_empty_is_restored_without_initializer() {
         |_, _| (),
     )
     .unwrap();
-    nav.dismiss();
+    nav.dismiss_or_panic();
     let next = recreate(&parent);
     let value = child_slot_with_initial(
         &next,
@@ -261,9 +260,13 @@ fn pages_preserve_destroyed_entries_and_nested_memory_until_resurrection() {
         },
     )
     .unwrap();
-    pages.get().items[0].instance().unwrap().1.push(Route(99));
+    pages.get().items[0]
+        .instance()
+        .unwrap()
+        .1
+        .push_or_panic(Route(99));
     let key = pages.get().items[0].key().to_string();
-    nav.select(1);
+    nav.select_or_panic(1);
     let next = recreate(&parent);
     let nav2 = PagesNavigation::<Route>::new();
     let restored = child_pages_with_initial(
@@ -299,7 +302,7 @@ fn pages_preserve_destroyed_entries_and_nested_memory_until_resurrection() {
     .unwrap();
     assert_eq!(restored.get().selected_index, Some(1));
     assert!(restored.get().items[0].instance().is_none());
-    nav2.select(0);
+    nav2.select_or_panic(0);
     assert_eq!(restored.get().items[0].key(), key);
     assert_eq!(
         restored.get().items[0]
@@ -751,8 +754,8 @@ fn persistent_outer_keeps_nested_memory_in_snapshot_but_durable_restore_resets_i
         factory,
     )
     .unwrap();
-    nav.push(Route(2));
-    outer.get().active.instance.0.push(Route(99));
+    nav.push_or_panic(Route(2));
+    outer.get().active.instance.0.push_or_panic(Route(99));
     let original = outer.get().active.instance.1.get().active.clone();
     let snapshot = parent.state_store().save_snapshot().unwrap();
     assert!(snapshot.persistent().contains_key("DefaultChildStack"));

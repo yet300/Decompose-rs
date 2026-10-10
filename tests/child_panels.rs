@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::NavigationError;
 use decompose_rs::router::panels::*;
 use decompose_rs::*;
@@ -103,8 +102,8 @@ fn mode_transitions_and_equal_operations_preserve_typed_instances_and_keys() {
         ChildPanelsMode::Dual,
         ChildPanelsMode::Single,
     ] {
-        nav.set_mode(mode);
-        nav.set_panels(1, Some(1), Some(1));
+        nav.set_mode_or_panic(mode);
+        nav.set_panels_or_panic(1, Some(1), Some(1));
         let after = value.get();
         assert!(Rc::ptr_eq(&before.main.instance, &after.main.instance));
         assert!(Rc::ptr_eq(
@@ -117,14 +116,14 @@ fn mode_transitions_and_equal_operations_preserve_typed_instances_and_keys() {
         ));
         assert_eq!(before.main.key, after.main.key);
     }
-    nav.dismiss_details();
+    nav.dismiss_details_or_panic();
     assert!(value.get().extra.is_some());
-    nav.activate_main(2);
+    nav.activate_main_or_panic(2);
     assert!(value.get().extra.is_some());
     assert!(before.main.instance.lifecycle().state().is_destroyed());
-    nav.pop();
+    nav.pop_or_panic();
     assert!(value.get().extra.is_none());
-    nav.pop();
+    nav.pop_or_panic();
     assert_eq!(*value.get().main.configuration, 2);
 }
 
@@ -173,7 +172,7 @@ fn distinct_nonclone_configuration_and_component_types_and_two_role_adapter() {
         |d, _| DetailsComponent(d.0.len()),
     )
     .unwrap();
-    nav.activate_details(Details("x"));
+    nav.activate_details_or_panic(Details("x"));
     assert_eq!(value.get().details.as_ref().unwrap().instance.0, 1);
     assert!(value.get().extra.is_none());
 }
@@ -221,12 +220,12 @@ fn every_navigation_helper_completes_with_actual_receiver_state() {
     assert_eq!(seen.borrow()[0].0, 1);
     assert_eq!(seen.borrow()[0].1, 2);
     assert_eq!(value.get().mode, ChildPanelsMode::Dual);
-    nav.set_details_extra(Some(11), Some(12));
-    nav.set_extra(None);
-    nav.activate_details(13);
-    nav.activate_extra(14);
-    nav.dismiss_extra();
-    nav.pop();
+    nav.set_details_extra_or_panic(Some(11), Some(12));
+    nav.set_extra_or_panic(None);
+    nav.activate_details_or_panic(13);
+    nav.activate_extra_or_panic(14);
+    nav.dismiss_extra_or_panic();
+    nav.pop_or_panic();
     assert!(value.get().details.is_none());
     assert!(value.get().extra.is_none());
 }
@@ -249,7 +248,7 @@ fn initial_hook_has_registered_provider_and_back_and_navigation_hooks_precede_co
             assert!(keeper.save().unwrap().is_empty());
             if old.is_none() {
                 assert!(back.back());
-                source.activate_details(3);
+                source.activate_details_or_panic(3);
             } else {
                 assert!(p.extra.is_none());
             }
@@ -302,7 +301,7 @@ fn auto_back_only_in_single_pops_extra_first_and_child_back_has_priority() {
     assert!(parent.back_handler().back());
     assert_eq!(hits.get(), 1);
     assert!(value.get().extra.is_some());
-    nav.set_mode(ChildPanelsMode::Single);
+    nav.set_mode_or_panic(ChildPanelsMode::Single);
     let child = value.get().extra.as_ref().unwrap().instance.back_handler();
     let out = hits.clone();
     let handle = child
@@ -522,7 +521,7 @@ fn creation_is_forward_destruction_reverse_and_demotions_precede_promotions() {
         ["m", "d", "e"]
     );
     log.borrow_mut().clear();
-    nav.set_mode(ChildPanelsMode::Single);
+    nav.set_mode_or_panic(ChildPanelsMode::Single);
     let log_ref = log.borrow();
     let main_stop = log_ref
         .iter()
@@ -535,7 +534,7 @@ fn creation_is_forward_destruction_reverse_and_demotions_precede_promotions() {
     assert!(main_stop < details_stop);
     drop(log_ref);
     log.borrow_mut().clear();
-    nav.navigate(|mut p| {
+    nav.navigate_or_panic(|mut p| {
         p.details = None;
         p.extra = None;
         p
@@ -611,7 +610,7 @@ fn parent_lifecycle_bounds_every_resumed_panel_and_back_bridge() {
         assert!(c.instance.instance_store().is_destroyed().unwrap());
     }
     assert_eq!(parent.back_handler().handler_count(), 0);
-    nav.set_panels(4, Some(5), Some(6));
+    nav.set_panels_or_panic(4, Some(5), Some(6));
     assert_eq!(*value.get().main.configuration, 1);
 }
 
@@ -664,10 +663,10 @@ fn factory_lifecycle_observer_hook_and_completion_navigation_is_fifo() {
         on_state_changed: Some(Rc::new(move |p: &Panels<u32, u32, u32>, old| {
             out.borrow_mut().push(*p.main);
             if old.is_none() {
-                source.activate_main(2);
+                source.activate_main_or_panic(2);
             }
             if *p.main == 3 {
-                source.activate_main(6);
+                source.activate_main_or_panic(6);
             }
         })),
         ..Default::default()
@@ -681,17 +680,17 @@ fn factory_lifecycle_observer_hook_and_completion_navigation_is_fifo() {
         move |m, c| {
             let source = source.clone();
             if *m == 1 {
-                source.activate_main(3);
+                source.activate_main_or_panic(3);
             }
             if *m == 3 {
-                source.activate_main(4);
+                source.activate_main_or_panic(4);
             }
             let m = *m;
             let _ = c
                 .lifecycle()
                 .subscribe(move |s| {
                     if m == 3 && s == LifecycleState::Resumed {
-                        source.activate_main(5)
+                        source.activate_main_or_panic(5)
                     }
                 })
                 .detach();
@@ -707,11 +706,11 @@ fn factory_lifecycle_observer_hook_and_completion_navigation_is_fifo() {
     let flag = once.clone();
     let _token = value.subscribe(move |p| {
         if *p.main.configuration == 7 && flag.replace(false) {
-            source.activate_main(8)
+            source.activate_main_or_panic(8)
         }
     });
     let source = nav.clone();
-    nav.activate_main_with(7, move |_| source.activate_main(9));
+    nav.activate_main_with(7, move |_| source.activate_main_or_panic(9));
     assert_eq!(*log.borrow(), [1, 3, 2, 4, 5, 6, 7, 8, 9]);
 }
 
@@ -725,7 +724,7 @@ fn event_hook_panic_keeps_committed_state_discards_nested_events_and_retries() {
     let options = PanelsOptions {
         on_state_changed: Some(Rc::new(move |p: &Panels<u32, u32, u32>, old| {
             if old.is_some() && *p.main == 2 && flag.replace(false) {
-                source.activate_main(3);
+                source.activate_main_or_panic(3);
                 panic!("hook panic")
             }
         })),
@@ -744,7 +743,7 @@ fn event_hook_panic_keeps_committed_state_discards_nested_events_and_retries() {
     ));
     assert!(!completed.get());
     assert_eq!(*value.get().main.configuration, 2);
-    nav.activate_main(4);
+    nav.activate_main_or_panic(4);
     assert_eq!(*value.get().main.configuration, 4);
 }
 
@@ -762,19 +761,19 @@ fn observer_and_completion_panics_discard_reentry_and_leave_source_usable() {
         let source = nav.clone();
         let _token = value.subscribe(move |p| {
             if observer && *p.main.configuration == 2 {
-                source.activate_main(3);
+                source.activate_main_or_panic(3);
                 panic!("observer panic")
             }
         });
         let source = nav.clone();
         assert!(panic_result(|| nav.activate_main_with(2, move |_| {
             if !observer {
-                source.activate_main(3);
+                source.activate_main_or_panic(3);
                 panic!("completion panic")
             }
         })));
         assert_eq!(*value.get().main.configuration, 2);
-        nav.activate_main(4);
+        nav.activate_main_or_panic(4);
         assert_eq!(*value.get().main.configuration, 4);
     }
 }
@@ -896,7 +895,7 @@ fn new_scope_factory_failure_preserves_committed_children_and_cleans_provisional
     )
     .unwrap();
     let before = value.get();
-    assert!(panic_result(|| nav.activate_extra(2)));
+    assert!(panic_result(|| nav.activate_extra_or_panic(2)));
     assert!(Rc::ptr_eq(
         &before.main.instance,
         &value.get().main.instance
@@ -905,7 +904,7 @@ fn new_scope_factory_failure_preserves_committed_children_and_cleans_provisional
     let (l, i) = captured.borrow().as_ref().unwrap().clone();
     assert!(l.state().is_destroyed());
     assert!(i.is_destroyed().unwrap());
-    nav.activate_extra(3);
+    nav.activate_extra_or_panic(3);
     assert_eq!(value.get().extra.as_ref().unwrap().key, "child/1");
 }
 
@@ -937,7 +936,7 @@ fn predictive_cancel_child_deferral_and_back_callback_panic_recovery() {
         .register(0, true, move |e, _| {
             out.borrow_mut().push(e.phase);
             if e.phase == BackPhase::Invoked {
-                source.dismiss_extra();
+                source.dismiss_extra_or_panic();
                 assert!(view.get().extra.is_some());
                 if flag.replace(false) {
                     panic!("child back")
@@ -1115,8 +1114,8 @@ fn save_captures_membership_mode_keys_and_counter_before_provider_reentry() {
         .state_store()
         .register("navigate", move || {
             if flag.replace(false) {
-                source.set_panels(9, None, None);
-                source.set_mode(ChildPanelsMode::Single);
+                source.set_panels_or_panic(9, None, None);
+                source.set_mode_or_panic(ChildPanelsMode::Single);
             }
             vec![23]
         })
@@ -1130,7 +1129,7 @@ fn save_captures_membership_mode_keys_and_counter_before_provider_reentry() {
     assert_eq!(p.mode, ChildPanelsMode::Triple);
     assert_eq!(*p.main.configuration, 1);
     assert_eq!(p.extra.as_ref().unwrap().key, "child/2");
-    nav.activate_extra(4);
+    nav.activate_extra_or_panic(4);
     assert_eq!(restored.get().extra.as_ref().unwrap().key, "child/3");
 }
 
@@ -1168,7 +1167,7 @@ fn broadcast_receivers_keep_independent_state_and_share_owned_configuration_once
         let r = r.unwrap();
         out.borrow_mut().push(r.old_panels.main.0);
         if r.old_panels.main.0 == 1 {
-            source.activate_extra(NoClone(4));
+            source.activate_extra_or_panic(NoClone(4));
         }
     });
     assert_eq!(*seen.borrow(), [1, 2]);
@@ -1288,7 +1287,7 @@ fn every_mode_to_mode_transition_preserves_every_present_role_identity() {
             let nav = PanelsNavigation::new();
             let value = build(&parent, &nav, initial(d, e, from), PanelsOptions::default());
             let old = value.get();
-            nav.set_mode(to);
+            nav.set_mode_or_panic(to);
             let p = value.get();
             assert!(Rc::ptr_eq(&old.main.instance, &p.main.instance));
             assert!(
@@ -1354,12 +1353,12 @@ fn lifecycle_callback_panic_cleans_fresh_scopes_and_next_navigation_reconciles()
     )
     .unwrap();
     once.set(true);
-    assert!(panic_result(|| nav.activate_details(2)));
+    assert!(panic_result(|| nav.activate_details_or_panic(2)));
     assert!(value.get().details.is_none());
     let (l, i) = captured.borrow().as_ref().unwrap().clone();
     assert!(l.state().is_destroyed());
     assert!(i.is_destroyed().unwrap());
-    nav.activate_details(3);
+    nav.activate_details_or_panic(3);
     assert_eq!(*value.get().details.as_ref().unwrap().configuration, 3);
     assert_eq!(
         value.get().main.instance.lifecycle().state(),
@@ -1506,7 +1505,7 @@ fn initial_hook_parent_destroy_returns_destroyed_without_pumping_queued_events()
     let life = parent.lifecycle();
     let options = PanelsOptions {
         on_state_changed: Some(Rc::new(move |_: &Panels<u32, u32, u32>, _| {
-            source.activate_main(2);
+            source.activate_main_or_panic(2);
             life.destroy().unwrap();
         })),
         ..Default::default()
@@ -1601,7 +1600,7 @@ fn panels_restore_nested_stack_slot_and_pages_after_process_death() {
         |_, c| c,
     )
     .unwrap();
-    value.get().main.instance.slot_nav.activate(99);
+    value.get().main.instance.slot_nav.activate_or_panic(99);
     let key = value.get().main.key.clone();
     let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
@@ -1648,7 +1647,7 @@ fn automatic_back_hook_panic_keeps_pop_committed_and_dispatch_can_retry() {
         handle_back_button: true,
         on_state_changed: Some(Rc::new(move |p: &Panels<u32, u32, u32>, old| {
             if old.is_some() && p.extra.is_none() && flag.replace(false) {
-                source.activate_extra(3);
+                source.activate_extra_or_panic(3);
                 panic!("automatic Back state hook");
             }
         })),
@@ -1667,7 +1666,7 @@ fn automatic_back_hook_panic_keeps_pop_committed_and_dispatch_can_retry() {
     assert!(value.get().details.is_some());
     parent.back_handler().back();
     assert!(value.get().details.is_none());
-    nav.activate_details(4);
+    nav.activate_details_or_panic(4);
     assert!(parent.back_handler().back());
     assert!(value.get().details.is_none());
 }
@@ -1688,8 +1687,8 @@ fn two_role_adapter_restores_authoritative_membership_and_mode() {
     let value =
         child_panels_without_extra(&parent, &nav, Panels::new(1), options(), |_, c| c, |_, c| c)
             .unwrap();
-    nav.activate_details(2);
-    nav.set_mode(ChildPanelsMode::Dual);
+    nav.activate_details_or_panic(2);
+    nav.set_mode_or_panic(ChildPanelsMode::Dual);
     let before = value.get();
     let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();

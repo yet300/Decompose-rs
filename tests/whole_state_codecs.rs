@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::{
     router::{NavigationError, items::*, pages::*, panels::*, slot::*},
     *,
@@ -698,7 +697,7 @@ fn nullable_slot_restoration_accepts_empty_and_keeps_the_identity_counter() {
     assert!(restored.borrow().is_empty());
     let empty = parent.state_store().save().unwrap();
     assert_eq!(empty["DefaultChildSlot"].len(), 16);
-    navigation.activate(9);
+    navigation.activate_or_panic(9);
     let current = slot.get();
     assert_eq!(current.child.as_ref().unwrap().key, "child/1");
     assert_eq!(&*restored.borrow(), &[None]);

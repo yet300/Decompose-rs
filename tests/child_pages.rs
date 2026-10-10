@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::pages::*;
 use decompose_rs::*;
 use std::{
@@ -62,31 +61,31 @@ fn pages_selection_lazy_children_and_numeric_set_items() {
     assert_eq!(calls.get(), 2);
     assert_eq!(value.get().selected_index, Some(0));
     assert!(value.get().items[2].instance().is_none());
-    nav.select(2);
+    nav.select_or_panic(2);
     assert_eq!(calls.get(), 4);
     assert!(value.get().items[0].instance().is_none());
     assert_eq!(
         value.get().items[2].instance().unwrap().lifecycle().state(),
         LifecycleState::Resumed
     );
-    nav.set_items(|mut items| {
+    nav.set_items_or_panic(|mut items| {
         items.reverse();
         items
     });
     assert_eq!(value.get().selected_index, Some(2));
-    nav.select_last();
-    nav.select_next(false);
+    nav.select_last_or_panic();
+    nav.select_next_or_panic(false);
     assert_eq!(value.get().selected_index, Some(4));
-    nav.select_next(true);
+    nav.select_next_or_panic(true);
     assert_eq!(value.get().selected_index, Some(0));
-    nav.select_prev(true);
+    nav.select_prev_or_panic(true);
     assert_eq!(value.get().selected_index, Some(4));
-    nav.set_items(|items| items.into_iter().take(2).collect());
+    nav.set_items_or_panic(|items| items.into_iter().take(2).collect());
     assert_eq!(value.get().selected_index, Some(1));
-    nav.clear();
-    nav.select(usize::MAX);
-    nav.select_first();
-    nav.select_last();
+    nav.clear_or_panic();
+    nav.select_or_panic(usize::MAX);
+    nav.select_first_or_panic();
+    nav.select_last_or_panic();
     assert_eq!(value.get().selected_index, None);
     assert!(value.get().items.is_empty());
 }
@@ -167,12 +166,12 @@ fn tombstone_preserves_key_and_state_but_ends_old_component_and_keeper() {
     let old = value.get().items[0].instance().unwrap().clone();
     let key = value.get().items[0].key().to_owned();
     old.state_store().register("counter", || vec![42]).unwrap();
-    nav.select(3);
+    nav.select_or_panic(3);
     assert_eq!(value.get().items[0].key(), key);
     assert!(value.get().items[0].instance().is_none());
     assert!(old.lifecycle().state().is_destroyed());
     assert!(old.instance_store().is_destroyed().unwrap());
-    nav.select(0);
+    nav.select_or_panic(0);
     let resurrected = value.get().items[0].instance().unwrap().clone();
     assert_eq!(value.get().items[0].key(), key);
     assert!(!Rc::ptr_eq(&old, &resurrected));
@@ -245,7 +244,7 @@ fn reorder_preserves_instances_keys_and_duplicate_occurrence_identity() {
     )
     .unwrap();
     let before = value.get();
-    nav.set_items(|items| vec![items[2].clone(), items[1].clone(), items[0].clone()]);
+    nav.set_items_or_panic(|items| vec![items[2].clone(), items[1].clone(), items[0].clone()]);
     let after = value.get();
     for (old, new) in [(0, 1), (1, 2), (2, 0)] {
         assert_eq!(before.items[old].key(), after.items[new].key());
@@ -293,7 +292,7 @@ fn custom_circular_neighbours_are_created_at_both_ends() {
     .unwrap();
     assert!(value.get().items[3].instance().is_some());
     assert!(value.get().items[2].instance().is_none());
-    nav.select_prev(true);
+    nav.select_prev_or_panic(true);
     assert_eq!(value.get().selected_index, Some(3));
     assert!(value.get().items[0].instance().is_some());
     assert!(value.get().items[1].instance().is_none());
@@ -344,7 +343,7 @@ fn single_page_boundaries_and_all_completion_helpers_report_real_state() {
     });
     assert_eq!(seen.get(), 7);
     assert_eq!(value.get().selected_index, None);
-    nav.set_items(|_| vec![Rc::new(9)]);
+    nav.set_items_or_panic(|_| vec![Rc::new(9)]);
     assert_eq!(value.get().selected_index, Some(0));
 }
 #[test]
@@ -391,7 +390,7 @@ fn factories_are_forward_and_destruction_is_reverse_before_new_resume() {
         ]
     );
     log.borrow_mut().clear();
-    nav.set_items(|_| vec![Rc::new(3), Rc::new(4)]);
+    nav.set_items_or_panic(|_| vec![Rc::new(3), Rc::new(4)]);
     assert_eq!(
         *log.borrow(),
         [
@@ -551,7 +550,7 @@ fn observer_factory_lifecycle_and_policy_reentry_are_fifo() {
     let options = PagesOptions {
         page_status: Some(Rc::new(move |i, p: &Pages<u32>| {
             if p.selected_index == Some(1) && !flag.replace(true) {
-                policy_source.select(2);
+                policy_source.select_or_panic(2);
             }
             default_page_status(i, p)
         })),
@@ -567,7 +566,7 @@ fn observer_factory_lifecycle_and_policy_reentry_are_fifo() {
                 let source = source.clone();
                 let _ = ctx
                     .lifecycle()
-                    .do_on_resume(move || source.select(3))
+                    .do_on_resume(move || source.select_or_panic(3))
                     .detach();
             }
             ctx
@@ -580,11 +579,11 @@ fn observer_factory_lifecycle_and_policy_reentry_are_fifo() {
     let _sub = value.subscribe(move |p| {
         out.borrow_mut().push(p.selected_index);
         if p.selected_index == Some(3) {
-            source.select(0);
+            source.select_or_panic(0);
         }
     });
     seen.borrow_mut().clear();
-    nav.select(1);
+    nav.select_or_panic(1);
     assert_eq!(*seen.borrow(), [Some(1), Some(2), Some(3), Some(0)]);
     assert_eq!(value.get().selected_index, Some(0));
 }
@@ -607,7 +606,7 @@ fn process_death_restores_selection_keys_and_destroyed_page_state() {
         .register("counter", || vec![19])
         .unwrap();
     let key = value.get().items[0].key().to_owned();
-    nav.select(3);
+    nav.select_or_panic(3);
     let saved = parent.state_store().save().unwrap();
     assert_eq!(&saved["DefaultChildPages"][..4], b"DPG1");
     parent.lifecycle().destroy().unwrap();
@@ -624,7 +623,7 @@ fn process_death_restores_selection_keys_and_destroyed_page_state() {
     assert_eq!(value.get().selected_index, Some(3));
     assert!(value.get().items[0].instance().is_none());
     assert_eq!(value.get().items[0].key(), key);
-    nav.select(0);
+    nav.select_or_panic(0);
     assert_eq!(
         value.get().items[0]
             .instance()
@@ -634,7 +633,7 @@ fn process_death_restores_selection_keys_and_destroyed_page_state() {
             .unwrap(),
         Some(vec![19])
     );
-    nav.set_items(|mut items| {
+    nav.set_items_or_panic(|mut items| {
         items.push(Rc::new(4));
         items
     });
@@ -701,7 +700,7 @@ fn external_instances_retain_only_live_desired_scopes_and_transient_discards_the
         let old = value.get().items[0].instance().unwrap().instance_store();
         let neighbour = value.get().items[1].instance().unwrap().instance_store();
         let saved = parent.state_store().save().unwrap();
-        nav.select(3);
+        nav.select_or_panic(3);
         let far = value.get().items[3].instance().unwrap().instance_store();
         parent.lifecycle().destroy().unwrap();
         assert!(!far.is_destroyed().unwrap());
@@ -1120,7 +1119,7 @@ fn failed_child_state_save_leaves_selection_all_old_lifecycles_and_factories_unt
     assert_eq!(old.lifecycle().state(), LifecycleState::Resumed);
     assert!(!old.instance_store().is_destroyed().unwrap());
     old.state_store().unregister("fail").unwrap();
-    nav.select(3);
+    nav.select_or_panic(3);
     assert_eq!(value.get().selected_index, Some(3));
 }
 #[test]
@@ -1167,7 +1166,9 @@ fn factory_panic_cleans_prepared_scopes_and_source_can_retry() {
     )
     .unwrap();
     let before = value.get();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.select(3))).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.select_or_panic(3))).is_err()
+    );
     assert_eq!(value.get().selected_index, Some(0));
     assert_eq!(
         before.items[0].instance().unwrap().lifecycle().state(),
@@ -1177,7 +1178,7 @@ fn factory_panic_cleans_prepared_scopes_and_source_can_retry() {
         assert!(lifecycle.state().is_destroyed());
         assert!(instances.is_destroyed().unwrap());
     }
-    nav.select(3);
+    nav.select_or_panic(3);
     assert_eq!(value.get().selected_index, Some(3));
     assert_eq!(
         value.get().items[3].instance().unwrap().lifecycle().state(),
@@ -1243,9 +1244,11 @@ fn status_callback_panic_releases_constructor_input_and_navigation_remains_usabl
         |_, ctx| ctx,
     )
     .unwrap();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.select(1))).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.select_or_panic(1))).is_err()
+    );
     assert_eq!(value.get().selected_index, Some(0));
-    nav.select(1);
+    nav.select_or_panic(1);
     assert_eq!(value.get().selected_index, Some(1));
 }
 fn retry_after_lifecycle_panic(outgoing: bool) {
@@ -1291,11 +1294,13 @@ fn retry_after_lifecycle_panic(outgoing: bool) {
     )
     .unwrap();
     let old = value.get().items[0].clone();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.select(3))).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.select_or_panic(3))).is_err()
+    );
     assert_eq!(value.get().selected_index, Some(0));
     assert!(old.instance().unwrap().lifecycle().state().is_destroyed());
     assert!(captured.borrow()[0].is_destroyed().unwrap());
-    nav.select(0);
+    nav.select_or_panic(0);
     let retried = value.get().items[0].clone();
     assert!(!Rc::ptr_eq(
         old.instance().unwrap(),
@@ -1343,12 +1348,12 @@ fn successful_tombstones_keep_identity_after_a_later_failed_navigation() {
     )
     .unwrap();
     let key = value.get().items[0].key().to_owned();
-    nav.select(3);
+    nav.select_or_panic(3);
     let out = Rc::new(Cell::new(false));
     let done = out.clone();
     nav.select_with(10, move |r| done.set(r.is_err()));
     assert!(out.get());
-    nav.select(0);
+    nav.select_or_panic(0);
     assert_eq!(value.get().items[0].key(), key);
 }
 #[test]
@@ -1400,7 +1405,7 @@ fn save_captures_coherent_membership_selection_keys_counter_before_reentrant_pro
         .state_store()
         .register("navigate", move || {
             if flag.replace(false) {
-                source.clear();
+                source.clear_or_panic();
             }
             vec![3]
         })
@@ -1413,7 +1418,7 @@ fn save_captures_coherent_membership_selection_keys_counter_before_reentrant_pro
     assert_eq!(value.get().selected_index, Some(1));
     assert_eq!(value.get().items[0].key(), "child/0");
     assert_eq!(value.get().items[1].key(), "child/1");
-    nav.set_items(|mut items| {
+    nav.set_items_or_panic(|mut items| {
         items.push(Rc::new(2));
         items
     });
@@ -1558,7 +1563,7 @@ fn parent_bounds_each_live_status_and_destroy_ends_all_old_snapshot_handles() {
         );
     }
     assert_eq!(parent.back_handler().handler_count(), 0);
-    nav.clear();
+    nav.clear_or_panic();
     assert_eq!(value.get().items.len(), 4);
 }
 #[test]
@@ -1584,7 +1589,7 @@ fn outgoing_pause_stop_and_destroy_finish_before_new_selected_resume() {
     )
     .unwrap();
     log.borrow_mut().clear();
-    nav.select(3);
+    nav.select_or_panic(3);
     let log = log.borrow();
     let incoming = log
         .iter()
@@ -1614,7 +1619,7 @@ fn factory_navigation_during_initial_construction_is_queued_and_published_after_
         move |c, ctx| {
             count.set(count.get() + 1);
             if *c == 0 {
-                source.select(3);
+                source.select_or_panic(3);
             }
             ctx
         },
@@ -1641,7 +1646,7 @@ fn completion_and_observer_panics_drop_nested_events_and_navigation_can_retry() 
         let panic_flag = flag.clone();
         let _subscription = value.subscribe(move |p| {
             if observer_panics && p.selected_index == Some(1) && panic_flag.replace(false) {
-                source.select(2);
+                source.select_or_panic(2);
                 panic!("observer panic");
             }
         });
@@ -1651,7 +1656,7 @@ fn completion_and_observer_panics_drop_nested_events_and_navigation_can_retry() 
                 1,
                 move |_| {
                     if !observer_panics {
-                        source.select(2);
+                        source.select_or_panic(2);
                         panic!("completion panic")
                     }
                 }
@@ -1659,7 +1664,7 @@ fn completion_and_observer_panics_drop_nested_events_and_navigation_can_retry() 
             .is_err()
         );
         assert_eq!(value.get().selected_index, Some(1));
-        nav.select(0);
+        nav.select_or_panic(0);
         assert_eq!(value.get().selected_index, Some(0));
     }
 }
@@ -1724,16 +1729,16 @@ fn nested_mixed_routers_restore_through_pages_tombstone_and_process_death() {
     )
     .unwrap();
     let before = value.get().items[0].instance().unwrap().clone();
-    before.slot_nav.activate(99);
+    before.slot_nav.activate_or_panic(99);
     let key = value.get().items[0].key().to_owned();
-    nav.select(3);
+    nav.select_or_panic(3);
     assert!(before.context.lifecycle().state().is_destroyed());
     let saved = parent.state_store().save().unwrap();
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, None);
     let nav = PagesNavigation::new();
     let value = child_pages(&parent, &nav, Pages::default(), persistent(), build).unwrap();
-    nav.select(0);
+    nav.select_or_panic(0);
     let after = value.get().items[0].instance().unwrap().clone();
     assert_eq!(value.get().items[0].key(), key);
     assert_eq!(*after.slot.get().child.as_ref().unwrap().configuration, 99);
@@ -1782,7 +1787,7 @@ fn dropping_view_keeps_engine_alive_until_parent_end_without_rc_cycle() {
     );
     drop(component);
     drop(value);
-    nav.set_items(|_| vec![Rc::new(1)]);
+    nav.set_items_or_panic(|_| vec![Rc::new(1)]);
     assert!(weak.upgrade().is_some());
     parent.lifecycle().destroy().unwrap();
     drop(parent);

@@ -28,24 +28,12 @@ pub type PanelsEvent<MC, DC, EC = Infallible> =
 /// Implement `navigate_with` to inherit the standard helper policies.
 /// Generic callbacks use static dispatch; this trait is not object-safe.
 pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
-    /// Applies a transformer, panicking on transition errors.
-    #[deprecated(note = "use try_navigate or navigate_or_panic")]
-    #[track_caller]
-    fn navigate(&self, transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static) {
-        self.navigate_with(transformer, panic_completion)
-    }
     /// Completes per receiver after publication and state-change notification.
     fn navigate_with(
         &self,
         transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     );
-    /// Sets all three configurations, preserving the current mode.
-    #[deprecated(note = "use try_set_panels or set_panels_or_panic")]
-    #[track_caller]
-    fn set_panels(&self, main: MC, details: Option<DC>, extra: Option<EC>) {
-        self.set_panels_with(main, details, extra, panic_completion)
-    }
     /// Sets all three configurations, preserving the current mode. Reports each receiver's committed result.
     fn set_panels_with(
         &self,
@@ -67,12 +55,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             completion,
         )
     }
-    /// Sets Details and Extra independently.
-    #[deprecated(note = "use try_set_details_extra or set_details_extra_or_panic")]
-    #[track_caller]
-    fn set_details_extra(&self, details: Option<DC>, extra: Option<EC>) {
-        self.set_details_extra_with(details, extra, panic_completion)
-    }
     /// Sets Details and Extra independently. Reports each receiver's committed result.
     fn set_details_extra_with(
         &self,
@@ -91,12 +73,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             completion,
         )
     }
-    /// Sets or dismisses Extra.
-    #[deprecated(note = "use try_set_extra or set_extra_or_panic")]
-    #[track_caller]
-    fn set_extra(&self, extra: Option<EC>) {
-        self.set_extra_with(extra, panic_completion)
-    }
     /// Sets or dismisses Extra. Reports each receiver's committed result.
     fn set_extra_with(
         &self,
@@ -111,12 +87,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             },
             completion,
         )
-    }
-    /// Replaces Main, preserving Details and Extra.
-    #[deprecated(note = "use try_activate_main or activate_main_or_panic")]
-    #[track_caller]
-    fn activate_main(&self, main: MC) {
-        self.activate_main_with(main, panic_completion)
     }
     /// Replaces Main, preserving Details and Extra. Reports each receiver's committed result.
     fn activate_main_with(
@@ -133,12 +103,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             completion,
         )
     }
-    /// Replaces Details, preserving Extra.
-    #[deprecated(note = "use try_activate_details or activate_details_or_panic")]
-    #[track_caller]
-    fn activate_details(&self, details: DC) {
-        self.activate_details_with(details, panic_completion)
-    }
     /// Replaces Details, preserving Extra. Reports each receiver's committed result.
     fn activate_details_with(
         &self,
@@ -153,12 +117,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             },
             completion,
         )
-    }
-    /// Replaces Extra, preserving Details.
-    #[deprecated(note = "use try_activate_extra or activate_extra_or_panic")]
-    #[track_caller]
-    fn activate_extra(&self, extra: EC) {
-        self.activate_extra_with(extra, panic_completion)
     }
     /// Replaces Extra, preserving Details. Reports each receiver's committed result.
     fn activate_extra_with(
@@ -175,12 +133,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             completion,
         )
     }
-    /// Dismisses Details without dismissing Extra.
-    #[deprecated(note = "use try_dismiss_details or dismiss_details_or_panic")]
-    #[track_caller]
-    fn dismiss_details(&self) {
-        self.dismiss_details_with(panic_completion)
-    }
     /// Dismisses Details without dismissing Extra. Reports each receiver's committed result.
     fn dismiss_details_with(
         &self,
@@ -194,12 +146,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             completion,
         )
     }
-    /// Dismisses Extra without dismissing Details.
-    #[deprecated(note = "use try_dismiss_extra or dismiss_extra_or_panic")]
-    #[track_caller]
-    fn dismiss_extra(&self) {
-        self.dismiss_extra_with(panic_completion)
-    }
     /// Dismisses Extra without dismissing Details. Reports each receiver's committed result.
     fn dismiss_extra_with(
         &self,
@@ -212,12 +158,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             },
             completion,
         )
-    }
-    /// Dismisses Extra first, otherwise Details, in any mode.
-    #[deprecated(note = "use try_pop or pop_or_panic")]
-    #[track_caller]
-    fn pop(&self) {
-        self.pop_with(panic_completion)
     }
     /// Dismisses Extra first, otherwise Details, in any mode. Reports each receiver's committed result.
     fn pop_with(
@@ -233,12 +173,6 @@ pub trait PanelsNavigator<MC: 'static, DC: 'static, EC: 'static = Infallible> {
             },
             completion,
         )
-    }
-    /// Changes lifecycle mode, retaining child identities.
-    #[deprecated(note = "use try_set_mode or set_mode_or_panic")]
-    #[track_caller]
-    fn set_mode(&self, mode: ChildPanelsMode) {
-        self.set_mode_with(mode, panic_completion)
     }
     /// Changes lifecycle mode, retaining child identities. Reports each receiver's committed result.
     fn set_mode_with(
@@ -458,15 +392,6 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
             source: SimpleNavigation::new(),
         }
     }
-    /// Applies a transformer, panicking on transition errors.
-    #[deprecated(note = "use try_navigate or navigate_or_panic")]
-    #[track_caller]
-    pub fn navigate(
-        &self,
-        transformer: impl Fn(Panels<MC, DC, EC>) -> Panels<MC, DC, EC> + 'static,
-    ) {
-        PanelsNavigator::navigate(self, transformer)
-    }
     /// Completes per receiver after publication and state-change notification.
     pub fn navigate_with(
         &self,
@@ -474,12 +399,6 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     ) {
         PanelsNavigator::navigate_with(self, transformer, completion)
-    }
-    /// Sets all three configurations, preserving the current mode.
-    #[deprecated(note = "use try_set_panels or set_panels_or_panic")]
-    #[track_caller]
-    pub fn set_panels(&self, main: MC, details: Option<DC>, extra: Option<EC>) {
-        PanelsNavigator::set_panels(self, main, details, extra)
     }
     /// Sets all three configurations, preserving the current mode. Reports each receiver's committed result.
     pub fn set_panels_with(
@@ -491,12 +410,6 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
     ) {
         PanelsNavigator::set_panels_with(self, main, details, extra, completion)
     }
-    /// Sets Details and Extra independently.
-    #[deprecated(note = "use try_set_details_extra or set_details_extra_or_panic")]
-    #[track_caller]
-    pub fn set_details_extra(&self, details: Option<DC>, extra: Option<EC>) {
-        PanelsNavigator::set_details_extra(self, details, extra)
-    }
     /// Sets Details and Extra independently. Reports each receiver's committed result.
     pub fn set_details_extra_with(
         &self,
@@ -506,12 +419,6 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
     ) {
         PanelsNavigator::set_details_extra_with(self, details, extra, completion)
     }
-    /// Sets or dismisses Extra.
-    #[deprecated(note = "use try_set_extra or set_extra_or_panic")]
-    #[track_caller]
-    pub fn set_extra(&self, extra: Option<EC>) {
-        PanelsNavigator::set_extra(self, extra)
-    }
     /// Sets or dismisses Extra. Reports each receiver's committed result.
     pub fn set_extra_with(
         &self,
@@ -519,12 +426,6 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     ) {
         PanelsNavigator::set_extra_with(self, extra, completion)
-    }
-    /// Replaces Main, preserving Details and Extra.
-    #[deprecated(note = "use try_activate_main or activate_main_or_panic")]
-    #[track_caller]
-    pub fn activate_main(&self, main: MC) {
-        PanelsNavigator::activate_main(self, main)
     }
     /// Replaces Main, preserving Details and Extra. Reports each receiver's committed result.
     pub fn activate_main_with(
@@ -534,12 +435,6 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
     ) {
         PanelsNavigator::activate_main_with(self, main, completion)
     }
-    /// Replaces Details, preserving Extra.
-    #[deprecated(note = "use try_activate_details or activate_details_or_panic")]
-    #[track_caller]
-    pub fn activate_details(&self, details: DC) {
-        PanelsNavigator::activate_details(self, details)
-    }
     /// Replaces Details, preserving Extra. Reports each receiver's committed result.
     pub fn activate_details_with(
         &self,
@@ -547,12 +442,6 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     ) {
         PanelsNavigator::activate_details_with(self, details, completion)
-    }
-    /// Replaces Extra, preserving Details.
-    #[deprecated(note = "use try_activate_extra or activate_extra_or_panic")]
-    #[track_caller]
-    pub fn activate_extra(&self, extra: EC) {
-        PanelsNavigator::activate_extra(self, extra)
     }
     /// Replaces Extra, preserving Details. Reports each receiver's committed result.
     pub fn activate_extra_with(
@@ -562,24 +451,12 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
     ) {
         PanelsNavigator::activate_extra_with(self, extra, completion)
     }
-    /// Dismisses Details without dismissing Extra.
-    #[deprecated(note = "use try_dismiss_details or dismiss_details_or_panic")]
-    #[track_caller]
-    pub fn dismiss_details(&self) {
-        PanelsNavigator::dismiss_details(self)
-    }
     /// Dismisses Details without dismissing Extra. Reports each receiver's committed result.
     pub fn dismiss_details_with(
         &self,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     ) {
         PanelsNavigator::dismiss_details_with(self, completion)
-    }
-    /// Dismisses Extra without dismissing Details.
-    #[deprecated(note = "use try_dismiss_extra or dismiss_extra_or_panic")]
-    #[track_caller]
-    pub fn dismiss_extra(&self) {
-        PanelsNavigator::dismiss_extra(self)
     }
     /// Dismisses Extra without dismissing Details. Reports each receiver's committed result.
     pub fn dismiss_extra_with(
@@ -588,24 +465,12 @@ impl<MC: 'static, DC: 'static, EC: 'static> PanelsNavigation<MC, DC, EC> {
     ) {
         PanelsNavigator::dismiss_extra_with(self, completion)
     }
-    /// Dismisses Extra first, otherwise Details, in any mode.
-    #[deprecated(note = "use try_pop or pop_or_panic")]
-    #[track_caller]
-    pub fn pop(&self) {
-        PanelsNavigator::pop(self)
-    }
     /// Dismisses Extra first, otherwise Details, in any mode. Reports each receiver's committed result.
     pub fn pop_with(
         &self,
         completion: impl Fn(Result<NavigationResult<MC, DC, EC>, NavigationError>) + 'static,
     ) {
         PanelsNavigator::pop_with(self, completion)
-    }
-    /// Changes lifecycle mode, retaining child identities.
-    #[deprecated(note = "use try_set_mode or set_mode_or_panic")]
-    #[track_caller]
-    pub fn set_mode(&self, mode: ChildPanelsMode) {
-        PanelsNavigator::set_mode(self, mode)
     }
     /// Changes lifecycle mode, retaining child identities. Reports each receiver's committed result.
     pub fn set_mode_with(

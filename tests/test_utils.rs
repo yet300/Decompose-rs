@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::{ComponentContext, LifecycleState, TestComponentContext};
 use std::{cell::Cell, rc::Rc};
 
@@ -101,7 +100,7 @@ fn memory_navigation_survives_configuration_change_and_durable_save_omits_it() {
         |_, _| (),
     )
     .unwrap();
-    source.push(2);
+    source.push_or_panic(2);
     let keys: Vec<_> = first.get().items().map(|child| child.key.clone()).collect();
     assert!(context.save_bytes().unwrap().is_empty());
     let recreated = context.recreate(true).unwrap();

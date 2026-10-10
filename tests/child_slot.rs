@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy API behavior remains covered during migration.
 use decompose_rs::router::slot::*;
 use decompose_rs::*;
 use std::{
@@ -31,16 +30,16 @@ fn empty_activate_equal_replace_and_dismiss_preserve_scope_contract() {
     .unwrap();
     assert!(slot.get().child.is_none());
     assert_eq!(calls.get(), 0);
-    navigation.activate(1);
+    navigation.activate_or_panic(1);
     let first = slot.get().child.as_ref().unwrap().clone();
     assert_eq!(first.instance.lifecycle().state(), LifecycleState::Resumed);
-    navigation.activate(1);
+    navigation.activate_or_panic(1);
     assert!(Rc::ptr_eq(
         &first.instance,
         &slot.get().child.as_ref().unwrap().instance
     ));
     assert_eq!(calls.get(), 1);
-    navigation.activate(2);
+    navigation.activate_or_panic(2);
     assert_eq!(
         first.instance.lifecycle().state(),
         LifecycleState::Destroyed
@@ -48,13 +47,13 @@ fn empty_activate_equal_replace_and_dismiss_preserve_scope_contract() {
     assert!(first.instance.instance_store().is_destroyed().unwrap());
     let second = slot.get().child.as_ref().unwrap().clone();
     assert_ne!(first.key, second.key);
-    navigation.dismiss();
+    navigation.dismiss_or_panic();
     assert!(slot.get().child.is_none());
     assert_eq!(
         second.instance.lifecycle().state(),
         LifecycleState::Destroyed
     );
-    navigation.dismiss();
+    navigation.dismiss_or_panic();
     assert_eq!(calls.get(), 2);
 }
 
@@ -226,12 +225,12 @@ fn saving_dismissal_overwrites_populated_membership_and_preserves_counter() {
     let slot = child_slot(&parent, &nav, Some(1), persistent_options(), |_, ctx| ctx).unwrap();
     let old_key = slot.get().child.as_ref().unwrap().key.clone();
     assert!(parent.state_store().save().unwrap()["DefaultChildSlot"].len() > 16);
-    nav.dismiss();
+    nav.dismiss_or_panic();
     let saved = parent.state_store().save().unwrap();
     let parent = restored_root(saved, None);
     let slot = child_slot(&parent, &nav, Some(2), persistent_options(), |_, ctx| ctx).unwrap();
     assert!(slot.get().child.is_none());
-    nav.activate(3);
+    nav.activate_or_panic(3);
     assert_ne!(old_key, slot.get().child.as_ref().unwrap().key);
 }
 
@@ -300,7 +299,7 @@ fn panicking_navigation_queued_by_initial_factory_rolls_back_constructor() {
             SlotOptions::default(),
             move |config, ctx| {
                 if *config == 1 {
-                    source.activate(2);
+                    source.activate_or_panic(2);
                 } else {
                     panic!("queued factory failure");
                 }
@@ -337,7 +336,7 @@ fn dropping_views_keeps_navigation_alive_until_parent_destroy_without_a_cycle() 
     )
     .unwrap();
     drop(stack);
-    nav.activate(2);
+    nav.activate_or_panic(2);
     assert!(weak.upgrade().is_some());
     root.lifecycle().destroy().unwrap();
     assert!(weak.upgrade().is_none());
@@ -361,7 +360,7 @@ fn saves_use_one_membership_snapshot_even_when_a_provider_navigates() {
             ctx.state_store()
                 .register("state", move || {
                     if once.replace(false) {
-                        nav.activate(2);
+                        nav.activate_or_panic(2);
                     }
                     vec![11]
                 })
@@ -606,8 +605,8 @@ fn no_op_navigation_does_not_stop_and_resume_the_active_component() {
     )
     .unwrap();
     log.borrow_mut().clear();
-    nav.activate(1);
-    nav.navigate(|old| old);
+    nav.activate_or_panic(1);
+    nav.navigate_or_panic(|old| old);
     assert!(log.borrow().is_empty());
     assert_eq!(
         stack
@@ -635,7 +634,7 @@ fn parent_lifecycle_bounds_populated_and_later_activated_children() {
     )
     .unwrap();
     parent.lifecycle().move_to(LifecycleState::Created).unwrap();
-    nav.activate(1);
+    nav.activate_or_panic(1);
     let child = slot.get().child.as_ref().unwrap().clone();
     assert_eq!(child.instance.lifecycle().state(), LifecycleState::Created);
     parent.lifecycle().move_to(LifecycleState::Started).unwrap();
@@ -648,7 +647,7 @@ fn parent_lifecycle_bounds_populated_and_later_activated_children() {
         LifecycleState::Destroyed
     );
     assert_eq!(parent.back_handler().handler_count(), 0);
-    nav.activate(2);
+    nav.activate_or_panic(2);
     assert!(Rc::ptr_eq(
         &child.instance,
         &slot.get().child.as_ref().unwrap().instance
@@ -669,18 +668,18 @@ fn all_reentrant_origins_finish_current_publication_before_fifo_commands() {
         SlotOptions::default(),
         move |config: &u32, ctx| {
             if *config == 1 {
-                source.activate(2);
+                source.activate_or_panic(2);
                 let nav = source.clone();
                 let _ = ctx
                     .lifecycle()
-                    .do_on_resume(move || nav.activate(3))
+                    .do_on_resume(move || nav.activate_or_panic(3))
                     .detach();
             }
             if *config == 0 {
                 let nav = source.clone();
                 let _ = ctx
                     .lifecycle()
-                    .do_on_pause(move || nav.activate(4))
+                    .do_on_pause(move || nav.activate_or_panic(4))
                     .detach();
             }
             ctx
@@ -692,13 +691,13 @@ fn all_reentrant_origins_finish_current_publication_before_fifo_commands() {
         let config = state.child.as_ref().map(|c| *c.configuration);
         events.borrow_mut().push(config);
         if config == Some(1) {
-            source.activate(5);
+            source.activate_or_panic(5);
         }
     });
     let source = nav.clone();
     nav.activate_with(1, move |result| {
         assert_eq!(*result.unwrap().new_configuration.unwrap(), 1);
-        source.activate(6);
+        source.activate_or_panic(6);
     });
     assert_eq!(
         *log.borrow(),
@@ -730,14 +729,17 @@ fn factory_panic_leaves_old_membership_and_releases_prepared_scope() {
         move |config: &u32, ctx| {
             if *config == 2 {
                 *peer.borrow_mut() = Some((ctx.lifecycle(), ctx.instance_store()));
-                source.activate(3);
+                source.activate_or_panic(3);
                 panic!("factory failed");
             }
             ctx
         },
     )
     .unwrap();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.activate(2))).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.activate_or_panic(2)))
+            .is_err()
+    );
     let captured = captured.borrow();
     let (lifecycle, instances) = captured.as_ref().unwrap();
     assert!(lifecycle.state().is_destroyed());
@@ -753,7 +755,7 @@ fn factory_panic_leaves_old_membership_and_releases_prepared_scope() {
             .state(),
         LifecycleState::Resumed
     );
-    nav.activate(4);
+    nav.activate_or_panic(4);
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 4);
 }
 
@@ -767,7 +769,7 @@ fn observer_and_completion_panics_drop_nested_work_and_source_recovers() {
         let source = nav.clone();
         let _subscription = slot.subscribe(move |state| {
             if observer_panic && *state.child.as_ref().unwrap().configuration == 2 {
-                source.activate(3);
+                source.activate_or_panic(3);
                 panic!("observer failed");
             }
         });
@@ -776,14 +778,14 @@ fn observer_and_completion_panics_drop_nested_work_and_source_recovers() {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.activate_with(
                 2,
                 move |_| {
-                    source.activate(4);
+                    source.activate_or_panic(4);
                     panic!("completion failed");
                 }
             )))
             .is_err()
         );
         assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 2);
-        nav.activate(5);
+        nav.activate_or_panic(5);
         assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 5);
     }
 }
@@ -867,7 +869,7 @@ fn back_navigation_waits_for_dispatch_and_panic_discards_deferred_events() {
     parent
         .back_handler()
         .register(2, true, move |_, _| {
-            source.activate(2);
+            source.activate_or_panic(2);
             assert_eq!(*view.get().child.as_ref().unwrap().configuration, 1);
             if peer.replace(false) {
                 panic!("back failed");
@@ -883,7 +885,7 @@ fn back_navigation_waits_for_dispatch_and_panic_discards_deferred_events() {
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 1);
     assert!(parent.back_handler().back());
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 2);
-    nav.dismiss();
+    nav.dismiss_or_panic();
     assert!(slot.get().child.is_none());
 }
 
@@ -908,7 +910,7 @@ fn observer_triggered_back_sees_published_configuration_then_dismisses() {
             assert!(back.back());
         }
     });
-    nav.activate(1);
+    nav.activate_or_panic(1);
     assert!(slot.get().child.is_none());
 }
 
@@ -951,8 +953,8 @@ fn stack_slot_siblings_coexist_and_conflicts_are_rejected_before_factories() {
             DecomposeError::DuplicateKey { .. }
         ))
     ));
-    slot_nav.dismiss();
-    stack_nav.push(2);
+    slot_nav.dismiss_or_panic();
+    stack_nav.push_or_panic(2);
     assert!(slot.get().child.is_none());
     assert_eq!(*stack.get().active.configuration, 2);
 }
@@ -970,7 +972,7 @@ fn transient_recreation_and_empty_restore_discard_old_retained_scopes() {
         };
         let slot = child_slot(&parent, &nav, None, options, |_, ctx| ctx).unwrap();
         let saved = parent.state_store().save().unwrap();
-        nav.activate(1);
+        nav.activate_or_panic(1);
         let old = slot.get().child.as_ref().unwrap().instance.instance_store();
         parent.lifecycle().destroy().unwrap();
         assert!(!old.is_destroyed().unwrap());
@@ -1223,7 +1225,7 @@ fn lifecycle_panic_releases_prepared_scope_and_processing_recovers() {
                 let _ = ctx
                     .lifecycle()
                     .do_on_resume(move || {
-                        nav.activate(3);
+                        nav.activate_or_panic(3);
                         panic!("resume failed");
                     })
                     .detach();
@@ -1233,7 +1235,10 @@ fn lifecycle_panic_releases_prepared_scope_and_processing_recovers() {
     )
     .unwrap();
     let old = slot.get().child.as_ref().unwrap().clone();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.activate(2))).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| nav.activate_or_panic(2)))
+            .is_err()
+    );
     let captured = captured.borrow();
     let (lifecycle, instances) = captured.as_ref().unwrap();
     assert!(lifecycle.state().is_destroyed());
@@ -1241,7 +1246,7 @@ fn lifecycle_panic_releases_prepared_scope_and_processing_recovers() {
     // Lifecycle callback effects preceding the panic cannot be reversed.
     assert!(old.instance.lifecycle().state().is_destroyed());
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 1);
-    nav.activate(4);
+    nav.activate_or_panic(4);
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 4);
     assert_eq!(
         slot.get()
@@ -1262,7 +1267,7 @@ fn restoring_earlier_populated_membership_does_not_reuse_discarded_retention() {
     let nav = SlotNavigation::new();
     let slot = child_slot(&parent, &nav, Some(1), persistent_options(), |_, ctx| ctx).unwrap();
     let saved = parent.state_store().save().unwrap();
-    nav.activate(2);
+    nav.activate_or_panic(2);
     let removed = slot.get().child.as_ref().unwrap().instance.instance_store();
     parent.lifecycle().destroy().unwrap();
     let parent = restored_root(saved, Some(instances));
@@ -1270,7 +1275,7 @@ fn restoring_earlier_populated_membership_does_not_reuse_discarded_retention() {
     let slot = child_slot(&parent, &nav, Some(99), persistent_options(), |_, ctx| ctx).unwrap();
     assert!(removed.is_destroyed().unwrap());
     assert_eq!(*slot.get().child.as_ref().unwrap().configuration, 1);
-    nav.activate(3);
+    nav.activate_or_panic(3);
     assert!(!removed.ptr_eq(&slot.get().child.as_ref().unwrap().instance.instance_store()));
 }
 
@@ -1359,7 +1364,10 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
     .unwrap();
     let old = slot.get().child.as_ref().unwrap().clone();
     assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| navigation.activate(2))).is_err()
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || navigation.activate_or_panic(2)
+        ))
+        .is_err()
     );
     assert!(old.instance.lifecycle().state().is_destroyed());
     assert!(prepared.borrow().as_ref().unwrap().is_destroyed().unwrap());
@@ -1380,7 +1388,7 @@ fn retry_old_configuration_after_lifecycle_panic(outgoing_destroy: bool) {
     assert_eq!(calls.get(), 3);
     assert!(old.instance.instance_store().is_destroyed().unwrap());
     assert!(!retried.instance.instance_store().is_destroyed().unwrap());
-    navigation.activate(1);
+    navigation.activate_or_panic(1);
     assert!(Rc::ptr_eq(
         &retried.instance,
         &slot.get().child.as_ref().unwrap().instance

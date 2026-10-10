@@ -418,27 +418,23 @@ fn provider_captures_drop_outside_store_borrows() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn legacy_helpers_keep_custom_navigate_overrides() {
+fn custom_helpers_use_navigate_with_override() {
     use decompose_rs::router::stack::{NavigationResult, StackNavigator};
     use std::cell::Cell;
     struct Custom(Cell<usize>);
     impl StackNavigator<u8> for Custom {
-        fn navigate(&self, _: impl Fn(Vec<Rc<u8>>) -> Vec<Rc<u8>> + 'static) {
-            self.0.set(self.0.get() + 1);
-        }
         fn navigate_with(
             &self,
             _: impl Fn(Vec<Rc<u8>>) -> Vec<Rc<u8>> + 'static,
             _: impl Fn(Result<NavigationResult<u8>, NavigationError>) + 'static,
         ) {
-            panic!("legacy helper bypassed custom navigate override");
+            self.0.set(self.0.get() + 1);
         }
     }
     let navigation = Custom(Cell::new(0));
-    navigation.push(1);
-    navigation.pop();
-    navigation.replace_all(vec![2]);
+    navigation.push_or_panic(1);
+    navigation.pop_or_panic();
+    navigation.replace_all_or_panic(vec![2]);
     assert_eq!(navigation.0.get(), 3);
 }
 

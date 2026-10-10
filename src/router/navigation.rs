@@ -217,51 +217,51 @@ mod tests {
     #[test]
     fn push_pop_and_clamped_pop_to_preserve_the_root() {
         let (navigation, stack, _token) = connected(vec![1]);
-        navigation.pop();
+        navigation.pop_or_panic();
         assert_eq!(contents(&stack), [1]);
-        navigation.push(2);
-        navigation.push(3);
+        navigation.push_or_panic(2);
+        navigation.push_or_panic(3);
         assert_eq!(contents(&stack), [1, 2, 3]);
-        navigation.pop_to(usize::MAX);
+        navigation.pop_to_or_panic(usize::MAX);
         assert_eq!(contents(&stack), [1, 2, 3]);
-        navigation.pop();
+        navigation.pop_or_panic();
         assert_eq!(contents(&stack), [1, 2]);
-        navigation.pop_to(0);
+        navigation.pop_to_or_panic(0);
         assert_eq!(contents(&stack), [1]);
-        navigation.push(4);
-        navigation.pop_to_first();
+        navigation.push_or_panic(4);
+        navigation.pop_to_first_or_panic();
         assert_eq!(contents(&stack), [1]);
     }
     #[test]
     fn pop_while_stops_at_first_nonmatching_child_and_never_removes_root() {
         let (navigation, stack, _token) = connected(vec![1, 2, 3, 4]);
-        navigation.pop_while(|c| *c > 2);
+        navigation.pop_while_or_panic(|c| *c > 2);
         assert_eq!(contents(&stack), [1, 2]);
-        navigation.pop_while(|_| true);
+        navigation.pop_while_or_panic(|_| true);
         assert_eq!(contents(&stack), [1]);
     }
     #[test]
     fn replace_operations_and_kind_selection_apply_the_expected_order() {
         let (navigation, stack, _token) = connected(vec![1, 2, 3]);
-        navigation.replace_current(4);
+        navigation.replace_current_or_panic(4);
         assert_eq!(contents(&stack), [1, 2, 4]);
-        navigation.replace_all(vec![1, 2, 3, 4]);
+        navigation.replace_all_or_panic(vec![1, 2, 3, 4]);
         assert_eq!(contents(&stack), [1, 2, 3, 4]);
-        navigation.bring_to_front_by(5, |c| *c % 2);
+        navigation.bring_to_front_by_or_panic(5, |c| *c % 2);
         assert_eq!(contents(&stack), [2, 4, 5]);
-        navigation.replace_all(vec![]);
+        navigation.replace_all_or_panic(vec![]);
         assert!(contents(&stack).is_empty());
     }
     #[test]
     fn push_new_checks_only_top_and_push_to_front_removes_last_match() {
         let (navigation, stack, _token) = connected(vec![1, 2, 1, 3]);
         let original = stack.borrow()[0].clone();
-        navigation.push_new(3);
+        navigation.push_new_or_panic(3);
         assert_eq!(contents(&stack), [1, 2, 1, 3]);
-        navigation.push_to_front(1);
+        navigation.push_to_front_or_panic(1);
         assert_eq!(contents(&stack), [1, 2, 3, 1]);
         assert!(Rc::ptr_eq(&original, &stack.borrow()[0]));
-        navigation.push_new(2);
+        navigation.push_new_or_panic(2);
         assert_eq!(contents(&stack), [1, 2, 3, 1, 2]);
     }
 
@@ -275,7 +275,7 @@ mod tests {
             let value = *(event.transformer)(vec![])[0];
             output.borrow_mut().push((1, value));
             if value == 1 {
-                nested.navigate(|_| vec![Rc::new(2)]);
+                nested.navigate_or_panic(|_| vec![Rc::new(2)]);
             }
         });
         let output = seen.clone();
@@ -284,7 +284,7 @@ mod tests {
                 .borrow_mut()
                 .push((2, *(event.transformer)(vec![])[0]));
         });
-        navigation.navigate(|_| vec![Rc::new(1)]);
+        navigation.navigate_or_panic(|_| vec![Rc::new(1)]);
         assert_eq!(*seen.borrow(), [(1, 1), (2, 1), (1, 2), (2, 2)]);
     }
 
@@ -294,7 +294,7 @@ mod tests {
         let nested = navigation.clone();
         let _first = navigation.subscribe(move |event| {
             if *(event.transformer)(vec![])[0] == 1 {
-                nested.navigate(|_| vec![Rc::new(2)]);
+                nested.navigate_or_panic(|_| vec![Rc::new(2)]);
                 panic!("observer panic");
             }
         });
@@ -304,11 +304,11 @@ mod tests {
             .subscribe(move |event| output.borrow_mut().push(*(event.transformer)(vec![])[0]));
         assert!(
             catch_unwind(AssertUnwindSafe(
-                || navigation.navigate(|_| vec![Rc::new(1)])
+                || navigation.navigate_or_panic(|_| vec![Rc::new(1)])
             ))
             .is_err()
         );
-        navigation.navigate(|_| vec![Rc::new(3)]);
+        navigation.navigate_or_panic(|_| vec![Rc::new(3)]);
         assert_eq!(*seen.borrow(), [3]);
     }
 
@@ -321,7 +321,7 @@ mod tests {
         let count = Rc::new(Cell::new(0));
         let output = count.clone();
         *pending.borrow_mut() = Some(navigation.subscribe(move |_| output.set(output.get() + 1)));
-        navigation.navigate(|x| x);
+        navigation.navigate_or_panic(|x| x);
         assert_eq!(count.get(), 0);
     }
 
@@ -376,12 +376,12 @@ mod tests {
                 *token_slot.borrow_mut() = Some(source.subscribe(move |event| {
                     output.borrow_mut().push(*(event.transformer)(vec![])[0])
                 }));
-                source.push(2);
+                source.push_or_panic(2);
             }
         });
-        navigation.push(1);
+        navigation.push_or_panic(1);
         assert_eq!(*seen.borrow(), [2]);
-        navigation.push(3);
+        navigation.push_or_panic(3);
         assert_eq!(*seen.borrow(), [2, 3]);
     }
     #[test]
@@ -408,7 +408,9 @@ mod tests {
         let navigation = StackNavigation::<u8>::new();
         let _token =
             navigation.subscribe(|event| (event.completion)(Err(NavigationError::EmptyStack)));
-        assert!(catch_unwind(AssertUnwindSafe(|| navigation.navigate(|_| vec![]))).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| navigation.navigate_or_panic(|_| vec![]))).is_err()
+        );
         let error = Rc::new(RefCell::new(None));
         let output = error.clone();
         navigation.navigate_with(

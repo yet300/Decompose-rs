@@ -1,4 +1,3 @@
-#![allow(deprecated)] // Legacy context interoperability; see rust_api.rs for opaque stores.
 use decompose_rs::router::children::{
     ChildItem, ChildNavState, ChildStatus, ChildrenOptions, NavState, NavStateCodec,
     SimpleNavigation, children,
