@@ -1,4 +1,5 @@
 //! Runtime-independent component navigation.
+pub mod children;
 mod engine;
 pub mod items;
 mod navigation;

@@ -3,16 +3,16 @@
 Independent Rust port of [Ark Ivanov’s Decompose](https://github.com/arkivanov/Decompose),
 implemented on top of [Essenty-rs](https://github.com/yet300/Essenty).
 
-**Current scope: ComponentContext, ChildStack, ChildSlot, ChildPages, ChildPanels and ChildItems.** The port includes observable
+**Current scope: ComponentContext, ChildStack, ChildSlot, ChildPages, ChildPanels, ChildItems and Generic Navigation.** The port includes observable
 values, navigation operations, child lifecycle management, Back routing and
 configuration/state restoration. ChildSlot represents zero-or-one children and
 supports activation, replacement and dismissal. ChildPages keeps page identities and
 saved state while creating or destroying instances according to a lifecycle policy.
 ChildPanels manages typed Main/Details/Extra components in Single, Dual or Triple mode.
 ChildItems manages a unique list with per-configuration lifecycle targets and
-explicit lazy component creation.
-Other navigation families and platform/UI
-integrations are outside this delivery. Behavior is checked against pinned
+explicit lazy component creation. Generic Navigation lets consumers define custom
+state, typed events, child lifecycle targets and an observable result.
+Platform/UI integrations are outside this delivery. Behavior is checked against pinned
 Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`, not an unspecified
 latest release. See `NOTICE` for attribution.
 
@@ -57,6 +57,8 @@ Run `cargo run --example child_panels` for distinct role types, mode transitions
 Single-only automatic Back and restored mode/child state.
 Run `cargo run --example child_items` for lazy activation, viewport lifecycle
 targets, deactivation/recreation and restoration of inactive child state.
+Run `cargo run --example generic_navigation` for a custom empty-capable model,
+typed events, metadata, lazy child state, conditional Back and restoration.
 
 ## Rust API and behavior
 
@@ -313,6 +315,79 @@ rejected before user decode/factories; decoded count/uniqueness is checked befor
 factories. Transient Items skips child providers during parent saves and resets
 on recreation. Existing DST1, DSL1, DPG1 and DPN1 bytes remain compatible.
 
+## Generic Navigation
+
+`router::children` exposes `children`, `NavState<C>`, `ChildNavState<C>`,
+`ChildStatus`, `ChildItem<C, T>`, `NavigationSource<E>`, `SimpleNavigation<E>`,
+`ChildrenOptions<E, N>`, `NavigationResult<N>` and `NavStateCodec<N>`.
+It supports custom navigation models, including an empty stack or several active
+components. This follows the [upstream Generic Navigation API](https://arkivanov.github.io/Decompose/navigation/children/overview/).
+
+Implement `NavState::children()` on an immutable Clone whole-state, or use
+`Vec<ChildNavState<C>>` directly. Each descriptor contains an Rc configuration
+and Created, Started, Resumed or Destroyed status. Configurations require Eq,
+without Clone, Hash or Ord. Destroyed entries retain identity/state and own no
+live component. A later live status creates a fresh component under the same key.
+Equal live configurations retain the component. A fresh factory uses current
+descriptor data, including updated payload fields ignored by Eq. Inactive records
+use the current descriptor handle. Removing the descriptor discards its saved
+state and identity. Duplicates require
+explicit `allow_duplicates`; matching then follows equal occurrence.
+
+`children` accepts a context, event source, lazy initial-state factory, options,
+a `Fn(N, &E) -> N` transformer, a `Fn(&N, Vec<ChildItem<C, T>>) -> S` mapper and
+a child factory. It returns `Value<S>`. The initial factory is skipped when
+restoration supplies a state, including an empty one. ChildItem exposes the
+same live/destroyed records as Pages: `pages::PageChild` and `pages::PageStatus`
+remain valid aliases of the neutral types.
+
+`SimpleNavigation::navigate(event)` broadcasts a typed event to each connected
+receiver; `navigate_rc` accepts an existing shared handle. Event, component and
+result payloads need no Clone. A custom object-safe `NavigationSource<E>`
+implements `subscribe(Rc<dyn Fn(Rc<E>)>) -> Subscription`, using the public
+subscription cancellation guard. SimpleNavigation has no replay; events without
+subscribers are discarded. Nested broadcasts finish the current broadcast before
+delivering queued events. Subscription Drop cancels; detach leaves the observer
+registered. Construction subscribes before initial/factory callbacks and buffers
+initialization events until the receiver is ready.
+
+Optional `on_state_changed` runs initially with old=None after provider/Back
+registration and later after observable publication, before explicit event
+completion. `on_event_complete` receives the original event and
+`Result<NavigationResult<N>, NavigationError>` once per receiver. Rejected
+transitions report errors without replacing committed state. Back has no typed
+event completion. With no completion hook, a rejected explicit event panics;
+install the hook to handle typed errors. Callback panics propagate and queued work is abandoned;
+successful callback effects and committed state remain.
+
+Navigation teardown completes its own cleanup before propagating a cancellation
+panic. Essenty lifecycle dispatch can then stop before calling other independent
+listeners, including a default root's attached InstanceKeeper cleanup. Retained
+keeper lifetime still belongs to its parent owner; callers catching such a panic
+must finish cleanup of any owner whose lifecycle listener was skipped.
+
+`back_transformer` derives an optional zero-argument action from each committed
+state. The action is cached; None disables automatic Back. Effective Started/
+Resumed child handlers take precedence. Predictive cancellation preserves
+navigation; invoked Back shares the deferred receiver queue.
+A rejected user Back action panics with the navigation error and produces no
+typed event completion.
+
+`NavStateCodec::new` supplies whole-state encode/decode callbacks returning
+`Result<Option<_>, String>`. Encode None skips persistence and child provider
+queries. Decode None explicitly
+declines valid saved input and runs the initial factory; decoder errors propagate.
+DCH1 stores the opaque caller payload plus allocation counter, ordered stable
+keys and nested states for all children. Structural validation precedes decode,
+then child count/uniqueness are checked before factories. The codec must preserve
+configuration identity and order; restored lifecycle statuses may differ.
+With no codec, navigation is transient and parent saves skip its child providers.
+All five existing family save formats remain compatible.
+
+Run `cargo run --example generic_navigation` for a custom gallery with non-Clone
+events, metadata, live/destroyed children, state-preserving recreation, conditional
+Back down to empty and whole-state restoration.
+
 ## State and retained instances
 
 `StackOptions::codec` defaults to None for transient navigation. Supply a
@@ -350,8 +425,9 @@ separate context, value and stack crates in this scope.
 | `state`, `framing` | Essenty state adapter and child-state encoding |
 | public `value` | Observable immutable snapshots and subscription guards |
 | public `router::stack`, `router::slot`, `router::pages`, `router::panels`, `router::items` | Model APIs, operations, snapshots and codecs |
+| public `router::children` | Custom models, typed event sources, neutral child records and whole-state codec |
 | private router machinery | Shared scope ownership, transactions and queued events |
-| private model state modules | DST1 stack / DSL1 slot / DPG1 pages / DPN1 panels / DPI1 items envelopes |
+| private model state modules | DST1 stack / DSL1 slot / DPG1 pages / DPN1 panels / DPI1 items / DCH1 custom envelopes |
 
 Dependencies remain the four published `essenty-* 0.1.0` primitives and
 `thiserror`. No Essenty source changes, path/git overrides or additional runtime
@@ -374,6 +450,9 @@ describe heterogeneous role types and lifecycle modes.
 [ADR-0009](docs/adr/0009-lazy-child-items.md) and the
 [ChildItems design](docs/superpowers/specs/2026-10-09-child-items-design.md)
 describe configuration-keyed activity and receiver-local lazy activation.
+[ADR-0010](docs/adr/0010-public-generic-navigation.md) and the
+[Generic Navigation design](docs/superpowers/specs/2026-10-09-generic-navigation-design.md)
+describe custom event/state adapters over the shared engine.
 
 ## Verification (Rust 1.96.0)
 
@@ -388,12 +467,13 @@ cargo run --example child_slot
 cargo run --example child_pages
 cargo run --example child_panels
 cargo run --example child_items
+cargo run --example generic_navigation
 ```
 
-Verified on 2026-10-09: **325 unit/integration tests and 1 doctest passed**.
-Format, strict Clippy, strict rustdoc and all five runnable examples passed. Library
+Verified on 2026-10-10: **360 unit/integration tests and 1 doctest passed**.
+Format, strict Clippy, strict rustdoc and all six runnable examples passed. Library
 compilation passed all 24 installed targets, including WASM, Apple, Android,
-Linux and Windows. The [ChildItems implementation plan](docs/superpowers/plans/2026-10-09-child-items.md)
+Linux and Windows. The [Generic Navigation implementation plan](docs/superpowers/plans/2026-10-09-generic-navigation.md)
 records counts, commands, target matrix and review findings.
 
 Regression tests cover restored-state loss, retry after construction failure,
@@ -407,6 +487,15 @@ DPN1 restoration. Old DST1, DSL1 and DPG1 fixture bytes remain compatible.
 Items tests cover lazy/local navigation, inactive state recovery, updated equal
 configuration data, lifecycle/Back gates, strict DPI1 framing and panic/ownership
 recovery; the DPN1 fixture also remains compatible.
+Generic Navigation tests cover custom sources and initialization buffering,
+event identity, state projection, callback order, cached Back and rejected actions,
+strict DCH1 validation, optional codecs, retained recreation and coherent saves.
+Additional regressions cover reentrant custom state Clone/Drop, preservation of
+committed scopes when Drop panics, and complete navigation teardown after cancellation or
+multiple cleanup panics. Constructor rollback restores saved input and prior
+retention after cancellation panics. Subprocess regressions verify that combined
+initialization/cancellation panics preserve the original unwind, including lazy
+initial-state, decoder and pre-engine Clone failures.
 Compile-target results are recorded in the implementation plan; compilation
 alone does not establish platform runtime behavior.
 

@@ -108,7 +108,9 @@ control, dispatching Events into the same queue with an optional synchronous gat
 
 Progress: complete. Source/tests and controller artifacts are finalized.
 Independent specification and quality reviews passed, including re-review of the
-corrected stale-snapshot lazy lookup. Controller gates passed after the correction. No ChildItems commit, merge or push was performed.
+corrected stale-snapshot lazy lookup. Controller gates passed after the correction.
+ChildItems was subsequently committed as b1a7d56 at the user's request, after a
+fresh 325-test run, 1 doctest, formatting and diff checks. No merge or push was performed.
 ChildPanels was committed as 0336a19 at the user's request before this stage.
 
 ## Verification record (2026-10-09)
@@ -209,6 +211,7 @@ it restores same-instance lookup, manual child destruction is rejected and paren
 destruction returns Destroyed. Independent runs passed 63 Items tests, 325 all-target
 tests, 1 doctest and formatting. No repository changes were made by reviewers.
 
-Final controller `git diff --check` passed. Dependencies remain unchanged. Changes
-stay local and uncommitted on codex/child-items; the previous ChildPanels stage is
-committed as 0336a19. No merge or push was performed.
+Final controller `git diff --check` passed. Dependencies remain unchanged.
+ChildItems is committed locally as b1a7d56 on codex/child-items; the previous
+ChildPanels stage is committed as 0336a19. The next stage branches from b1a7d56
+as codex/generic-navigation. No merge or push was performed.

@@ -51,61 +51,13 @@ impl<C> Pages<C> {
         Ok(())
     }
 }
-/// Requested child lifecycle, bounded by the hosting lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PageStatus {
-    Created,
-    Started,
-    Resumed,
-    Destroyed,
-}
+pub use super::children::{ChildItem as PageChild, ChildStatus as PageStatus};
 /// Selected page resumes, direct neighbours are created, and other pages are destroyed.
 pub fn default_page_status<C>(index: usize, pages: &Pages<C>) -> PageStatus {
     match pages.selected_index {
         Some(i) if i == index => PageStatus::Resumed,
         Some(i) if i.abs_diff(index) == 1 => PageStatus::Created,
         _ => PageStatus::Destroyed,
-    }
-}
-/// A created component or an intentional destroyed entry retaining configuration and identity.
-pub enum PageChild<C, T> {
-    /// Component with a live managed scope.
-    Created(Child<C, T>),
-    /// Lazy entry with no component or instance keeper.
-    Destroyed { configuration: Rc<C>, key: String },
-}
-impl<C, T> Clone for PageChild<C, T> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Created(c) => Self::Created(c.clone()),
-            Self::Destroyed { configuration, key } => Self::Destroyed {
-                configuration: configuration.clone(),
-                key: key.clone(),
-            },
-        }
-    }
-}
-impl<C, T> PageChild<C, T> {
-    /// Configuration shared by either variant.
-    pub fn configuration(&self) -> &Rc<C> {
-        match self {
-            Self::Created(c) => &c.configuration,
-            Self::Destroyed { configuration, .. } => configuration,
-        }
-    }
-    /// Identity remains stable across intentional destruction and resurrection.
-    pub fn key(&self) -> &str {
-        match self {
-            Self::Created(c) => &c.key,
-            Self::Destroyed { key, .. } => key,
-        }
-    }
-    /// Component, when created. Older snapshots can retain ended components.
-    pub fn instance(&self) -> Option<&Rc<T>> {
-        match self {
-            Self::Created(c) => Some(&c.instance),
-            Self::Destroyed { .. } => None,
-        }
     }
 }
 /// Immutable child membership and numeric selection.

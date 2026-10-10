@@ -202,7 +202,8 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    pub(crate) fn from_cancel(cancel: impl FnOnce() + 'static) -> Self {
+    /// Creates a subscription with an idempotent, one-shot cancellation callback.
+    pub fn from_cancel(cancel: impl FnOnce() + 'static) -> Self {
         Self {
             cancellation: RefCell::new(Some(Box::new(cancel))),
         }

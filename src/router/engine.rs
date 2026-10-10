@@ -22,11 +22,20 @@ pub(crate) trait Model<C, T>: 'static {
         state
     }
     fn validate(&self, state: &Self::State) -> Result<(), NavigationError>;
-    fn statuses(&self, state: &Self::State) -> Vec<PageStatus>;
-    fn snapshot(&self, children: Vec<PageChild<C, T>>, state: &Self::State) -> Self::Snapshot;
+    fn statuses(&self, state: &Self::State) -> Vec<ChildStatus>;
+    fn snapshot(&self, children: Vec<ChildItem<C, T>>, state: &Self::State) -> Self::Snapshot;
     fn back_enabled(&self, state: &Self::State) -> bool;
     fn back_transform(&self, state: Self::State) -> Self::State;
+    fn on_back_error(&self, _error: NavigationError) {}
     fn decode(&self, bytes: &[u8]) -> Result<Option<SavedState<Self::State>>, NavigationError>;
+    fn encode_with_children(
+        &self,
+        state: &Self::State,
+        next_key: u64,
+        children: impl FnOnce() -> Result<SavedChildren, NavigationError>,
+    ) -> Result<Option<Vec<u8>>, NavigationError> {
+        self.encode(state, &children()?, next_key)
+    }
     fn encode(
         &self,
         state: &Self::State,
@@ -34,7 +43,7 @@ pub(crate) trait Model<C, T>: 'static {
         next_key: u64,
     ) -> Result<Option<Vec<u8>>, NavigationError>;
 }
-use super::pages::{PageChild, PageStatus};
+use super::children::{ChildItem, ChildStatus};
 use crate::retention::RetainedScope;
 use crate::value::{MutableValue, Subscription, Value};
 use crate::{
@@ -109,8 +118,8 @@ impl ScopeParts {
             let _ = self.local.destroy();
         }
     }
-    fn activate(&self, status: PageStatus) {
-        let active = matches!(status, PageStatus::Started | PageStatus::Resumed);
+    fn activate(&self, status: ChildStatus) {
+        let active = matches!(status, ChildStatus::Started | ChildStatus::Resumed);
         self.gate.set(active);
         let effective = matches!(
             self.merged.state(),
@@ -119,10 +128,10 @@ impl ScopeParts {
         self.parent_back
             .set_enabled(self.handle, active && effective && self.back.can_handle());
         let target = match status {
-            PageStatus::Created => LifecycleState::Created,
-            PageStatus::Started => LifecycleState::Started,
-            PageStatus::Resumed => LifecycleState::Resumed,
-            PageStatus::Destroyed => LifecycleState::Destroyed,
+            ChildStatus::Created => LifecycleState::Created,
+            ChildStatus::Started => LifecycleState::Started,
+            ChildStatus::Resumed => LifecycleState::Resumed,
+            ChildStatus::Destroyed => LifecycleState::Destroyed,
         };
         let _ = self.local.move_to(target);
     }
@@ -154,13 +163,13 @@ impl<C, T> Clone for Managed<C, T> {
     }
 }
 impl<C, T> Managed<C, T> {
-    fn child(&self) -> PageChild<C, T> {
+    fn child(&self) -> ChildItem<C, T> {
         self.scope.as_ref().map_or_else(
-            || PageChild::Destroyed {
+            || ChildItem::Destroyed {
                 configuration: self.configuration.clone(),
                 key: self.key.clone(),
             },
-            |s| PageChild::Created(s.child.clone()),
+            |s| ChildItem::Created(s.child.clone()),
         )
     }
     fn reusable(&self) -> bool {
@@ -218,25 +227,50 @@ impl Drop for Construction {
         if self.committed {
             return;
         }
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
-        }
-        if self.registered {
-            self.state.borrow_mut().unregister(&self.key);
-        }
-        if let Some(retained) = &self.retained {
-            let replaced = retained
-                .scopes
-                .replace(std::mem::take(&mut self.previous_scopes));
-            drop(replaced);
-        }
-        if self.new_retention {
-            self.instances.borrow_mut().destroy(&self.key);
-        }
-        if let Some(bytes) = self.restored.take() {
-            self.state
-                .borrow_mut()
-                .return_bytes(self.key.clone(), bytes);
+        // Rollback must finish even when source cancellation or a retained
+        // instance's destruction panics. Preserve an existing unwind; otherwise
+        // propagate the first cleanup panic only after returning consumed input.
+        let already_unwinding = std::thread::panicking();
+        let mut first_panic = None;
+        let mut rollback = |action: &mut dyn FnMut()| {
+            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
+                && first_panic.is_none()
+            {
+                first_panic = Some(panic);
+            }
+        };
+        rollback(&mut || {
+            if let Some(cleanup) = self.cleanup.take() {
+                cleanup();
+            }
+        });
+        rollback(&mut || {
+            if self.registered {
+                self.state.borrow_mut().unregister(&self.key);
+            }
+        });
+        rollback(&mut || {
+            if let Some(retained) = &self.retained {
+                let replaced = retained
+                    .scopes
+                    .replace(std::mem::take(&mut self.previous_scopes));
+                drop(replaced);
+            }
+        });
+        rollback(&mut || {
+            if self.new_retention {
+                self.instances.borrow_mut().destroy(&self.key);
+            }
+        });
+        rollback(&mut || {
+            if let Some(bytes) = self.restored.take() {
+                self.state
+                    .borrow_mut()
+                    .return_bytes(self.key.clone(), bytes);
+            }
+        });
+        if !already_unwinding && let Some(panic) = first_panic {
+            std::panic::resume_unwind(panic);
         }
     }
 }
@@ -252,7 +286,7 @@ struct Engine<Ctx, C, T, M: Model<C, T>> {
     model: M,
     next_key: Cell<u64>,
     items: RefCell<Vec<Managed<C, T>>>,
-    navigation_state: RefCell<M::State>,
+    navigation_state: RefCell<Rc<M::State>>,
     state: RefCell<Option<MutableValue<M::Snapshot>>>,
     queue: RefCell<VecDeque<Event<M::State>>>,
     processing: Cell<bool>,
@@ -267,6 +301,14 @@ struct Engine<Ctx, C, T, M: Model<C, T>> {
 impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T>>
     Engine<Ctx, C, T, M>
 {
+    // Only clone the shared handle while borrowed. User State::clone and Drop
+    // may navigate, save state or end the parent, so both run outside this cell.
+    fn navigation_snapshot(&self) -> Rc<M::State> {
+        self.navigation_state.borrow().clone()
+    }
+    fn clone_navigation_state(&self) -> M::State {
+        self.navigation_snapshot().as_ref().clone()
+    }
     fn ensure_alive(&self) -> Result<(), NavigationError> {
         if self.destroyed.get() || self.parent.state().is_destroyed() {
             Err(NavigationError::Destroyed)
@@ -422,7 +464,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         let statuses = self.model.statuses(&state);
         self.ensure_alive()?;
         let configs = self.model.configurations(&state);
-        let old_state = self.navigation_state.borrow().clone();
+        let old_state = self.clone_navigation_state();
         let old = self.items.borrow().clone();
         let mut matched = vec![false; old.len()];
         let mut next = Vec::with_capacity(configs.len());
@@ -456,7 +498,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                     saved,
                 }
             };
-            if statuses[index] == PageStatus::Destroyed {
+            if statuses[index] == ChildStatus::Destroyed {
                 // Save every outgoing live page before any destructive lifecycle delivery.
                 item.saved = item.save()?;
                 item.scope = None;
@@ -470,7 +512,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             committed: false,
         };
         for (index, item) in next.iter_mut().enumerate() {
-            if statuses[index] != PageStatus::Destroyed && item.scope.is_none() {
+            if statuses[index] != ChildStatus::Destroyed && item.scope.is_none() {
                 let fresh_retention = self
                     .retained
                     .scopes
@@ -498,12 +540,12 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                             .is_some_and(|other| Rc::ptr_eq(other, scope))
                     })
                     .map(|(i, _)| statuses[i])
-                    .unwrap_or(PageStatus::Created);
+                    .unwrap_or(ChildStatus::Created);
                 let rank = |s| match s {
-                    PageStatus::Created => 1,
-                    PageStatus::Started => 2,
-                    PageStatus::Resumed => 3,
-                    PageStatus::Destroyed => 0,
+                    ChildStatus::Created => 1,
+                    ChildStatus::Started => 2,
+                    ChildStatus::Resumed => 3,
+                    ChildStatus::Destroyed => 0,
                 };
                 let current = match scope.parts.local.state() {
                     LifecycleState::Started => 2,
@@ -545,10 +587,14 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                 .set_enabled(handle, self.model.back_enabled(&state));
         }
         self.ensure_alive()?;
+        let committed_state = Rc::new(state.clone());
+        self.ensure_alive()?;
         self.next_key.set(counter);
         *self.items.borrow_mut() = next.clone();
-        *self.navigation_state.borrow_mut() = state.clone();
+        let previous_state = self.navigation_state.replace(committed_state);
         prepared.committed = true;
+        drop(previous_state);
+        self.ensure_alive()?;
         let snapshot = self
             .model
             .snapshot(next.iter().map(Managed::child).collect(), &state);
@@ -629,11 +675,11 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         loop {
             let event = self.queue.borrow_mut().pop_front();
             let Some(event) = event else { break };
-            let old_stack = self.navigation_state.borrow().clone();
+            let old_stack = self.clone_navigation_state();
             let configs = (event.transformer)(old_stack.clone());
             let result = self.switch(configs, None).map(|()| NavigationResult {
                 old_stack,
-                new_stack: self.navigation_state.borrow().clone(),
+                new_stack: self.clone_navigation_state(),
             });
             (event.completion)(result);
             if self.destroyed.get() {
@@ -646,34 +692,62 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             return Ok(None);
         }
         let items = self.items.borrow().clone();
-        let state = self.navigation_state.borrow().clone();
+        let state = self.navigation_snapshot();
         let next_key = self.next_key.get();
-        let mut children = Vec::with_capacity(items.len());
-        for item in &items {
-            children.push((item.key.clone(), item.save()?));
-        }
-        self.model.encode(&state, &children, next_key)
+        let state = state.as_ref().clone();
+        self.model.encode_with_children(&state, next_key, || {
+            let mut children = Vec::with_capacity(items.len());
+            for item in &items {
+                children.push((item.key.clone(), item.save()?));
+            }
+            Ok(children)
+        })
     }
     fn teardown(&self) {
         if self.destroyed.replace(true) {
             return;
         }
+        // Complete teardown before propagating any user cleanup panic. In
+        // particular, custom source cancellation must not strand live scopes.
+        let already_unwinding = std::thread::panicking();
+        let mut first_panic = None;
+        let mut cleanup = |action: &mut dyn FnMut()| {
+            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
+                && first_panic.is_none()
+            {
+                first_panic = Some(panic);
+            }
+        };
         let abandoned = std::mem::take(&mut *self.queue.borrow_mut());
-        drop(abandoned);
-        self.source_subscription.borrow_mut().take();
-        if let Some(handle) = self.pop_handle.take() {
-            self.back.unregister(handle);
-        }
-        for item in self.items.borrow().iter().rev() {
+        let subscription = self.source_subscription.borrow_mut().take();
+        cleanup(&mut || {
+            if let Some(handle) = self.pop_handle.take() {
+                self.back.unregister(handle);
+            }
+        });
+        let items = self.items.borrow().clone();
+        for item in items.iter().rev() {
             if let Some(scope) = &item.scope {
-                scope.parts.end(false);
+                cleanup(&mut || scope.parts.end(false));
             }
         }
-        if let Some(state) = self.parent_state.upgrade() {
-            state.borrow_mut().unregister(&self.key);
-        }
-        if let Some(id) = self.destroy_subscription.take() {
-            let _ = self.parent.unsubscribe(id);
+        cleanup(&mut || {
+            if let Some(state) = self.parent_state.upgrade() {
+                state.borrow_mut().unregister(&self.key);
+            }
+        });
+        cleanup(&mut || {
+            if let Some(id) = self.destroy_subscription.take() {
+                let _ = self.parent.unsubscribe(id);
+            }
+        });
+        // Both the token and abandoned events can own arbitrary user captures.
+        let mut subscription = subscription;
+        cleanup(&mut || drop(subscription.take()));
+        let mut abandoned = Some(abandoned);
+        cleanup(&mut || drop(abandoned.take()));
+        if !already_unwinding && let Some(panic) = first_panic {
+            std::panic::resume_unwind(panic);
         }
     }
 }
@@ -711,6 +785,46 @@ where
     T: 'static,
     M: Model<C, T>,
 {
+    build_with_subscriber(
+        context,
+        |callback| navigation.subscribe(move |event| callback(event)),
+        || initial,
+        key,
+        model,
+        factory,
+    )
+}
+
+type EventReceiver<S> = Rc<dyn Fn(Event<S>)>;
+
+// Before the engine owns the token, initialization may unwind through this
+// local. Custom cancellation must not turn that original panic into an abort.
+struct SetupSubscription(Option<Subscription>);
+impl Drop for SetupSubscription {
+    fn drop(&mut self) {
+        let already_unwinding = std::thread::panicking();
+        let subscription = self.0.take();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(subscription)));
+        if !already_unwinding && let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+pub(crate) fn build_with_subscriber<Ctx, C, T, M>(
+    context: &Ctx,
+    subscribe: impl FnOnce(Rc<dyn Fn(Event<M::State>)>) -> Subscription,
+    initial: impl FnOnce() -> M::State,
+    key: String,
+    model: M,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<ControlledValue<M::State, M::Snapshot>, NavigationError>
+where
+    Ctx: ComponentContext + 'static,
+    C: Eq + 'static,
+    T: 'static,
+    M: Model<C, T>,
+{
     if context.lifecycle().state().is_destroyed() {
         return Err(NavigationError::Destroyed);
     }
@@ -718,6 +832,20 @@ where
     if parent_state.borrow().is_registered(&key) {
         return Err(DecomposeError::DuplicateKey { key }.into());
     }
+    // Subscribe before running any user initialization callback. Synchronous
+    // custom-source replay and lazy-initial emissions share the engine queue.
+    let pending = Rc::new(RefCell::new(VecDeque::new()));
+    let receiver = Rc::new(RefCell::new(None::<EventReceiver<M::State>>));
+    let pending_out = pending.clone();
+    let receiver_out = receiver.clone();
+    let mut subscription = SetupSubscription(Some(subscribe(Rc::new(move |event| {
+        let callback = receiver_out.borrow().clone();
+        if let Some(callback) = callback {
+            callback(event);
+        } else {
+            pending_out.borrow_mut().push_back(event);
+        }
+    }))));
     let restored_bytes = parent_state.borrow_mut().consume_bytes(&key);
     let instances = context.instance_keeper();
     let mut construction = Construction {
@@ -745,7 +873,7 @@ where
     let initial = restored
         .as_ref()
         .map(|state| state.configurations.clone())
-        .unwrap_or(initial);
+        .unwrap_or_else(initial);
     let restore_children = restored.as_ref().map(|saved| saved.children.clone());
     let next_key = restored.as_ref().map(|saved| saved.next_key).unwrap_or(0);
     let initial = model.normalize(initial);
@@ -792,7 +920,7 @@ where
         model,
         next_key: Cell::new(next_key),
         items: RefCell::new(Vec::new()),
-        navigation_state: RefCell::new(initial.clone()),
+        navigation_state: RefCell::new(Rc::new(initial.clone())),
         state: RefCell::new(None),
         queue: RefCell::new(VecDeque::new()),
         processing: Cell::new(false),
@@ -806,18 +934,20 @@ where
     let cleanup_engine = engine.clone();
     construction.cleanup = Some(Box::new(move || cleanup_engine.teardown()));
     let weak = Rc::downgrade(&engine);
-    *engine.source_subscription.borrow_mut() = Some(navigation.subscribe(move |event| {
+    *receiver.borrow_mut() = Some(Rc::new(move |event| {
         if let Some(engine) = weak.upgrade() {
             engine.enqueue(event);
         }
     }));
+    *engine.queue.borrow_mut() = std::mem::take(&mut *pending.borrow_mut());
+    *engine.source_subscription.borrow_mut() = subscription.0.take();
     engine.switch(initial, restore_children)?;
     let weak = Rc::downgrade(&engine);
     let handle = engine
         .back
         .register(
             0,
-            engine.model.back_enabled(&engine.navigation_state.borrow()),
+            engine.model.back_enabled(&engine.navigation_snapshot()),
             move |event, _| {
                 if event.phase == crate::BackPhase::Invoked
                     && let Some(engine) = weak.upgrade()
@@ -832,7 +962,16 @@ where
                                 )
                             })
                         },
-                        completion: Rc::new(|_| {}),
+                        completion: {
+                            let weak = Rc::downgrade(&engine);
+                            Rc::new(move |result| {
+                                if let Err(error) = result
+                                    && let Some(engine) = weak.upgrade()
+                                {
+                                    engine.model.on_back_error(error);
+                                }
+                            })
+                        },
                     });
                 }
             },
@@ -859,7 +998,7 @@ where
             })
             .detach(),
     ));
-    let initial_state = engine.navigation_state.borrow().clone();
+    let initial_state = engine.navigation_snapshot();
     engine.model.on_state_changed(&initial_state, None);
     engine.initializing.set(false);
     engine.ensure_alive()?;

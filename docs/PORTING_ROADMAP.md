@@ -1,7 +1,8 @@
 # Porting Roadmap
 
-> Current delivery (2026-10-09): ComponentContext corrections, observable values
-> and ChildStack/ChildSlot/ChildPages/ChildPanels/ChildItems, including Back and explicit-codec persistence, form
+> Current delivery (2026-10-10): ComponentContext corrections, observable values
+> and ChildStack/ChildSlot/ChildPages/ChildPanels/ChildItems plus Generic Navigation,
+> including Back and explicit-codec persistence, form
 > the current implementation scope.
 > The original phased research below is historical; the user approved the focused
 > stack delivery instead of all nine phases. ADR-0005 supersedes conflicting
@@ -9,8 +10,10 @@
 > engine and ChildSlot. ADR-0007 records live/destroyed page state and selected-index
 > navigation. ChildPanels adds typed role factories and lifecycle modes,
 > documented in ADR-0008. ChildItems adds flexible activity and lazy
-> receiver-local navigation documented in ADR-0009. Other navigation
-> families and platform integrations remain outside scope.
+> receiver-local navigation documented in ADR-0009. Public Generic Navigation
+> over the shared engine (ADR-0010) adds custom event
+> sources, state projections, conditional Back and whole-state codecs.
+> Platform integrations remain outside scope.
 
 ## Research identity
 
@@ -157,6 +160,7 @@ CHILD SLOT: IMPLEMENTED (optional membership, Back, reentrancy, empty/populated 
 CHILD PAGES: IMPLEMENTED (selected-index state, live/destroyed instances, lazy recreation, Back, DPG1 persistence)
 CHILD PANELS: IMPLEMENTED (typed roles, lifecycle modes, independent dismissal, Back and DPN1 persistence)
 CHILD ITEMS: IMPLEMENTED (configuration-keyed activity, lazy instances, receiver-local navigation, DPI1 persistence)
-OTHER NAVIGATION MODELS / PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
+GENERIC NAVIGATION: IMPLEMENTED (custom NavState/events, neutral child types, DCH1 persistence)
+PLATFORM INTEGRATIONS: OUTSIDE APPROVED SCOPE
 ESSENTY-RS CHANGES: NONE REQUIRED
 ```
