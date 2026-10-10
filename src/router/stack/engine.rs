@@ -28,6 +28,9 @@ impl<C: Eq + 'static, T: 'static> Model<C, T> for StackModel<C> {
             .collect()
     }
     type Snapshot = ChildStack<C, T>;
+    fn memory_kind(&self) -> &'static str {
+        "stack"
+    }
     fn persistent(&self) -> bool {
         self.0.codec.is_some()
     }

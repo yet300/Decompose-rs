@@ -118,6 +118,9 @@ struct PagesModel<C>(PagesOptions<C>);
 impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for PagesModel<C> {
     type State = Pages<C>;
     type Snapshot = ChildPages<C, T>;
+    fn memory_kind(&self) -> &'static str {
+        "pages"
+    }
     fn persistent(&self) -> bool {
         self.0.codec.is_some()
     }

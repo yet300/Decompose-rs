@@ -143,6 +143,9 @@ struct ItemsModel<C>(ItemsOptions<C>);
 impl<C: Eq + 'static, T: 'static> Model<C, T> for ItemsModel<C> {
     type State = Items<C>;
     type Snapshot = ChildItems<C, T>;
+    fn memory_kind(&self) -> &'static str {
+        "items"
+    }
     fn persistent(&self) -> bool {
         self.0.codec.is_some()
     }

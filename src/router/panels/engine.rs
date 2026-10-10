@@ -39,6 +39,9 @@ impl<MC: Eq + 'static, DC: Eq + 'static, EC: Eq + 'static, MT: 'static, DT: 'sta
 {
     type State = Panels<MC, DC, EC>;
     type Snapshot = ChildPanels<MC, MT, DC, DT, EC, ET>;
+    fn memory_kind(&self) -> &'static str {
+        "panels"
+    }
     fn persistent(&self) -> bool {
         self.0.codec.is_some()
     }

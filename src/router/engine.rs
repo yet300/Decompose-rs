@@ -1,17 +1,33 @@
 use super::navigation::{Event, NavigationResult};
 type ChildFactory<Ctx, C, T> = Rc<dyn Fn(&C, Ctx) -> T>;
 type SavedChildren = Vec<(String, BTreeMap<String, Vec<u8>>)>;
+type SnapshotChildren = Vec<(String, crate::StateSnapshot)>;
 use super::{Child, NavigationError};
+use crate::settings::{DiagnosticOperation, report_navigation_error};
+struct QueuedEvent<S> {
+    event: Event<S>,
+    operation: DiagnosticOperation,
+    diagnose: bool,
+}
 
 pub(crate) struct SavedState<S> {
     pub(crate) configurations: S,
     pub(crate) children: SavedChildren,
     pub(crate) next_key: u64,
 }
+struct MemoryNavigation<S> {
+    kind: &'static str,
+    configurations: S,
+    children: SnapshotChildren,
+    next_key: u64,
+}
 pub(crate) trait Model<C, T>: 'static {
     type State: Clone + 'static;
     type Snapshot: 'static;
     fn persistent(&self) -> bool;
+    fn memory_kind(&self) -> &'static str {
+        "generic"
+    }
     fn configurations(&self, state: &Self::State) -> Vec<Rc<C>>;
     fn on_state_changed(&self, _state: &Self::State, _old: Option<&Self::State>) {}
     // Opt-in models refresh future factory input without recreating live instances.
@@ -22,6 +38,9 @@ pub(crate) trait Model<C, T>: 'static {
         state
     }
     fn validate(&self, state: &Self::State) -> Result<(), NavigationError>;
+    fn should_restore(&self, _state: &Self::State) -> bool {
+        true
+    }
     fn statuses(&self, state: &Self::State) -> Vec<ChildStatus>;
     fn snapshot(&self, children: Vec<ChildItem<C, T>>, state: &Self::State) -> Self::Snapshot;
     fn back_enabled(&self, state: &Self::State) -> bool;
@@ -150,7 +169,7 @@ struct Managed<C, T> {
     configuration: Rc<C>,
     key: String,
     scope: Option<Rc<Scope<C, T>>>,
-    saved: BTreeMap<String, Vec<u8>>,
+    saved: crate::StateSnapshot,
 }
 impl<C, T> Clone for Managed<C, T> {
     fn clone(&self) -> Self {
@@ -186,6 +205,18 @@ impl<C, T> Managed<C, T> {
                 .map_err(|_| NavigationError::State("child state keeper is borrowed".into()))?
                 .save()
                 .map_err(|error| NavigationError::State(error.to_string())),
+            None => Ok(self.saved.persistent().clone()),
+        }
+    }
+    fn save_snapshot(&self) -> Result<crate::StateSnapshot, NavigationError> {
+        match &self.scope {
+            Some(scope) => scope
+                .parts
+                .state
+                .try_borrow()
+                .map_err(|_| NavigationError::State("child state keeper is borrowed".into()))?
+                .save_snapshot()
+                .map_err(|error| NavigationError::State(error.to_string())),
             None => Ok(self.saved.clone()),
         }
     }
@@ -215,6 +246,7 @@ struct Construction {
     instances: SharedInstances,
     key: String,
     restored: Option<Vec<u8>>,
+    restored_memory: Option<crate::state::MemoryValue>,
     new_retention: bool,
     retained: Option<Rc<RetainedNavigation>>,
     previous_scopes: BTreeMap<String, Rc<RetainedScope>>,
@@ -242,6 +274,13 @@ impl Drop for Construction {
         rollback(&mut || {
             if let Some(cleanup) = self.cleanup.take() {
                 cleanup();
+            }
+        });
+        rollback(&mut || {
+            if let Some(value) = self.restored_memory.take() {
+                self.state
+                    .borrow_mut()
+                    .return_memory(self.key.clone(), value);
             }
         });
         rollback(&mut || {
@@ -284,11 +323,12 @@ struct Engine<Ctx, C, T, M: Model<C, T>> {
     child_factory: ChildFactory<Ctx, C, T>,
     key: String,
     model: M,
+    memory_navigation: bool,
     next_key: Cell<u64>,
     items: RefCell<Vec<Managed<C, T>>>,
     navigation_state: RefCell<Rc<M::State>>,
     state: RefCell<Option<MutableValue<M::Snapshot>>>,
-    queue: RefCell<VecDeque<Event<M::State>>>,
+    queue: RefCell<VecDeque<QueuedEvent<M::State>>>,
     processing: Cell<bool>,
     initializing: Cell<bool>,
     destroyed: Cell<bool>,
@@ -342,7 +382,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         &self,
         config: Rc<C>,
         key: String,
-        saved: BTreeMap<String, Vec<u8>>,
+        saved: crate::StateSnapshot,
     ) -> Result<Rc<Scope<C, T>>, NavigationError> {
         let retained = self
             .retained
@@ -354,7 +394,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         let owner = retained.unwrap_or_else(|| Rc::new(RetainedScope::new()));
         let local = LifecycleRegistry::new();
         let merged = MergedLifecycle::new(&self.parent, &local);
-        let state = Rc::new(RefCell::new(StateKeeper::with_restored(saved)));
+        let state = Rc::new(RefCell::new(StateKeeper::from_snapshot(saved)));
         let back = SharedBack::new();
         let child_back = back.clone();
         let handle = self
@@ -455,7 +495,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
     fn switch(
         &self,
         state: M::State,
-        restored: Option<SavedChildren>,
+        restored: Option<SnapshotChildren>,
     ) -> Result<(), NavigationError> {
         let state = self.model.normalize(state);
         self.model.validate(&state)?;
@@ -489,7 +529,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                     counter = counter.checked_add(1).ok_or_else(|| {
                         NavigationError::State("child key counter exhausted".into())
                     })?;
-                    (key, BTreeMap::new())
+                    (key, crate::StateSnapshot::default())
                 };
                 Managed {
                     configuration: config.clone(),
@@ -500,7 +540,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             };
             if statuses[index] == ChildStatus::Destroyed {
                 // Save every outgoing live page before any destructive lifecycle delivery.
-                item.saved = item.save()?;
+                item.saved = item.save_snapshot()?;
                 item.scope = None;
             }
             next.push(item);
@@ -610,10 +650,17 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         Ok(())
     }
     fn enqueue(self: &Rc<Self>, event: Event<M::State>) {
+        self.enqueue_kind(event, DiagnosticOperation::Navigation);
+    }
+    fn enqueue_kind(self: &Rc<Self>, event: Event<M::State>, operation: DiagnosticOperation) {
         if self.destroyed.get() {
             return;
         }
-        self.queue.borrow_mut().push_back(event);
+        self.queue.borrow_mut().push_back(QueuedEvent {
+            event,
+            operation,
+            diagnose: !crate::settings::is_reporting(),
+        });
         self.pump();
     }
     fn pump(self: &Rc<Self>) {
@@ -661,7 +708,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             return;
         }
         self.processing.set(true);
-        struct Reset<'a, S>(&'a Cell<bool>, &'a RefCell<VecDeque<Event<S>>>);
+        struct Reset<'a, S>(&'a Cell<bool>, &'a RefCell<VecDeque<QueuedEvent<S>>>);
         impl<C> Drop for Reset<'_, C> {
             fn drop(&mut self) {
                 self.0.set(false);
@@ -674,13 +721,23 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         let _reset = Reset(&self.processing, &self.queue);
         loop {
             let event = self.queue.borrow_mut().pop_front();
-            let Some(event) = event else { break };
+            let Some(QueuedEvent {
+                event,
+                operation,
+                diagnose,
+            }) = event
+            else {
+                break;
+            };
             let old_stack = self.clone_navigation_state();
             let configs = (event.transformer)(old_stack.clone());
             let result = self.switch(configs, None).map(|()| NavigationResult {
                 old_stack,
                 new_stack: self.clone_navigation_state(),
             });
+            if diagnose && let Err(error) = &result {
+                report_navigation_error(operation, &self.key, error);
+            }
             (event.completion)(result);
             if self.destroyed.get() {
                 break;
@@ -688,7 +745,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         }
     }
     fn save(&self) -> Result<Option<Vec<u8>>, NavigationError> {
-        if !self.model.persistent() {
+        if self.memory_navigation || !self.model.persistent() {
             return Ok(None);
         }
         let items = self.items.borrow().clone();
@@ -702,6 +759,47 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             }
             Ok(children)
         })
+    }
+    fn save_snapshot(&self) -> Result<crate::state::SavedEntry, NavigationError> {
+        let items = self.items.borrow().clone();
+        let state = self.clone_navigation_state();
+        let next_key = self.next_key.get();
+        let save_children = || {
+            items
+                .iter()
+                .map(|item| Ok((item.key.clone(), item.save_snapshot()?)))
+                .collect::<Result<Vec<_>, NavigationError>>()
+        };
+        let mut children = None;
+        let persistent = if self.memory_navigation {
+            children = Some(save_children()?);
+            None
+        } else if self.model.persistent() {
+            self.model.encode_with_children(&state, next_key, || {
+                let snapshots = save_children()?;
+                let bytes = snapshots
+                    .iter()
+                    .map(|(key, snapshot)| (key.clone(), snapshot.persistent().clone()))
+                    .collect();
+                children = Some(snapshots);
+                Ok(bytes)
+            })?
+        } else {
+            None
+        };
+        let memory = if self.memory_navigation || persistent.is_some() {
+            children.map(|children| {
+                Rc::new(MemoryNavigation {
+                    kind: self.model.memory_kind(),
+                    configurations: state,
+                    children,
+                    next_key,
+                }) as crate::state::MemoryValue
+            })
+        } else {
+            None
+        };
+        Ok(crate::state::SavedEntry { persistent, memory })
     }
     fn teardown(&self) {
         if self.destroyed.replace(true) {
@@ -784,6 +882,28 @@ where
     T: 'static,
     M: Model<C, T>,
 {
+    let diagnostic_key = key.clone();
+    let result = build_with_subscriber_inner(context, subscribe, initial, key, model, factory);
+    if let Err(error) = &result {
+        report_navigation_error(DiagnosticOperation::Construction, &diagnostic_key, error);
+    }
+    result
+}
+
+fn build_with_subscriber_inner<Ctx, C, T, M>(
+    context: &Ctx,
+    subscribe: impl FnOnce(Rc<dyn Fn(Event<M::State>)>) -> Subscription,
+    initial: impl FnOnce() -> M::State,
+    key: String,
+    model: M,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<ControlledValue<M::State, M::Snapshot>, NavigationError>
+where
+    Ctx: ComponentContext + 'static,
+    C: Eq + 'static,
+    T: 'static,
+    M: Model<C, T>,
+{
     if context.lifecycle().state().is_destroyed() {
         return Err(NavigationError::Destroyed);
     }
@@ -806,12 +926,15 @@ where
         }
     }))));
     let restored_bytes = parent_state.borrow_mut().consume_bytes(&key);
+    let restored_memory = parent_state.borrow_mut().consume_memory(&key);
+    let memory_navigation = parent_state.borrow().memory_navigation(&key);
     let instances = context.instance_keeper();
     let mut construction = Construction {
         state: parent_state.clone(),
         instances: instances.clone(),
         key: key.clone(),
         restored: restored_bytes.clone(),
+        restored_memory: restored_memory.clone(),
         new_retention: false,
         retained: None,
         previous_scopes: BTreeMap::new(),
@@ -825,10 +948,74 @@ where
         .register_optional(&key, move || fallback.clone())
         .map_err(DecomposeError::from)?;
     construction.registered = true;
-    let restored = match restored_bytes.as_ref() {
-        Some(bytes) => model.decode(bytes)?,
-        None => None,
+    let fallback_bytes = restored_bytes.clone();
+    let fallback_memory = restored_memory.clone();
+    parent_state
+        .borrow_mut()
+        .add_snapshot_provider(&key, move || {
+            Ok(crate::state::SavedEntry {
+                persistent: fallback_bytes.clone(),
+                memory: fallback_memory.clone(),
+            })
+        });
+    let memory = restored_memory
+        .map(|value| {
+            value
+                .downcast::<MemoryNavigation<M::State>>()
+                .map_err(|_| NavigationError::State("memory navigation state type mismatch".into()))
+        })
+        .transpose()?;
+    if memory
+        .as_ref()
+        .is_some_and(|saved| saved.kind != model.memory_kind())
+    {
+        return Err(NavigationError::State(
+            "memory navigation model mismatch".into(),
+        ));
+    }
+    let mut restored = if memory_navigation {
+        memory.as_ref().map(|saved| SavedState {
+            configurations: saved.configurations.clone(),
+            children: saved
+                .children
+                .iter()
+                .map(|(key, snapshot)| (key.clone(), snapshot.persistent().clone()))
+                .collect(),
+            next_key: saved.next_key,
+        })
+    } else {
+        match restored_bytes.as_ref() {
+            Some(bytes) => model.decode(bytes)?,
+            None => None,
+        }
     };
+    if let Some(saved) = &restored {
+        model.validate(&saved.configurations)?;
+        if model.configurations(&saved.configurations).len() != saved.children.len() {
+            return Err(NavigationError::State(
+                "saved child count does not match configurations".into(),
+            ));
+        }
+        let mut keys = std::collections::BTreeSet::new();
+        for (key, _) in &saved.children {
+            let counter = key
+                .strip_prefix("child/")
+                .and_then(|suffix| suffix.parse::<u64>().ok());
+            if !counter.is_some_and(|counter| {
+                counter < saved.next_key && key == &format!("child/{counter}")
+            }) || !keys.insert(key)
+            {
+                return Err(NavigationError::State(
+                    "invalid child identity or next-key counter".into(),
+                ));
+            }
+        }
+        // A byte codec's predicate applies only to the byte saver, not to the
+        // explicitly selected codec-free in-memory saver.
+        if !memory_navigation && !model.should_restore(&saved.configurations) {
+            restored = None;
+        }
+    }
     let initial = restored
         .as_ref()
         .map(|state| state.configurations.clone())
@@ -838,24 +1025,23 @@ where
     if context.lifecycle().state().is_destroyed() {
         return Err(NavigationError::Destroyed);
     }
-    let restore_children = restored.as_ref().map(|saved| saved.children.clone());
+    let restore_children = restored.as_ref().map(|saved| {
+        saved
+            .children
+            .iter()
+            .map(|(key, bytes)| {
+                let snapshot = memory
+                    .as_ref()
+                    .and_then(|memory| memory.children.iter().find(|(k, _)| k == key))
+                    .map(|(_, snapshot)| snapshot.clone())
+                    .unwrap_or_else(|| crate::StateSnapshot::from_bytes(bytes.clone()));
+                (key.clone(), snapshot)
+            })
+            .collect()
+    });
     let next_key = restored.as_ref().map(|saved| saved.next_key).unwrap_or(0);
     let initial = model.normalize(initial);
     model.validate(&initial)?;
-    if let Some(restored) = &restored {
-        for (key, _) in &restored.children {
-            let counter = key
-                .strip_prefix("child/")
-                .and_then(|suffix| suffix.parse::<u64>().ok());
-            if !counter
-                .is_some_and(|counter| counter < next_key && key == &format!("child/{counter}"))
-            {
-                return Err(NavigationError::State(
-                    "invalid child identity or next-key counter".into(),
-                ));
-            }
-        }
-    }
     construction.new_retention = !instances.borrow().contains(&key);
     let retained = instances
         .borrow_mut()
@@ -882,6 +1068,7 @@ where
         child_factory: Rc::new(factory),
         key,
         model,
+        memory_navigation,
         next_key: Cell::new(next_key),
         items: RefCell::new(Vec::new()),
         navigation_state: RefCell::new(Rc::new(initial.clone())),
@@ -903,7 +1090,14 @@ where
             engine.enqueue(event);
         }
     }));
-    *engine.queue.borrow_mut() = std::mem::take(&mut *pending.borrow_mut());
+    *engine.queue.borrow_mut() = std::mem::take(&mut *pending.borrow_mut())
+        .into_iter()
+        .map(|event| QueuedEvent {
+            event,
+            operation: DiagnosticOperation::Navigation,
+            diagnose: !crate::settings::is_reporting(),
+        })
+        .collect();
     *engine.source_subscription.borrow_mut() = subscription.0.take();
     engine.switch(initial, restore_children)?;
     let weak = Rc::downgrade(&engine);
@@ -916,27 +1110,30 @@ where
                 if event.phase == crate::BackPhase::Invoked
                     && let Some(engine) = weak.upgrade()
                 {
-                    engine.enqueue(Event {
-                        transformer: {
-                            let weak = Rc::downgrade(&engine);
-                            Rc::new(move |old| {
-                                weak.upgrade().map_or_else(
-                                    || old.clone(),
-                                    |engine| engine.model.back_transform(old.clone()),
-                                )
-                            })
+                    engine.enqueue_kind(
+                        Event {
+                            transformer: {
+                                let weak = Rc::downgrade(&engine);
+                                Rc::new(move |old| {
+                                    weak.upgrade().map_or_else(
+                                        || old.clone(),
+                                        |engine| engine.model.back_transform(old.clone()),
+                                    )
+                                })
+                            },
+                            completion: {
+                                let weak = Rc::downgrade(&engine);
+                                Rc::new(move |result| {
+                                    if let Err(error) = result
+                                        && let Some(engine) = weak.upgrade()
+                                    {
+                                        engine.model.on_back_error(error);
+                                    }
+                                })
+                            },
                         },
-                        completion: {
-                            let weak = Rc::downgrade(&engine);
-                            Rc::new(move |result| {
-                                if let Err(error) = result
-                                    && let Some(engine) = weak.upgrade()
-                                {
-                                    engine.model.on_back_error(error);
-                                }
-                            })
-                        },
-                    });
+                        DiagnosticOperation::Back,
+                    );
                 }
             },
         )
@@ -948,9 +1145,21 @@ where
     parent_state
         .borrow_mut()
         .replace_reserved(&engine.key, move || {
-            provider.save().map_err(|error| error.to_string())
+            provider.save().map_err(|error| {
+                report_navigation_error(DiagnosticOperation::Save, &provider.key, &error);
+                error.to_string()
+            })
         })
         .map_err(DecomposeError::from)?;
+    let provider = engine.clone();
+    parent_state
+        .borrow_mut()
+        .add_snapshot_provider(&engine.key, move || {
+            provider.save_snapshot().map_err(|error| {
+                report_navigation_error(DiagnosticOperation::Save, &provider.key, &error);
+                error.to_string()
+            })
+        });
     let weak = Rc::downgrade(&engine);
     engine.destroy_subscription.set(Some(
         engine

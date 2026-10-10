@@ -58,6 +58,9 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
         vec![super::pages::PageStatus::Resumed; state.len()]
     }
     type Snapshot = ChildSlot<C, T>;
+    fn memory_kind(&self) -> &'static str {
+        "slot"
+    }
     fn persistent(&self) -> bool {
         self.0.codec.is_some()
     }

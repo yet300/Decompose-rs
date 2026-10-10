@@ -24,8 +24,9 @@
 //! [`EssentyStateKeeper`] reexports the original primitive.
 //!
 //! Behavior is checked against Decompose revision `00840bc`, using the four
-//! published `essenty-* 0.1.0` crates. Web history
-//! and UI/platform integrations are outside the current delivery. See the
+//! published `essenty-* 0.1.0` crates. [`router::webhistory`] implements portable
+//! recursive and legacy stack history over an explicit host backend. Concrete
+//! browser bindings and UI/platform integrations remain outside the delivery. See the
 //! repository README and `examples/child_stack.rs`, `examples/child_slot.rs`,
 //! `examples/child_pages.rs`, `examples/child_panels.rs` and
 //! `examples/child_items.rs`, `examples/generic_navigation.rs` and
@@ -33,7 +34,11 @@
 //! `examples/lazy_initial_state.rs`
 //! for usage, and `NOTICE`
 //! for attribution. This project has no official upstream affiliation.
-//! `docs/COMPATIBILITY.md` records Rust adaptations and remaining API gaps.
+//! [`StateSnapshot`] supports owned memory-only navigation recreation;
+//! standard codecs can skip saves and decline validated restoration.
+//! [`DecomposeSettings`] controls defaults and typed diagnostics on the current
+//! thread; [`TestComponentContext`] supplies a public lifecycle/recreation harness.
+//! `docs/COMPATIBILITY.md` records Rust adaptations and excluded integrations.
 
 mod child;
 mod context;
@@ -59,4 +64,8 @@ pub use essenty_lifecycle::{LifecycleError, LifecycleRegistry, LifecycleState};
 pub use essenty_state_keeper::{StateKeeper as EssentyStateKeeper, StateKeeperError};
 pub use merged::MergedLifecycle;
 pub use shared_back::SharedBack;
-pub use state::StateKeeper;
+pub use state::{StateKeeper, StateSnapshot};
+pub mod settings;
+pub mod test_utils;
+pub use settings::{DecomposeDiagnostic, DecomposeSettings, DiagnosticOperation};
+pub use test_utils::TestComponentContext;

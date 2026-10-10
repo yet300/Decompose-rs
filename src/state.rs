@@ -1,8 +1,13 @@
 //! Essenty state storage with reversible Decompose child-state consumption.
 use essenty_state_keeper::{StateKeeper as EssentyStateKeeper, StateKeeperError};
+mod memory;
+pub(crate) use memory::MemoryValue;
+pub(crate) use memory::SavedEntry;
+use memory::SnapshotProvider;
+pub use memory::StateSnapshot;
 type FallibleProvider = Box<dyn Fn() -> Result<Option<Vec<u8>>, StateKeeperError>>;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ops::{Deref, DerefMut},
 };
 
@@ -17,6 +22,9 @@ pub struct StateKeeper {
     inner: EssentyStateKeeper,
     returned: BTreeMap<String, Vec<u8>>,
     fallible: BTreeMap<String, FallibleProvider>,
+    memory: BTreeMap<String, MemoryValue>,
+    snapshot_providers: BTreeMap<String, SnapshotProvider>,
+    memory_navigation: BTreeSet<String>,
 }
 impl StateKeeper {
     /// Creates an empty keeper.
@@ -26,6 +34,77 @@ impl StateKeeper {
     /// Creates a keeper seeded with opaque restored bytes.
     pub fn with_restored(restored: BTreeMap<String, Vec<u8>>) -> Self {
         Self::from(EssentyStateKeeper::with_restored(restored))
+    }
+    /// Restores both persistent bytes and memory-only navigation without a codec.
+    pub fn from_snapshot(snapshot: StateSnapshot) -> Self {
+        Self {
+            memory: snapshot.memory,
+            memory_navigation: snapshot.memory_navigation,
+            ..Self::with_restored(snapshot.persistent)
+        }
+    }
+    /// Enables memory-only persistence for a router key, before constructing it.
+    ///
+    /// Applies to Generic Navigation and all standard families. This explicit
+    /// mode takes precedence over a supplied byte codec. `save()` omits the
+    /// router; `save_snapshot()` retains its state and nested scopes. The host
+    /// owns the resulting snapshot and passes it to `from_snapshot()`.
+    pub fn enable_memory_navigation(&mut self, key: &str) -> Result<(), StateKeeperError> {
+        if self.is_registered(key) {
+            return Err(StateKeeperError::DuplicateKey(key.into()));
+        }
+        self.memory_navigation.insert(key.into());
+        Ok(())
+    }
+    /// Saves bytes and memory values for an in-process recreation.
+    pub fn save_snapshot(&self) -> Result<StateSnapshot, StateKeeperError> {
+        let mut persistent = self.returned.clone();
+        persistent.extend(self.inner.save()?);
+        for (key, provider) in &self.fallible {
+            if !self.snapshot_providers.contains_key(key)
+                && let Some(bytes) = provider()?
+            {
+                persistent.insert(key.clone(), bytes);
+            }
+        }
+        let mut memory = self.memory.clone();
+        for (key, provider) in &self.snapshot_providers {
+            let entry = provider().map_err(|reason| StateKeeperError::Encode {
+                key: key.clone(),
+                reason,
+            })?;
+            if let Some(bytes) = entry.persistent {
+                persistent.insert(key.clone(), bytes);
+            }
+            if let Some(value) = entry.memory {
+                memory.insert(key.clone(), value);
+            }
+        }
+        for key in &self.memory_navigation {
+            persistent.remove(key);
+        }
+        Ok(StateSnapshot {
+            persistent,
+            memory,
+            memory_navigation: self.memory_navigation.clone(),
+        })
+    }
+    pub(crate) fn memory_navigation(&self, key: &str) -> bool {
+        self.memory_navigation.contains(key)
+    }
+    pub(crate) fn consume_memory(&mut self, key: &str) -> Option<MemoryValue> {
+        self.memory.remove(key)
+    }
+    pub(crate) fn return_memory(&mut self, key: String, value: MemoryValue) {
+        self.memory.insert(key, value);
+    }
+    pub(crate) fn add_snapshot_provider(
+        &mut self,
+        key: &str,
+        provider: impl Fn() -> Result<SavedEntry, String> + 'static,
+    ) {
+        self.snapshot_providers
+            .insert(key.into(), Box::new(provider));
     }
     /// Consumes restored bytes once, including frames returned by rollback.
     pub fn consume_bytes(&mut self, key: &str) -> Option<Vec<u8>> {
@@ -42,6 +121,9 @@ impl StateKeeper {
                 saved.insert(key.clone(), bytes);
             }
         }
+        for key in &self.memory_navigation {
+            saved.remove(key);
+        }
         Ok(saved)
     }
     pub(crate) fn return_bytes(&mut self, key: String, bytes: Vec<u8>) {
@@ -50,6 +132,7 @@ impl StateKeeper {
     /// Removes a provider, retaining unconsumed restored data.
     pub fn unregister(&mut self, key: &str) -> bool {
         self.fallible.remove(key);
+        self.snapshot_providers.remove(key);
         self.inner.unregister(key)
     }
     pub(crate) fn register_fallible(
@@ -80,11 +163,19 @@ impl StateKeeper {
     }
     /// Whether restored input remains available under this key.
     pub fn has_consumable(&self, key: &str) -> bool {
-        self.returned.contains_key(key) || self.inner.has_consumable(key)
+        self.memory.contains_key(key)
+            || self.returned.contains_key(key)
+            || self.inner.has_consumable(key)
     }
     /// Number of unconsumed restored entries.
     pub fn pending_count(&self) -> usize {
-        self.inner.pending_count() + self.returned.len()
+        self.inner.pending_count()
+            + self.returned.len()
+            + self
+                .memory
+                .keys()
+                .filter(|key| !self.returned.contains_key(*key) && !self.inner.has_consumable(key))
+                .count()
     }
     /// Decodes restored input through an explicitly supplied codec.
     pub fn consume_value<T>(
@@ -116,6 +207,9 @@ impl From<EssentyStateKeeper> for StateKeeper {
             inner,
             returned: BTreeMap::new(),
             fallible: BTreeMap::new(),
+            memory: BTreeMap::new(),
+            snapshot_providers: BTreeMap::new(),
+            memory_navigation: BTreeSet::new(),
         }
     }
 }

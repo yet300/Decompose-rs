@@ -59,6 +59,7 @@ struct BackRollback {
 
 struct Rollback {
     restored: Option<(SharedKeeper, String, Vec<u8>)>,
+    restored_memory: Option<(SharedKeeper, String, crate::state::MemoryValue)>,
     state: Option<(SharedKeeper, String)>,
     instance: Option<(SharedInstances, String)>,
     back: Option<BackRollback>,
@@ -76,6 +77,7 @@ impl Rollback {
     fn new() -> Self {
         Self {
             restored: None,
+            restored_memory: None,
             state: None,
             instance: None,
             back: None,
@@ -103,6 +105,11 @@ impl Drop for Rollback {
             && let Ok(mut keeper) = state.try_borrow_mut()
         {
             keeper.return_bytes(key, bytes);
+        }
+        if let Some((state, key, value)) = self.restored_memory.take()
+            && let Ok(mut keeper) = state.try_borrow_mut()
+        {
+            keeper.return_memory(key, value);
         }
         // Only entries created by this attempt are tracked here; a
         // pre-existing retained scope is never destroyed by rollback.
@@ -168,6 +175,10 @@ pub(crate) fn build_child<C>(
 
     // Step 3: consume restored child-state bytes once.
     let restored = parent_state.borrow_mut().consume_bytes(key.as_str());
+    let restored_memory = parent_state.borrow_mut().consume_memory(key.as_str());
+    rollback.restored_memory = restored_memory
+        .as_ref()
+        .map(|value| (parent_state.clone(), key_str.clone(), value.clone()));
     rollback.restored = restored
         .as_ref()
         .map(|bytes| (parent_state.clone(), key_str.clone(), bytes.clone()));
@@ -186,18 +197,33 @@ pub(crate) fn build_child<C>(
             })
         })?,
     };
-    let child_state: SharedKeeper = Rc::new(RefCell::new(StateKeeper::with_restored(seeded)));
+    let snapshot = match restored_memory {
+        Some(value) => value
+            .downcast::<crate::StateSnapshot>()
+            .map_err(|_| {
+                DecomposeError::StateKeeper(StateKeeperError::Decode {
+                    key: key_str.clone(),
+                    reason: "memory child state type mismatch".into(),
+                })
+            })?
+            .as_ref()
+            .clone(),
+        None => crate::StateSnapshot::from_bytes(seeded),
+    };
+    let child_state: SharedKeeper = Rc::new(RefCell::new(StateKeeper::from_snapshot(snapshot)));
+    // Both save channels refresh the same most recent successfully encoded
+    // frame, so a later byte-save failure preserves a successful snapshot.
+    let last_good: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(restored));
     {
         let owned = Rc::clone(&child_state);
         // Last-good frame cache: the most recent successfully encoded child
         // frame, returned verbatim when a later save cannot produce a fresh
         // one. Staleness is bounded by construction — it is always a real
         // past save, never fabricated — and a healthy save refreshes it.
-        let last_good: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(restored));
         let cache = Rc::clone(&last_good);
         parent_state
             .borrow_mut()
-            .register_optional(key.as_str(), move || {
+            .register_fallible(key.as_str(), move || {
                 // Preservation contract (P1-02): NEVER fabricate an empty
                 // frame on failure — that would misrepresent "production
                 // failed" as "the child successfully saved an empty map" and
@@ -217,13 +243,31 @@ pub(crate) fn build_child<C>(
                 {
                     let frame = framing::encode(&saved);
                     *cache.borrow_mut() = Some(frame.clone());
-                    return Some(frame);
+                    return Ok(Some(frame));
                 }
-                cache.borrow().clone()
+                Ok(cache.borrow().clone())
             })
             .map_err(DecomposeError::StateKeeper)?;
     }
     rollback.state = Some((Rc::clone(parent_state), key_str.clone()));
+    let child_snapshot = child_state.clone();
+    parent_state
+        .borrow_mut()
+        .add_snapshot_provider(key.as_str(), move || {
+            child_snapshot
+                .try_borrow()
+                .map_err(|_| "child state keeper is borrowed".to_owned())?
+                .save_snapshot()
+                .map(|snapshot| {
+                    let frame = framing::encode(snapshot.persistent());
+                    *last_good.borrow_mut() = Some(frame.clone());
+                    crate::state::SavedEntry {
+                        persistent: Some(frame),
+                        memory: Some(Rc::new(snapshot) as crate::state::MemoryValue),
+                    }
+                })
+                .map_err(|error| error.to_string())
+        });
 
     // Step 5: obtain the retained child instance scope via get_or_create
     // (never put: recreation preserves Rc::ptr_eq identity). Pre-existence

@@ -8,6 +8,7 @@ pub mod pages;
 pub mod panels;
 pub mod slot;
 pub mod stack;
+pub mod webhistory;
 use crate::DecomposeError;
 use std::rc::Rc;
 /// A created child. Holding a snapshot retains the component, not its active lifecycle.
