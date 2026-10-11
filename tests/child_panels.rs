@@ -1075,7 +1075,7 @@ fn codec_errors_preserve_input_and_serialize_errors_propagate() {
         |_, _| panic!("factory"),
         |_, _| panic!("factory"),
     );
-    assert!(matches!(result,Err(NavigationError::State(ref e)) if e=="decode"));
+    assert!(matches!(result,Err(NavigationError::StateSource(ref e)) if e.to_string() == "decode"));
     assert_eq!(parent.state_store().save().unwrap(), saved);
     let parent = root();
     let options = PanelsOptions {
@@ -1439,7 +1439,7 @@ fn malformed_restoration_returns_exact_input_and_allows_same_key_retry() {
             |_, _| panic!("factory"),
             |_, _| panic!("factory")
         ),
-        Err(NavigationError::State(_))
+        Err(NavigationError::StateSource(_))
     ));
     assert_eq!(parent.state_store().save().unwrap(), invalid);
     assert!(
@@ -1489,7 +1489,10 @@ fn next_key_exhaustion_reports_error_before_factory_and_keeps_current_state() {
     let error = Rc::new(RefCell::new(None));
     let out = error.clone();
     nav.activate_main_with(4, move |r| *out.borrow_mut() = r.err());
-    assert!(matches!(*error.borrow(), Some(NavigationError::State(_))));
+    assert!(matches!(
+        *error.borrow(),
+        Some(NavigationError::StateSource(_))
+    ));
     assert_eq!(calls.get(), 1);
     assert!(Rc::ptr_eq(
         &before.main.instance,

@@ -66,7 +66,7 @@ impl<C: Eq + 'static, T: 'static> super::engine::Model<C, T> for SlotModel<C> {
     }
     fn validate(&self, configurations: &Vec<Rc<C>>) -> Result<(), NavigationError> {
         if configurations.len() > 1 {
-            return Err(NavigationError::State(
+            return Err(NavigationError::state_message(
                 "slot requires zero or one configuration".into(),
             ));
         }

@@ -15,9 +15,9 @@ pub type StackEvent<C> = NavigationEvent<Vec<Rc<C>>, NavigationResult<C>>;
 /// Implement `navigate_with` to inherit the standard helper policies.
 /// Generic callbacks use static dispatch; this trait is not object-safe.
 pub trait StackNavigator<C: 'static> {
-    /// Removes every configuration of the selected kind, then appends the new
-    /// configuration. This is kind replacement, with the same occurrence/key
-    /// matching as the existing bring-to-front helper.
+    /// Deprecated alias, use `try_bring_to_front_by`.
+    /// Removes all selected-kind matches and appends the provided configuration.
+    #[doc(hidden)]
     fn try_replace_kind_and_push<K: Eq>(
         &self,
         configuration: C,
@@ -121,6 +121,8 @@ pub trait StackNavigator<C: 'static> {
         let configurations: Vec<_> = configurations.into_iter().map(Rc::new).collect();
         self.try_navigate(move |_| configurations.clone())
     }
+    /// Removes all configurations matching the selected kind and appends the provided one.
+    /// Equal surviving configurations retain their child identity.
     /// Fallible counterpart of `bring_to_front_by`; accepted nested work returns a pending receipt.
     /// Stored transformations own their captures because FIFO delivery may outlive this call.
     fn try_bring_to_front_by<K: Eq>(
@@ -308,23 +310,13 @@ impl<C: 'static> Default for StackNavigation<C> {
     }
 }
 impl<C: 'static> StackNavigation<C> {
-    /// Removes all selected-kind matches before appending; returns errors or an
-    /// accepted FIFO receipt. The selector is retained until event delivery.
-    pub fn try_replace_kind_and_push<K: Eq>(
-        &self,
-        configuration: C,
-        selector: impl Fn(&C) -> K + 'static,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_replace_kind_and_push(self, configuration, selector)
-    }
     /// Creates an empty source. Events without receivers are discarded.
     pub fn new() -> Self {
         Self {
             source: SimpleNavigation::new(),
         }
     }
-    /// Transforms each connected stack and reports its committed result after publication.
-    /// Panics clear queued events and propagate; the source remains usable afterward.
+    /// See [`StackNavigator::navigate_with`].
     pub fn navigate_with(
         &self,
         transformer: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static,
@@ -365,166 +357,5 @@ impl<C: 'static> StackNavigation<C> {
             std::convert::identity,
             std::convert::identity,
         )
-    }
-}
-
-impl<C: 'static> StackNavigation<C> {
-    /// Fallible counterpart of `navigate`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_navigate(
-        &self,
-        transformer: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_navigate(self, transformer)
-    }
-    /// Fallible counterpart of `push`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_push(
-        &self,
-        configuration: C,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_push(self, configuration)
-    }
-    /// Fallible counterpart of `pop`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_pop(
-        &self,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_pop(self)
-    }
-    /// Fallible counterpart of `pop_while`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_pop_while(
-        &self,
-        predicate: impl Fn(&C) -> bool + 'static,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_pop_while(self, predicate)
-    }
-    /// Fallible counterpart of `pop_to`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_pop_to(
-        &self,
-        index: usize,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_pop_to(self, index)
-    }
-    /// Fallible counterpart of `pop_to_first`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_pop_to_first(
-        &self,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_pop_to_first(self)
-    }
-    /// Fallible counterpart of `replace_current`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_replace_current(
-        &self,
-        configuration: C,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_replace_current(self, configuration)
-    }
-    /// Fallible counterpart of `replace_all`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_replace_all(
-        &self,
-        configurations: Vec<C>,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_replace_all(self, configurations)
-    }
-    /// Fallible counterpart of `bring_to_front_by`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_bring_to_front_by<K: Eq>(
-        &self,
-        configuration: C,
-        selector: impl Fn(&C) -> K + 'static,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        StackNavigator::try_bring_to_front_by(self, configuration, selector)
-    }
-    /// Fallible counterpart of `push_new`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_push_new(
-        &self,
-        configuration: C,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError>
-    where
-        C: Eq,
-    {
-        StackNavigator::try_push_new(self, configuration)
-    }
-    /// Fallible counterpart of `push_to_front`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_push_to_front(
-        &self,
-        configuration: C,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError>
-    where
-        C: Eq,
-    {
-        StackNavigator::try_push_to_front(self, configuration)
-    }
-    /// Explicitly panicking compatibility operation. See `try_navigate` for errors.
-    #[track_caller]
-    pub fn navigate_or_panic(&self, transformer: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static) {
-        StackNavigator::navigate_or_panic(self, transformer)
-    }
-    /// Explicitly panicking compatibility operation. See `try_push` for errors.
-    #[track_caller]
-    pub fn push_or_panic(&self, configuration: C) {
-        StackNavigator::push_or_panic(self, configuration)
-    }
-    /// Explicitly panicking compatibility operation. See `try_pop` for errors.
-    #[track_caller]
-    pub fn pop_or_panic(&self) {
-        StackNavigator::pop_or_panic(self)
-    }
-    /// Explicitly panicking compatibility operation. See `try_pop_while` for errors.
-    #[track_caller]
-    pub fn pop_while_or_panic(&self, predicate: impl Fn(&C) -> bool + 'static) {
-        StackNavigator::pop_while_or_panic(self, predicate)
-    }
-    /// Explicitly panicking compatibility operation. See `try_pop_to` for errors.
-    #[track_caller]
-    pub fn pop_to_or_panic(&self, index: usize) {
-        StackNavigator::pop_to_or_panic(self, index)
-    }
-    /// Explicitly panicking compatibility operation. See `try_pop_to_first` for errors.
-    #[track_caller]
-    pub fn pop_to_first_or_panic(&self) {
-        StackNavigator::pop_to_first_or_panic(self)
-    }
-    /// Explicitly panicking compatibility operation. See `try_replace_current` for errors.
-    #[track_caller]
-    pub fn replace_current_or_panic(&self, configuration: C) {
-        StackNavigator::replace_current_or_panic(self, configuration)
-    }
-    /// Explicitly panicking compatibility operation. See `try_replace_all` for errors.
-    #[track_caller]
-    pub fn replace_all_or_panic(&self, configurations: Vec<C>) {
-        StackNavigator::replace_all_or_panic(self, configurations)
-    }
-    /// Explicitly panicking compatibility operation. See `try_bring_to_front_by` for errors.
-    #[track_caller]
-    pub fn bring_to_front_by_or_panic<K: Eq>(
-        &self,
-        configuration: C,
-        selector: impl Fn(&C) -> K + 'static,
-    ) {
-        StackNavigator::bring_to_front_by_or_panic(self, configuration, selector)
-    }
-    /// Explicitly panicking compatibility operation. See `try_push_new` for errors.
-    #[track_caller]
-    pub fn push_new_or_panic(&self, configuration: C)
-    where
-        C: Eq,
-    {
-        StackNavigator::push_new_or_panic(self, configuration)
-    }
-    /// Explicitly panicking compatibility operation. See `try_push_to_front` for errors.
-    #[track_caller]
-    pub fn push_to_front_or_panic(&self, configuration: C)
-    where
-        C: Eq,
-    {
-        StackNavigator::push_to_front_or_panic(self, configuration)
     }
 }

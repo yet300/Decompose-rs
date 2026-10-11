@@ -1,4 +1,4 @@
-use decompose_rs::router::stack::{StackNavigation, StackOptions, child_stack};
+use decompose_rs::router::stack::{StackNavigation, StackNavigator, StackOptions, child_stack};
 use decompose_rs::router::webhistory::{
     HistoryBackend, HistoryController, HistoryError, MemoryHistoryBackend, RouteCodec, RouteInfo,
     StackHistoryController, stack_web_navigation,

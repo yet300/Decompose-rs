@@ -61,6 +61,8 @@ contexts and options; `ctx.state_keeper().borrow_mut()` becomes
 unaffected. The compatibility matrix records the new spellings; the pre-removal
 behavior remains described by the ADR history.
 
+Migrating `State(String)` failures to `StateSource(ErrorSource)` changes `PartialEq` from message equality to source identity and changes `Debug`; `Display` is preserved (`navigation state: …`).
+
 Verification: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test --all-targets` (519 tests), `cargo test --doc` (1 doctest), strict
 `cargo doc`, all 15 examples, and `cargo check --lib` on all 24 installed

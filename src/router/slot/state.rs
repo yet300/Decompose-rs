@@ -69,9 +69,9 @@ impl<C> SlotCodec<C> {
         decode: impl Fn(&[u8]) -> Result<C, String> + 'static,
     ) -> Self {
         Self {
-            encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+            encode: Rc::new(move |value| encode(value).map_err(NavigationError::state_message)),
             decode: Decoder::Configuration(Rc::new(move |bytes| {
-                decode(bytes).map_err(NavigationError::State)
+                decode(bytes).map_err(NavigationError::state_message)
             })),
             should_save: None,
             should_restore: None,
@@ -90,9 +90,9 @@ impl<C> SlotCodec<C> {
         decode: impl Fn(&[u8]) -> Result<Option<C>, String> + 'static,
     ) -> Self {
         Self {
-            encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
+            encode: Rc::new(move |value| encode(value).map_err(NavigationError::state_message)),
             decode: Decoder::State(Rc::new(move |bytes| {
-                decode(bytes).map_err(NavigationError::State)
+                decode(bytes).map_err(NavigationError::state_message)
             })),
             should_save: None,
             should_restore: None,
@@ -127,7 +127,7 @@ impl<C> SlotCodec<C> {
 }
 
 fn error(message: impl Into<String>) -> NavigationError {
-    NavigationError::State(message.into())
+    NavigationError::state_message(message.into())
 }
 fn field(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), NavigationError> {
     let length = u32::try_from(bytes.len()).map_err(|_| error("DSL1 field exceeds u32 length"))?;

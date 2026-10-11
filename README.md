@@ -27,7 +27,7 @@ latest release. See `NOTICE` for attribution.
 
 ```rust
 use decompose_rs::{DefaultComponentContext, LifecycleRegistry, LifecycleState};
-use decompose_rs::router::stack::{child_stack, StackNavigation, StackOptions};
+use decompose_rs::router::stack::{child_stack, StackNavigation, StackNavigator, StackOptions};
 
 #[derive(PartialEq, Eq)]
 enum Route { Home, Details(u32) } // No Clone requirement.
@@ -88,8 +88,9 @@ after publication and cancel their connection when the hosting lifecycle ends.
 `StackNavigator`, `SlotNavigator`, `PagesNavigator`, `PanelsNavigator` and
 `ItemsNavigator` expose reusable operations. Custom implementations supply
 `navigate_with` and inherit the family helpers. These traits use static dispatch
-because their callbacks are generic; `NavigationSource` is object-safe. Existing
-inherent concrete methods remain available without importing navigator traits.
+because their callbacks are generic; `NavigationSource` is object-safe. Concrete
+helper calls require the corresponding navigator trait in scope;
+`new` and `navigate_with` remain inherent methods.
 
 The shared `SimpleNavigation` transport preserves event Rc identity, registration
 order and nested FIFO delivery. It discards disconnected events and never replays
@@ -217,8 +218,9 @@ during synchronous replay and rolls back registrations when replay panics.
 `try_pop_to`/`pop_to_or_panic`, `try_pop_to_first`/`pop_to_first_or_panic`,
 `try_replace_current`/`replace_current_or_panic`,
 `try_replace_all`/`replace_all_or_panic` and
-`try_bring_to_front_by`/`bring_to_front_by_or_panic` (plus
-`try_replace_kind_and_push`). Root pop and pushing an already active
+`try_bring_to_front_by`/`bring_to_front_by_or_panic` (with the hidden alias
+`try_replace_kind_and_push` forwarding to `try_bring_to_front_by`). Root pop and
+pushing an already active
 configuration with `push_new_or_panic` are no-ops. `bring_to_front_by_or_panic` takes a kind
 selector so Rust enum variants can replace Kotlin runtime-class matching.
 
@@ -243,7 +245,7 @@ Use None as the initial configuration for an empty slot. The factory receives
 `&C` and the same custom context type used by the parent.
 
 ```rust
-use decompose_rs::router::slot::{child_slot, SlotNavigation, SlotOptions};
+use decompose_rs::router::slot::{child_slot, SlotNavigation, SlotNavigator, SlotOptions};
 use decompose_rs::{DefaultComponentContext, LifecycleRegistry, LifecycleState};
 
 let lifecycle = LifecycleRegistry::new();
@@ -406,7 +408,7 @@ and surviving keys use the canonical membership handle. Duplicate member
 configurations are always rejected; there is no opt-in for duplicates.
 
 ```rust
-use decompose_rs::router::items::{child_items, Items, ItemsNavigation, ItemsOptions};
+use decompose_rs::router::items::{child_items, Items, ItemsNavigation, ItemsNavigator, ItemsOptions};
 use decompose_rs::{ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState};
 
 let lifecycle = LifecycleRegistry::new();

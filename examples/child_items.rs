@@ -1,5 +1,6 @@
 use decompose_rs::router::items::{
-    ActiveLifecycleState, ItemMap, Items, ItemsCodec, ItemsNavigation, ItemsOptions, child_items,
+    ActiveLifecycleState, ItemMap, Items, ItemsCodec, ItemsNavigation, ItemsNavigator,
+    ItemsOptions, child_items,
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,

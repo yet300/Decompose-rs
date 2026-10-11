@@ -188,7 +188,7 @@ pub(crate) fn subscribe<S: 'static, R: 'static, I: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::router::stack::StackNavigation;
+    use crate::router::stack::{StackNavigation, StackNavigator};
     use std::cell::{Cell, RefCell};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -212,6 +212,24 @@ mod tests {
     }
     fn contents(stack: &RefCell<Vec<Rc<u8>>>) -> Vec<u8> {
         stack.borrow().iter().map(|c| **c).collect()
+    }
+
+    #[test]
+    fn replace_kind_alias_matches_bring_to_front_removing_all_matches() {
+        let (navigation, stack, _token) = connected(vec![2, 1, 4, 3, 6]);
+        let (alias, alias_stack, _alias_token) = connected(vec![2, 1, 4, 3, 6]);
+
+        assert!(matches!(
+            navigation.try_bring_to_front_by(8, |c| c % 2).unwrap(),
+            NavigationOutcome::Completed(_)
+        ));
+        assert!(matches!(
+            alias.try_replace_kind_and_push(8, |c| c % 2).unwrap(),
+            NavigationOutcome::Completed(_)
+        ));
+
+        assert_eq!(*stack.borrow(), vec![Rc::new(1), Rc::new(3), Rc::new(8)]);
+        assert_eq!(*alias_stack.borrow(), *stack.borrow());
     }
 
     #[test]

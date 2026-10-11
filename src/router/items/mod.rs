@@ -310,7 +310,14 @@ impl<C: Eq + 'static, T: 'static> LazyChildItems<C, T> {
         self.control.ensure_child_available(&child.child.key)?;
         Ok(child.child.instance.clone())
     }
-    navigation::inherent_navigation!();
+    /// See [`ItemsNavigator::navigate_with`].
+    pub fn navigate_with(
+        &self,
+        transformer: impl Fn(Items<C>) -> Items<C> + 'static,
+        completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
+    ) {
+        ItemsNavigator::navigate_with(self, transformer, completion)
+    }
 }
 impl<C: Eq + 'static, T: 'static> ItemsNavigator<C> for LazyChildItems<C, T> {
     fn navigate_with(

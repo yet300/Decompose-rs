@@ -48,8 +48,8 @@ impl<C> StackCodec<C> {
         decode: impl Fn(&[u8]) -> Result<Vec<C>, String> + 'static,
     ) -> Self {
         Self {
-            encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
-            decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+            encode: Rc::new(move |value| encode(value).map_err(NavigationError::state_message)),
+            decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::state_message)),
             should_save: None,
             should_restore: None,
         }
@@ -81,7 +81,7 @@ impl<C> Clone for StackCodec<C> {
 use crate::router::engine::SavedState as SavedStack;
 const MAGIC: &[u8; 4] = b"DST1";
 fn state_error(message: impl Into<String>) -> NavigationError {
-    NavigationError::State(message.into())
+    NavigationError::state_message(message.into())
 }
 fn append_field(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), NavigationError> {
     let length =
@@ -316,21 +316,21 @@ mod tests {
             .unwrap();
         bytes[last_key..last_key + 7].copy_from_slice(b"stack/0");
         assert!(
-            matches!(decode(&codec(), &bytes), Err(NavigationError::State(message)) if message.contains("duplicate"))
+            matches!(decode(&codec(), &bytes), Err(NavigationError::StateSource(message)) if message.to_string().contains("duplicate"))
         );
         let encode_failure = StackCodec::new(
             |_: &[Rc<u8>]| Err("encode failure".into()),
             |_| Ok(vec![1u8]),
         );
         assert!(
-            matches!(encode(&encode_failure, &[Rc::new(1)], &[("stack/0".into(), BTreeMap::new())], 1), Err(NavigationError::State(message)) if message=="encode failure")
+            matches!(encode(&encode_failure, &[Rc::new(1)], &[("stack/0".into(), BTreeMap::new())], 1), Err(NavigationError::StateSource(message)) if message.to_string() == "encode failure")
         );
         let decode_failure = StackCodec::new(
             |_: &[Rc<u8>]| Ok(vec![]),
             |_| Err::<Vec<u8>, _>("decode failure".into()),
         );
         assert!(
-            matches!(decode(&decode_failure, &sample()), Err(NavigationError::State(message)) if message=="decode failure")
+            matches!(decode(&decode_failure, &sample()), Err(NavigationError::StateSource(message)) if message.to_string() == "decode failure")
         );
     }
 }

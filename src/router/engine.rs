@@ -202,9 +202,11 @@ impl<C, T> Managed<C, T> {
                 .parts
                 .state
                 .try_borrow()
-                .map_err(|_| NavigationError::State("child state keeper is borrowed".into()))?
+                .map_err(|_| {
+                    NavigationError::state_message("child state keeper is borrowed".into())
+                })?
                 .save()
-                .map_err(|error| NavigationError::State(error.to_string())),
+                .map_err(NavigationError::state_source),
             None => Ok(self.saved.persistent().clone()),
         }
     }
@@ -214,9 +216,11 @@ impl<C, T> Managed<C, T> {
                 .parts
                 .state
                 .try_borrow()
-                .map_err(|_| NavigationError::State("child state keeper is borrowed".into()))?
+                .map_err(|_| {
+                    NavigationError::state_message("child state keeper is borrowed".into())
+                })?
                 .save_snapshot()
-                .map_err(|error| NavigationError::State(error.to_string())),
+                .map_err(NavigationError::state_source),
             None => Ok(self.saved.clone()),
         }
     }
@@ -528,7 +532,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                 } else {
                     let key = format!("child/{counter}");
                     counter = counter.checked_add(1).ok_or_else(|| {
-                        NavigationError::State("child key counter exhausted".into())
+                        NavigationError::state_message("child key counter exhausted".into())
                     })?;
                     (key, crate::StateSnapshot::default())
                 };
@@ -973,16 +977,16 @@ where
         });
     let memory = restored_memory
         .map(|value| {
-            value
-                .downcast::<MemoryNavigation<M::State>>()
-                .map_err(|_| NavigationError::State("memory navigation state type mismatch".into()))
+            value.downcast::<MemoryNavigation<M::State>>().map_err(|_| {
+                NavigationError::state_message("memory navigation state type mismatch".into())
+            })
         })
         .transpose()?;
     if memory
         .as_ref()
         .is_some_and(|saved| saved.kind != model.memory_kind())
     {
-        return Err(NavigationError::State(
+        return Err(NavigationError::state_message(
             "memory navigation model mismatch".into(),
         ));
     }
@@ -1005,7 +1009,7 @@ where
     if let Some(saved) = &restored {
         model.validate(&saved.configurations)?;
         if model.configurations(&saved.configurations).len() != saved.children.len() {
-            return Err(NavigationError::State(
+            return Err(NavigationError::state_message(
                 "saved child count does not match configurations".into(),
             ));
         }
@@ -1018,7 +1022,7 @@ where
                 counter < saved.next_key && key == &format!("child/{counter}")
             }) || !keys.insert(key)
             {
-                return Err(NavigationError::State(
+                return Err(NavigationError::state_message(
                     "invalid child identity or next-key counter".into(),
                 ));
             }

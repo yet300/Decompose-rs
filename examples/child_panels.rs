@@ -1,5 +1,6 @@
 use decompose_rs::router::panels::{
-    ChildPanelsMode, Panels, PanelsCodec, PanelsNavigation, PanelsOptions, child_panels,
+    ChildPanelsMode, Panels, PanelsCodec, PanelsNavigation, PanelsNavigator, PanelsOptions,
+    child_panels,
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,

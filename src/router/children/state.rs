@@ -18,8 +18,8 @@ impl<N> NavStateCodec<N> {
         decode: impl Fn(&[u8]) -> Result<Option<N>, String> + 'static,
     ) -> Self {
         Self {
-            encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
-            decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+            encode: Rc::new(move |value| encode(value).map_err(NavigationError::state_message)),
+            decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::state_message)),
         }
     }
     /// Uses typed navigation errors, including `NavigationError::state_source`.
@@ -49,7 +49,7 @@ impl<N> NavStateCodec<N> {
     }
 }
 fn error(message: impl Into<String>) -> NavigationError {
-    NavigationError::State(message.into())
+    NavigationError::state_message(message.into())
 }
 fn field(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), NavigationError> {
     let length = u32::try_from(bytes.len()).map_err(|_| error("DCH1 field exceeds u32 length"))?;

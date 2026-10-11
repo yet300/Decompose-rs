@@ -1,6 +1,6 @@
 use decompose_rs::router::{
-    slot::{SlotCodec, SlotNavigation, SlotOptions, child_slot},
-    stack::{StackNavigation, StackOptions, child_stack},
+    slot::{SlotCodec, SlotNavigation, SlotNavigator, SlotOptions, child_slot},
+    stack::{StackNavigation, StackNavigator, StackOptions, child_stack},
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,

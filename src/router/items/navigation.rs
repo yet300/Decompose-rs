@@ -132,6 +132,14 @@ impl<C: 'static> Default for ItemsNavigation<C> {
     }
 }
 impl<C: 'static> ItemsNavigation<C> {
+    /// See [`ItemsNavigator::navigate_with`].
+    pub fn navigate_with(
+        &self,
+        transformer: impl Fn(Items<C>) -> Items<C> + 'static,
+        completion: impl Fn(Result<NavigationResult<C>, NavigationError>) + 'static,
+    ) {
+        ItemsNavigator::navigate_with(self, transformer, completion)
+    }
     /// Creates an empty source.
     pub fn new() -> Self {
         Self {
@@ -153,66 +161,6 @@ impl<C: 'static> ItemsNavigator<C> for ItemsNavigation<C> {
             });
     }
 }
-macro_rules! inherent_navigation {
- () => {
- /// Applies a state transformer, completing after publication.
- pub fn navigate_with(&self,transformer:impl Fn(Items<C>)->Items<C>+'static,completion:impl Fn(Result<NavigationResult<C>,NavigationError>)+'static) {ItemsNavigator::navigate_with(self,transformer,completion)}
- /// Transforms membership and receives completion.
- pub fn set_items_with(&self,transformer:impl Fn(Vec<Rc<C>>)->Vec<Rc<C>>+'static,completion:impl Fn(Result<NavigationResult<C>,NavigationError>)+'static) {ItemsNavigator::set_items_with(self,transformer,completion)}
- /// Transforms requested targets and receives completion.
- pub fn set_active_items_with(&self,transformer:impl Fn(ItemMap<C,ActiveLifecycleState>)->ItemMap<C,ActiveLifecycleState>+'static,completion:impl Fn(Result<NavigationResult<C>,NavigationError>)+'static) {ItemsNavigator::set_active_items_with(self,transformer,completion)}
-
-    /// Fallible counterpart of `navigate`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_navigate(
-        &self,
-        transformer: impl Fn(Items<C>) -> Items<C> + 'static,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        ItemsNavigator::try_navigate(self, transformer)
-    }
-    /// Fallible counterpart of `set_items`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_set_items(
-        &self,
-        transformer: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        ItemsNavigator::try_set_items(self, transformer)
-    }
-    /// Fallible counterpart of `set_active_items`; accepted nested work returns a pending receipt.
-    /// Stored transformations own their captures because FIFO delivery may outlive this call.
-    pub fn try_set_active_items(
-        &self,
-        transformer: impl Fn(ItemMap<C, ActiveLifecycleState>) -> ItemMap<C, ActiveLifecycleState>
-        + 'static,
-    ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
-        ItemsNavigator::try_set_active_items(self, transformer)
-    }
-    /// Explicitly panicking compatibility operation. See `try_navigate` for errors.
-    #[track_caller]
-    pub fn navigate_or_panic(&self, transformer: impl Fn(Items<C>) -> Items<C> + 'static) {
-        ItemsNavigator::navigate_or_panic(self, transformer)
-    }
-    /// Explicitly panicking compatibility operation. See `try_set_items` for errors.
-    #[track_caller]
-    pub fn set_items_or_panic(&self, transformer: impl Fn(Vec<Rc<C>>) -> Vec<Rc<C>> + 'static) {
-        ItemsNavigator::set_items_or_panic(self, transformer)
-    }
-    /// Explicitly panicking compatibility operation. See `try_set_active_items` for errors.
-    #[track_caller]
-    pub fn set_active_items_or_panic(
-        &self,
-        transformer: impl Fn(ItemMap<C, ActiveLifecycleState>) -> ItemMap<C, ActiveLifecycleState>
-        + 'static,
-    ) {
-        ItemsNavigator::set_active_items_or_panic(self, transformer)
-    }
- };
-}
-pub(crate) use inherent_navigation;
-impl<C: 'static> ItemsNavigation<C> {
-    inherent_navigation!();
-}
-
 /// Public Items state transformation and per-receiver completion.
 pub type ItemsEvent<C> = NavigationEvent<Items<C>, NavigationResult<C>>;
 impl<C: 'static> NavigationSource<ItemsEvent<C>> for ItemsNavigation<C> {
