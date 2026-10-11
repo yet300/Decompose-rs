@@ -11,7 +11,9 @@ mod stack_history;
 pub use adapters::{
     PanelRouteKey, pages_web_navigation, panels_web_navigation, stack_web_navigation,
 };
-pub use backend::{HistoryBackend, HistoryEntry, MemoryHistoryBackend};
+pub use backend::{
+    HistoryBackend, HistoryDestination, HistoryEntry, HistoryLocation, MemoryHistoryBackend,
+};
 pub use controller::HistoryController;
 pub use stack_history::StackHistoryController;
 

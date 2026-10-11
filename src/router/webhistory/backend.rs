@@ -14,6 +14,34 @@ pub struct HistoryEntry {
     pub url: String,
 }
 
+/// Stable identity of a host entry, independent of managed indices or physical
+/// positions. Hosts allocate once per entry and retain it across replacement;
+/// discarded entries must never donate their identity to a new entry.
+#[derive(Clone, Debug, Default)]
+pub struct HistoryLocation(Rc<()>);
+impl HistoryLocation {
+    /// Allocates a distinct host-entry identity.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+impl PartialEq for HistoryLocation {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for HistoryLocation {}
+
+/// Destination captured atomically when the host commits a Pop notification.
+/// Includes unmanaged entries; queued work retains this original URL and state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryDestination {
+    /// Stable host identity; never a managed index or inferred physical offset.
+    pub location: HistoryLocation,
+    /// Original entry contents at notification time.
+    pub entry: HistoryEntry,
+}
+
 /// Host operations required by the independent synchronization core.
 ///
 /// `push` and `replace` must not generate pop notifications. `go` emits the
@@ -23,24 +51,40 @@ pub struct HistoryEntry {
 /// dropping completion. Subscriptions cancel on drop and may coexist.
 pub trait HistoryBackend {
     /// Current entry, or None before any entry exists.
-    fn current(&self) -> Option<HistoryEntry>;
+    fn current(&self) -> Option<HistoryEntry> {
+        self.current_destination()
+            .map(|destination| destination.entry)
+    }
+    /// Atomically snapshots the current entry and its stable host identity.
+    fn current_destination(&self) -> Option<HistoryDestination>;
     /// Replaces the current entry (creates the initial entry when absent).
     fn replace(&self, entry: HistoryEntry) -> Result<(), super::HistoryError>;
+    /// Replaces exactly the captured destination without moving the host or
+    /// notifying Pop listeners. Reject missing, changed or unsupported targets
+    /// with an error, leaving all entries and the current position unchanged.
+    /// The original snapshot must still match; never substitute the current
+    /// entry or derive a physical position from a managed index.
+    fn replace_destination(
+        &self,
+        destination: &HistoryDestination,
+        entry: HistoryEntry,
+    ) -> Result<(), super::HistoryError>;
     /// Appends an entry and discards the forward branch.
     fn push(&self, entry: HistoryEntry) -> Result<(), super::HistoryError>;
     /// Moves through existing entries and completes after the pop notification.
     fn go(&self, delta: isize, completion: HistoryCompletion);
     /// Registers notifications for host Back/Forward movement.
-    fn subscribe(&self, observer: Rc<dyn Fn(Option<HistoryState>)>) -> Subscription;
+    fn subscribe(&self, observer: Rc<dyn Fn(HistoryDestination)>) -> Subscription;
 }
 
 struct Listener {
-    callback: Rc<dyn Fn(Option<HistoryState>)>,
+    callback: Rc<dyn Fn(HistoryDestination)>,
     active: Cell<bool>,
 }
 #[derive(Default)]
 struct Memory {
     entries: Vec<HistoryEntry>,
+    locations: Vec<HistoryLocation>,
     position: usize,
 }
 
@@ -66,7 +110,11 @@ impl MemoryHistoryBackend {
             ));
         }
         Ok(Self {
-            memory: Rc::new(RefCell::new(Memory { entries, position })),
+            memory: Rc::new(RefCell::new(Memory {
+                locations: (0..entries.len()).map(|_| HistoryLocation::new()).collect(),
+                entries,
+                position,
+            })),
             listeners: Rc::default(),
         })
     }
@@ -84,30 +132,60 @@ impl MemoryHistoryBackend {
     }
 }
 impl HistoryBackend for MemoryHistoryBackend {
-    fn current(&self) -> Option<HistoryEntry> {
+    fn current_destination(&self) -> Option<HistoryDestination> {
         let memory = self.memory.borrow();
-        memory.entries.get(memory.position).cloned()
+        memory
+            .entries
+            .get(memory.position)
+            .map(|entry| HistoryDestination {
+                entry: entry.clone(),
+                location: memory.locations[memory.position].clone(),
+            })
     }
     fn replace(&self, entry: HistoryEntry) -> Result<(), super::HistoryError> {
         let mut memory = self.memory.borrow_mut();
         let position = memory.position;
         if memory.entries.is_empty() {
             memory.entries.push(entry);
+            memory.locations.push(HistoryLocation::new());
         } else {
             memory.entries[position] = entry;
         }
+        Ok(())
+    }
+    fn replace_destination(
+        &self,
+        destination: &HistoryDestination,
+        entry: HistoryEntry,
+    ) -> Result<(), super::HistoryError> {
+        let mut memory = self.memory.borrow_mut();
+        let position = memory
+            .locations
+            .iter()
+            .position(|location| *location == destination.location)
+            .ok_or_else(|| {
+                super::HistoryError::Backend("history destination no longer exists".into())
+            })?;
+        if memory.entries[position] != destination.entry {
+            return Err(super::HistoryError::Backend(
+                "history destination changed".into(),
+            ));
+        }
+        memory.entries[position] = entry;
         Ok(())
     }
     fn push(&self, entry: HistoryEntry) -> Result<(), super::HistoryError> {
         let mut memory = self.memory.borrow_mut();
         let next = memory.position + usize::from(!memory.entries.is_empty());
         memory.entries.truncate(next);
+        memory.locations.truncate(next);
         memory.entries.push(entry);
+        memory.locations.push(HistoryLocation::new());
         memory.position = next;
         Ok(())
     }
     fn go(&self, delta: isize, completion: HistoryCompletion) {
-        let state = {
+        let destination = {
             let mut memory = self.memory.borrow_mut();
             let Some(target) = memory
                 .position
@@ -121,17 +199,20 @@ impl HistoryBackend for MemoryHistoryBackend {
                 return;
             };
             memory.position = target;
-            memory.entries[target].state.clone()
+            HistoryDestination {
+                entry: memory.entries[target].clone(),
+                location: memory.locations[target].clone(),
+            }
         };
         let listeners = self.listeners.borrow().clone();
         for listener in listeners {
             if listener.active.get() {
-                (listener.callback)(state.clone());
+                (listener.callback)(destination.clone());
             }
         }
         completion(Ok(()));
     }
-    fn subscribe(&self, observer: Rc<dyn Fn(Option<HistoryState>)>) -> Subscription {
+    fn subscribe(&self, observer: Rc<dyn Fn(HistoryDestination)>) -> Subscription {
         let listener = Rc::new(Listener {
             callback: observer,
             active: Cell::new(true),

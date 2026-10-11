@@ -637,6 +637,8 @@ applications choose their initial deep-link/history reconstruction. Optional
 Typed rejection or a portable recreation hook handles mismatches, including
 deferred completions and replacement lifecycle bindings. Hosts map absent legacy
 version fields to `None`. See [history versioning](docs/history-versioning.md).
+Custom backends must implement stable destination snapshots and safe targeted
+replacement; see [host API migration](docs/history-versioning.md#host-destination-api-migration).
 Neither Rust navigation
 frames nor history state decode Kotlin SerializableContainer or Kotlin JSON bytes.
 
@@ -730,7 +732,9 @@ The [CI workflow](.github/workflows/ci.yml) runs strict checks, subprocess and
 comparison-count regressions, all 15 examples, wasm/Android/iOS library checks,
 and packaged-crate verification using published dependencies. Current executed
 results and remaining limits are recorded in the
-[audit remediation report](docs/audits/2026-10-11-remediation-results.md).
+[follow-up resolution](docs/audits/2026-10-11-follow-up-resolution.md).
+The [original remediation report](docs/audits/2026-10-11-remediation-results.md)
+and [follow-up review](docs/audits/2026-10-11-remediation-review.md) remain historical evidence.
 Historical checks are recorded in the
 [independent-core completion plan](docs/superpowers/plans/2026-10-10-independent-core-completion.md).
 The stage adds regression coverage for selective/whole-state persistence,

@@ -44,6 +44,606 @@ fn state(index: usize, version: Option<&str>, key: u8) -> HistoryEntry {
 }
 
 #[test]
+fn queued_recreation_uses_original_pop_url_and_preserves_latest_host_position() {
+    let source = MutableValue::new(vec![route(3)]);
+    let replacement = MutableValue::new(vec![route(9)]);
+    let decodes = Rc::new(Cell::new(0));
+    let backend = Rc::new(
+        MemoryHistoryBackend::with_entries(
+            vec![
+                state(0, Some("old"), 1),
+                state(1, Some("old"), 2),
+                state(2, Some("new"), 3),
+            ],
+            2,
+        )
+        .unwrap(),
+    );
+    let pending = Rc::new(RefCell::new(Vec::<HistoryRecreationCompletion>::new()));
+    let out = pending.clone();
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let log = requests.clone();
+    let _binding = HistoryController::attach_with_options(
+        nav(&source, &decodes),
+        backend.clone(),
+        HistoryOptions {
+            version: Some("new".into()),
+            recovery: HistoryRecoveryPolicy::Recreate(Rc::new(move |request, done| {
+                log.borrow_mut().push(request.url);
+                out.borrow_mut().push(done);
+            })),
+        },
+    )
+    .unwrap();
+    backend.go(-2, Box::new(|r| r.unwrap()));
+    backend.go(1, Box::new(|r| r.unwrap()));
+    let done = pending.borrow_mut().remove(0);
+    done(Ok(HistoryRoot::new(nav(&replacement, &decodes))));
+    assert_eq!(*requests.borrow(), ["/1", "/2"]);
+    assert_eq!(backend.position(), 1);
+    assert_eq!(backend.entries()[0].url, "/9");
+    let second = MutableValue::new(vec![route(8)]);
+    let done = pending.borrow_mut().remove(0);
+    done(Ok(HistoryRoot::new(nav(&second, &decodes))));
+    assert_eq!(
+        backend
+            .entries()
+            .iter()
+            .map(|entry| entry.url.as_str())
+            .collect::<Vec<_>>(),
+        ["/9", "/8", "/3"]
+    );
+    assert_eq!(backend.position(), 1);
+    backend.go(1, Box::new(|r| r.unwrap()));
+    assert_eq!(*second.get().last().unwrap().key, 3);
+    assert_eq!(backend.position(), 2);
+}
+
+#[test]
+fn late_recreation_preserves_unmanaged_entry_and_updates_actual_managed_destination() {
+    let source = MutableValue::new(vec![route(3)]);
+    let replacement = MutableValue::new(vec![route(9)]);
+    let decodes = Rc::new(Cell::new(0));
+    let external = HistoryEntry {
+        state: None,
+        url: "/external".into(),
+    };
+    let backend = Rc::new(
+        MemoryHistoryBackend::with_entries(
+            vec![
+                external.clone(),
+                state(0, Some("old"), 1),
+                state(1, Some("new"), 3),
+            ],
+            2,
+        )
+        .unwrap(),
+    );
+    let pending = Rc::new(RefCell::new(None::<HistoryRecreationCompletion>));
+    let out = pending.clone();
+    let _binding = HistoryController::attach_with_options(
+        nav(&source, &decodes),
+        backend.clone(),
+        HistoryOptions {
+            version: Some("new".into()),
+            recovery: HistoryRecoveryPolicy::Recreate(Rc::new(move |request, done| {
+                assert_eq!(request.url, "/1");
+                *out.borrow_mut() = Some(done);
+            })),
+        },
+    )
+    .unwrap();
+    backend.go(-1, Box::new(|r| r.unwrap()));
+    backend.go(-1, Box::new(|r| r.unwrap()));
+    let done = pending.borrow_mut().take().unwrap();
+    done(Ok(HistoryRoot::new(nav(&replacement, &decodes))));
+    assert_eq!(backend.entries()[0], external);
+    assert_eq!(backend.entries()[1].url, "/9");
+    assert_eq!(backend.entries()[2].url, "/3");
+    assert_eq!(backend.position(), 0);
+    backend.go(1, Box::new(|r| r.unwrap()));
+    assert_eq!(*replacement.get().last().unwrap().key, 9);
+    assert_eq!(backend.position(), 1);
+}
+
+struct DeferredRecreations {
+    backend: Rc<MemoryHistoryBackend>,
+    source: MutableValue<Vec<Route<u8>>>,
+    requests: Rc<RefCell<Vec<String>>>,
+    pending: Rc<RefCell<std::collections::VecDeque<HistoryRecreationCompletion>>>,
+    binding: HistoryController,
+}
+impl DeferredRecreations {
+    fn new(entries: Vec<HistoryEntry>, position: usize) -> Self {
+        let backend = Rc::new(MemoryHistoryBackend::with_entries(entries, position).unwrap());
+        let source = MutableValue::new(vec![route(3)]);
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let pending = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+        let log = requests.clone();
+        let out = pending.clone();
+        let binding = HistoryController::attach_with_options(
+            nav(&source, &Rc::new(Cell::new(0))),
+            backend.clone(),
+            HistoryOptions {
+                version: Some("new".into()),
+                recovery: HistoryRecoveryPolicy::Recreate(Rc::new(move |request, done| {
+                    log.borrow_mut().push(request.url);
+                    out.borrow_mut().push_back(done);
+                })),
+            },
+        )
+        .unwrap();
+        Self {
+            backend,
+            source,
+            requests,
+            pending,
+            binding,
+        }
+    }
+    fn complete(&self, key: u8) -> MutableValue<Vec<Route<u8>>> {
+        let source = MutableValue::new(vec![route(key)]);
+        let done = self.pending.borrow_mut().pop_front().unwrap();
+        done(Ok(HistoryRoot::new(nav(&source, &Rc::new(Cell::new(0))))));
+        source
+    }
+}
+
+#[test]
+fn several_queued_destinations_use_identity_despite_duplicate_and_gapped_managed_indices() {
+    let external = HistoryEntry {
+        state: None,
+        url: "/external".into(),
+    };
+    let host = DeferredRecreations::new(
+        vec![
+            external.clone(),
+            state(10, Some("old"), 1),
+            state(10, Some("old"), 2),
+            state(80, Some("old"), 4),
+            state(81, Some("new"), 3),
+        ],
+        4,
+    );
+    host.backend.go(-3, Box::new(|r| r.unwrap()));
+    host.backend.go(1, Box::new(|r| r.unwrap()));
+    host.backend.go(1, Box::new(|r| r.unwrap()));
+    let _first = host.complete(9);
+    assert_eq!(*host.requests.borrow(), ["/1", "/2"]);
+    assert_eq!(host.backend.position(), 3);
+    let _second = host.complete(8);
+    assert_eq!(*host.requests.borrow(), ["/1", "/2", "/4"]);
+    let third = host.complete(7);
+    assert_eq!(host.backend.position(), 3);
+    assert_eq!(host.backend.entries()[0], external);
+    assert_eq!(
+        host.backend
+            .entries()
+            .iter()
+            .map(|entry| entry.url.as_str())
+            .collect::<Vec<_>>(),
+        ["/external", "/9", "/8", "/7", "/3"]
+    );
+    assert_eq!(host.backend.entries()[1].state.as_ref().unwrap().index, 10);
+    assert_eq!(host.backend.entries()[2].state.as_ref().unwrap().index, 10);
+    assert_eq!(host.backend.entries()[3].state.as_ref().unwrap().index, 80);
+    host.backend.go(1, Box::new(|r| r.unwrap()));
+    assert_eq!(*third.get().last().unwrap().key, 3);
+}
+
+#[test]
+fn failed_deferred_recreation_drains_queue_without_undoing_later_host_navigation() {
+    let host = DeferredRecreations::new(
+        vec![
+            state(0, Some("old"), 1),
+            state(1, Some("old"), 2),
+            state(2, Some("new"), 3),
+        ],
+        2,
+    );
+    host.backend.go(-2, Box::new(|r| r.unwrap()));
+    host.backend.go(1, Box::new(|r| r.unwrap()));
+    let done = host.pending.borrow_mut().pop_front().unwrap();
+    done(Err(HistoryError::Backend("factory failed".into())));
+    assert_eq!(*host.requests.borrow(), ["/1", "/2"]);
+    assert_eq!(host.backend.position(), 1);
+    assert_eq!(host.backend.entries()[0].url, "/1");
+    assert_eq!(
+        host.binding.errors().get().as_ref(),
+        &Some(HistoryError::Backend("factory failed".into()))
+    );
+    let second = host.complete(8);
+    assert_eq!(host.backend.entries()[1].url, "/8");
+    host.backend.go(1, Box::new(|r| r.unwrap()));
+    assert_eq!(*second.get().last().unwrap().key, 3);
+}
+
+#[test]
+fn failure_and_model_changes_while_unmanaged_preserve_external_history() {
+    let external = HistoryEntry {
+        state: None,
+        url: "/external".into(),
+    };
+    for success in [false, true] {
+        let host = DeferredRecreations::new(
+            vec![
+                external.clone(),
+                state(0, Some("old"), 1),
+                state(1, Some("new"), 3),
+            ],
+            2,
+        );
+        host.backend.go(-1, Box::new(|r| r.unwrap()));
+        host.backend.go(-1, Box::new(|r| r.unwrap()));
+        let active = if success {
+            host.complete(9)
+        } else {
+            let done = host.pending.borrow_mut().pop_front().unwrap();
+            done(Err(HistoryError::Backend("factory failed".into())));
+            host.source.clone()
+        };
+        active.set(vec![route(10)]);
+        assert_eq!(host.backend.entries()[0], external);
+        assert_eq!(host.backend.position(), 0);
+        assert_eq!(
+            host.backend.entries()[1].url,
+            if success { "/9" } else { "/1" }
+        );
+        host.backend.go(2, Box::new(|r| r.unwrap()));
+        assert_eq!(*active.get().last().unwrap().key, 3);
+    }
+}
+
+#[test]
+fn cancellation_discards_queued_targets_and_late_completion_releases_root() {
+    for drop_controller in [false, true] {
+        let host = DeferredRecreations::new(
+            vec![
+                state(0, Some("old"), 1),
+                state(1, Some("old"), 2),
+                state(2, Some("new"), 3),
+            ],
+            2,
+        );
+        host.backend.go(-2, Box::new(|r| r.unwrap()));
+        host.backend.go(1, Box::new(|r| r.unwrap()));
+        let original = host.backend.entries();
+        let done = host.pending.borrow_mut().pop_front().unwrap();
+        if drop_controller {
+            drop(host.binding);
+        } else {
+            host.binding.cancel();
+        }
+        let replacement = MutableValue::new(vec![route(9)]);
+        let navigation = nav(&replacement, &Rc::new(Cell::new(0)));
+        let weak = Rc::downgrade(&navigation);
+        done(Ok(HistoryRoot::new(navigation)));
+        assert!(weak.upgrade().is_none());
+        assert_eq!(*host.requests.borrow(), ["/1"]);
+        assert_eq!(host.backend.entries(), original);
+        assert_eq!(host.backend.position(), 1);
+        assert_eq!(host.backend.listener_count(), 0);
+    }
+}
+
+#[test]
+fn changed_or_discarded_destination_rejects_late_completion_without_replacing_current_entry() {
+    for discarded in [false, true] {
+        let host = DeferredRecreations::new(
+            vec![
+                state(0, Some("new"), 0),
+                state(1, Some("old"), 1),
+                state(2, Some("new"), 3),
+            ],
+            2,
+        );
+        host.backend.go(-1, Box::new(|r| r.unwrap()));
+        let external = HistoryEntry {
+            state: None,
+            url: "/external".into(),
+        };
+        if discarded {
+            host.backend.go(-1, Box::new(|r| r.unwrap()));
+            host.backend.push(external.clone()).unwrap();
+        } else {
+            host.backend.replace(external.clone()).unwrap();
+        }
+        let original = host.backend.entries();
+        let _replacement = host.complete(9);
+        assert_eq!(host.backend.entries(), original);
+        assert_eq!(host.backend.current().unwrap(), external);
+        assert_eq!(host.backend.position(), 1);
+        assert!(matches!(
+            host.binding.errors().get().as_ref(),
+            Some(HistoryError::Backend(_))
+        ));
+    }
+}
+
+#[test]
+fn reentrant_pop_after_synchronous_recreation_completion_retains_its_destination() {
+    let source = MutableValue::new(vec![route(3)]);
+    let backend = Rc::new(
+        MemoryHistoryBackend::with_entries(
+            vec![
+                state(0, Some("old"), 1),
+                state(1, Some("old"), 2),
+                state(2, Some("new"), 3),
+            ],
+            2,
+        )
+        .unwrap(),
+    );
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let requests = log.clone();
+    let host = backend.clone();
+    let last_root = Rc::new(RefCell::new(None));
+    let output = last_root.clone();
+    let _binding = HistoryController::attach_with_options(
+        nav(&source, &Rc::new(Cell::new(0))),
+        backend.clone(),
+        HistoryOptions {
+            version: Some("new".into()),
+            recovery: HistoryRecoveryPolicy::Recreate(Rc::new(move |request, done| {
+                let first = request.url == "/1";
+                requests.borrow_mut().push(request.url);
+                let fresh = MutableValue::new(vec![route(if first { 9 } else { 8 })]);
+                done(Ok(HistoryRoot::new(nav(&fresh, &Rc::new(Cell::new(0))))));
+                *output.borrow_mut() = Some(fresh);
+                if first {
+                    host.go(1, Box::new(|r| r.unwrap()));
+                }
+            })),
+        },
+    )
+    .unwrap();
+    backend.go(-2, Box::new(|r| r.unwrap()));
+    assert_eq!(*log.borrow(), ["/1", "/2"]);
+    assert_eq!(backend.position(), 1);
+    assert_eq!(backend.entries()[0].url, "/9");
+    assert_eq!(backend.entries()[1].url, "/8");
+    backend.go(1, Box::new(|r| r.unwrap()));
+    assert_eq!(
+        *last_root
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .get()
+            .last()
+            .unwrap()
+            .key,
+        3
+    );
+}
+
+#[test]
+fn backend_destination_identity_survives_replacement_and_rejects_reused_physical_slot() {
+    let original = state(10, Some("old"), 1);
+    let backend = MemoryHistoryBackend::with_entries(
+        vec![
+            state(9, Some("new"), 0),
+            original.clone(),
+            state(11, Some("new"), 3),
+        ],
+        1,
+    )
+    .unwrap();
+    let destination = backend.current_destination().unwrap();
+    assert_eq!(destination.location, destination.location.clone());
+    assert_ne!(destination.location, HistoryLocation::new());
+    backend.go(1, Box::new(|r| r.unwrap()));
+    let replacement = state(10, Some("new"), 9);
+    backend
+        .replace_destination(&destination, replacement.clone())
+        .unwrap();
+    assert_eq!(backend.position(), 2);
+    assert_eq!(backend.entries()[1], replacement);
+    backend.go(-1, Box::new(|r| r.unwrap()));
+    assert_eq!(
+        backend.current_destination().unwrap().location,
+        destination.location
+    );
+    // Recreate exactly the old bytes and URL in the same physical slot, on a new
+    // forward branch. Snapshot equality alone must not authorize this write.
+    backend.go(-1, Box::new(|r| r.unwrap()));
+    backend.push(original).unwrap();
+    let entries = backend.entries();
+    assert!(
+        backend
+            .replace_destination(&destination, replacement)
+            .is_err()
+    );
+    assert_eq!(backend.entries(), entries);
+    assert_eq!(backend.position(), 1);
+    assert_ne!(
+        backend.current_destination().unwrap().location,
+        destination.location
+    );
+}
+
+#[test]
+fn pop_destination_snapshot_precedes_reentrant_listener_writes() {
+    let original = state(0, Some("old"), 1);
+    let backend = Rc::new(
+        MemoryHistoryBackend::with_entries(vec![original.clone(), state(1, Some("new"), 3)], 1)
+            .unwrap(),
+    );
+    let writer = backend.clone();
+    let _first = backend.subscribe(Rc::new(move |_| {
+        writer.replace(state(0, Some("new"), 9)).unwrap();
+    }));
+    let received = Rc::new(RefCell::new(None));
+    let output = received.clone();
+    let _second = backend.subscribe(Rc::new(move |destination| {
+        *output.borrow_mut() = Some(destination);
+    }));
+    backend.go(-1, Box::new(|r| r.unwrap()));
+    let destination = received.borrow_mut().take().unwrap();
+    assert_eq!(destination.entry, original);
+    assert_eq!(backend.current().unwrap().url, "/9");
+    assert!(
+        backend
+            .replace_destination(&destination, state(0, Some("new"), 8))
+            .is_err()
+    );
+    assert_eq!(backend.current().unwrap().url, "/9");
+}
+
+#[test]
+fn unsupported_destination_replacement_reports_error_and_keeps_old_binding_usable() {
+    struct CurrentOnly(MemoryHistoryBackend);
+    impl HistoryBackend for CurrentOnly {
+        fn current_destination(&self) -> Option<HistoryDestination> {
+            self.0.current_destination()
+        }
+        fn replace(&self, entry: HistoryEntry) -> Result<(), HistoryError> {
+            self.0.replace(entry)
+        }
+        fn replace_destination(
+            &self,
+            _: &HistoryDestination,
+            _: HistoryEntry,
+        ) -> Result<(), HistoryError> {
+            Err(HistoryError::Backend(
+                "destination replacement unsupported".into(),
+            ))
+        }
+        fn push(&self, entry: HistoryEntry) -> Result<(), HistoryError> {
+            self.0.push(entry)
+        }
+        fn go(&self, delta: isize, completion: HistoryCompletion) {
+            self.0.go(delta, completion);
+        }
+        fn subscribe(
+            &self,
+            observer: Rc<dyn Fn(HistoryDestination)>,
+        ) -> decompose_rs::value::Subscription {
+            self.0.subscribe(observer)
+        }
+    }
+    let backend = Rc::new(CurrentOnly(
+        MemoryHistoryBackend::with_entries(
+            vec![state(0, Some("old"), 1), state(1, Some("new"), 3)],
+            1,
+        )
+        .unwrap(),
+    ));
+    let source = MutableValue::new(vec![route(3)]);
+    let replacement = MutableValue::new(vec![route(9)]);
+    let new_navigation = nav(&replacement, &Rc::new(Cell::new(0)));
+    let binding = HistoryController::attach_with_options(
+        nav(&source, &Rc::new(Cell::new(0))),
+        backend.clone(),
+        HistoryOptions {
+            version: Some("new".into()),
+            recovery: HistoryRecoveryPolicy::Recreate(Rc::new(move |_, done| {
+                done(Ok(HistoryRoot::new(new_navigation.clone())))
+            })),
+        },
+    )
+    .unwrap();
+    backend.go(-1, Box::new(|r| r.unwrap()));
+    assert_eq!(backend.0.entries()[0].url, "/1");
+    assert_eq!(backend.0.position(), 1);
+    assert_eq!(
+        binding.errors().get().as_ref(),
+        &Some(HistoryError::Backend(
+            "destination replacement unsupported".into()
+        ))
+    );
+    source.set(vec![route(3), route(4)]);
+    assert_eq!(backend.current().unwrap().url, "/4");
+    replacement.set(vec![route(9), route(10)]);
+    assert_eq!(backend.current().unwrap().url, "/4");
+}
+
+#[test]
+fn repeated_queued_visits_accept_controller_rewrites_and_keep_original_urls() {
+    let host = DeferredRecreations::new(
+        vec![
+            state(0, Some("old"), 1),
+            state(1, Some("old"), 2),
+            state(2, Some("new"), 3),
+        ],
+        2,
+    );
+    host.backend.go(-2, Box::new(|r| r.unwrap()));
+    host.backend.go(1, Box::new(|r| r.unwrap()));
+    host.backend.go(-1, Box::new(|r| r.unwrap()));
+    let _first = host.complete(9);
+    let _second = host.complete(8);
+    let third = host.complete(7);
+    assert_eq!(*host.requests.borrow(), ["/1", "/2", "/1"]);
+    assert!(
+        host.binding.errors().get().is_none(),
+        "error={:?}, entries={:?}",
+        host.binding.errors().get(),
+        host.backend.entries()
+    );
+    assert_eq!(
+        host.backend
+            .entries()
+            .iter()
+            .map(|entry| entry.url.as_str())
+            .collect::<Vec<_>>(),
+        ["/7", "/8", "/3"]
+    );
+    assert_eq!(host.backend.position(), 0);
+    third.set(vec![route(7), route(6)]);
+    assert_eq!(host.backend.entries()[0].url, "/7");
+    assert_eq!(host.backend.current().unwrap().url, "/6");
+}
+
+#[test]
+fn reentrant_error_navigation_runs_after_older_queued_pop() {
+    let source = MutableValue::new(vec![route(3)]);
+    let backend = Rc::new(
+        MemoryHistoryBackend::with_entries(
+            vec![
+                state(0, Some("old"), 1),
+                state(1, Some("old"), 2),
+                state(2, Some("new"), 3),
+            ],
+            2,
+        )
+        .unwrap(),
+    );
+    let pending = Rc::new(RefCell::new(std::collections::VecDeque::<
+        HistoryRecreationCompletion,
+    >::new()));
+    let output = pending.clone();
+    let host = backend.clone();
+    let _binding = HistoryController::attach_with_options_and_error_handler(
+        nav(&source, &Rc::new(Cell::new(0))),
+        backend.clone(),
+        HistoryOptions {
+            version: Some("new".into()),
+            recovery: HistoryRecoveryPolicy::Recreate(Rc::new(move |_, done| {
+                output.borrow_mut().push_back(done)
+            })),
+        },
+        move |_| host.go(1, Box::new(|r| r.unwrap())),
+    )
+    .unwrap();
+    backend.go(-2, Box::new(|r| r.unwrap()));
+    backend.go(1, Box::new(|r| r.unwrap()));
+    let done = pending.borrow_mut().pop_front().unwrap();
+    done(Err(HistoryError::Backend("factory failed".into())));
+    let fresh = MutableValue::new(vec![route(8)]);
+    let done = pending.borrow_mut().pop_front().unwrap();
+    done(Ok(HistoryRoot::new(nav(&fresh, &Rc::new(Cell::new(0))))));
+    assert_eq!(backend.position(), 2);
+    assert_eq!(backend.current().unwrap().url, "/3");
+    assert_eq!(*fresh.get().last().unwrap().key, 3);
+    assert_eq!(backend.entries()[0].url, "/1");
+    assert_eq!(backend.entries()[1].url, "/8");
+    fresh.set(vec![route(3), route(6)]);
+    assert_eq!(backend.entries()[0].url, "/1");
+    assert_eq!(backend.entries()[2].url, "/3");
+    assert_eq!(backend.position(), 3);
+}
+
+#[test]
 fn old_root_drop_panic_still_binds_replacement_model_and_lifecycle() {
     struct PanicOnDrop(Rc<dyn WebNavigation>);
     impl WebNavigation for PanicOnDrop {

@@ -217,9 +217,30 @@ struct HostWrite {
     replace_first: bool,
 }
 
+// The original notification remains the recreation input. Only writes made by
+// this controller may advance the expected snapshot for a repeated queued visit.
+struct PopDestination {
+    original: HistoryDestination,
+    expected: HistoryEntry,
+}
+impl PopDestination {
+    fn new(original: HistoryDestination) -> Self {
+        Self {
+            expected: original.entry.clone(),
+            original,
+        }
+    }
+    fn writable(&self) -> HistoryDestination {
+        HistoryDestination {
+            location: self.original.location.clone(),
+            entry: self.expected.clone(),
+        }
+    }
+}
+
 enum Event {
     Changed(Option<*const ()>),
-    Pop(Option<HistoryState>),
+    Pop(PopDestination),
     Restored {
         id: u64,
         index: usize,
@@ -228,7 +249,7 @@ enum Event {
     Moved(Result<(), HistoryError>, Option<HostWrite>),
     Recreated {
         id: u64,
-        index: usize,
+        destination: PopDestination,
         result: Result<HistoryRoot, HistoryError>,
     },
 }
@@ -246,7 +267,7 @@ struct Binding {
     lifecycle_registry: RefCell<Option<LifecycleRegistry>>,
     suspended_lifecycle: RefCell<Option<LifecycleRegistry>>,
     queue: RefCell<VecDeque<Event>>,
-    pending_pop: RefCell<VecDeque<Option<HistoryState>>>,
+    pending_pop: RefCell<VecDeque<PopDestination>>,
     restore_id: Cell<u64>,
     active_restore: Cell<Option<u64>>,
     processing: Cell<bool>,
@@ -378,7 +399,7 @@ impl HistoryController {
             if let Some(binding) = weak.upgrade()
                 && !binding.moving.get()
             {
-                binding.enqueue(Event::Pop(state));
+                binding.enqueue(Event::Pop(PopDestination::new(state)));
             }
         }));
         *binding.host.borrow_mut() = Some(token);
@@ -454,7 +475,14 @@ impl Binding {
         Ok(())
     }
     fn return_to_committed(self: &Rc<Self>) -> Result<(), HistoryError> {
-        if self.closed.get() {
+        if self.closed.get()
+            || !self.pending_pop.borrow().is_empty()
+            || self
+                .backend
+                .current()
+                .and_then(|entry| entry.state)
+                .is_none()
+        {
             return Ok(());
         }
         let delta = self.committed_index.get() as isize - self.index()? as isize;
@@ -463,7 +491,11 @@ impl Binding {
         }
         Ok(())
     }
-    fn recreate(self: &Rc<Self>, state: HistoryState) -> Result<(), HistoryError> {
+    fn recreate(
+        self: &Rc<Self>,
+        destination: PopDestination,
+        state: HistoryState,
+    ) -> Result<(), HistoryError> {
         if self.closed.get() {
             return Ok(());
         }
@@ -487,13 +519,9 @@ impl Binding {
                 self.recreating.set(true);
                 let request = HistoryRecreation {
                     mismatch,
-                    url: self
-                        .backend
-                        .current()
-                        .map_or_else(String::new, |entry| entry.url),
+                    url: destination.original.entry.url.clone(),
                 };
                 let weak = Rc::downgrade(self);
-                let index = state.index;
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let old_suspended = self
                         .suspended_lifecycle
@@ -509,7 +537,11 @@ impl Binding {
                         request,
                         Box::new(move |result| {
                             if let Some(binding) = weak.upgrade() {
-                                binding.enqueue(Event::Recreated { id, index, result });
+                                binding.enqueue(Event::Recreated {
+                                    id,
+                                    destination,
+                                    result,
+                                });
                             }
                         }),
                     );
@@ -644,14 +676,18 @@ impl Binding {
             if self.closed.get() {
                 break;
             }
-            if let Err(error) = self.process(event) {
-                self.report(error);
-            }
+            let result = self.process(event);
             if !self.restoring.get() && !self.moving.get() && !self.closed.get() {
-                let next = self.pending_pop.borrow_mut().pop_front();
-                if let Some(state) = next {
-                    self.queue.borrow_mut().push_back(Event::Pop(state));
+                // Earlier notifications must precede any newer events already
+                // queued by completion/model callbacks or the error handler.
+                let pending = self.pending_pop.take();
+                let mut queue = self.queue.borrow_mut();
+                for destination in pending.into_iter().rev() {
+                    queue.push_front(Event::Pop(destination));
                 }
+            }
+            if let Err(error) = result {
+                self.report(error);
             }
         }
     }
@@ -660,9 +696,27 @@ impl Binding {
             .backend
             .current()
             .and_then(|entry| entry.state)
-            .map_or(0, |state| state.index);
+            .map(|state| state.index)
+            .ok_or_else(|| HistoryError::Backend("current history entry is unmanaged".into()))?;
         validate_index(index)?;
         Ok(index)
+    }
+    fn record_destination_write(&self, previous: &HistoryDestination, entry: &HistoryEntry) {
+        let update = |destination: &mut PopDestination| {
+            if destination.original.location == previous.location
+                && destination.expected == previous.entry
+            {
+                destination.expected = entry.clone();
+            }
+        };
+        for destination in self.pending_pop.borrow_mut().iter_mut() {
+            update(destination);
+        }
+        for event in self.queue.borrow_mut().iter_mut() {
+            if let Event::Pop(destination) = event {
+                update(destination);
+            }
+        }
     }
     fn write(&self, histories: Vec<Vec<Node>>, replace_first: bool) -> Result<(), HistoryError> {
         let version = self.options.borrow().version.clone();
@@ -783,7 +837,10 @@ impl Binding {
                     }
                 }
             }
-            Event::Pop(Some(state)) => {
+            Event::Pop(destination) => {
+                let Some(state) = destination.original.entry.state.clone() else {
+                    return Ok(());
+                };
                 validate_index(state.index)?;
                 if !self.legacy
                     && self
@@ -796,7 +853,7 @@ impl Binding {
                         self.return_to_committed()?;
                         return Ok(());
                     }
-                    return self.recreate(state);
+                    return self.recreate(destination, state);
                 }
                 if state.nodes.is_empty() {
                     return Err(HistoryError::EmptyHistory);
@@ -833,7 +890,6 @@ impl Binding {
                     );
                 }
             }
-            Event::Pop(None) => {}
             Event::Restored { id, index, result } => {
                 if self.active_restore.get() != Some(id) {
                     return Ok(());
@@ -871,7 +927,11 @@ impl Binding {
                 }
                 result?;
             }
-            Event::Recreated { id, index, result } => {
+            Event::Recreated {
+                id,
+                destination,
+                result,
+            } => {
                 if self.active_restore.get() != Some(id) {
                     return Ok(());
                 }
@@ -886,12 +946,23 @@ impl Binding {
                             if self.closed.get() {
                                 return Ok(());
                             }
-                            let current = self.index()?;
+                            let index = destination
+                                .original
+                                .entry
+                                .state
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    HistoryError::Backend(
+                                        "recreation destination is unmanaged".into(),
+                                    )
+                                })?
+                                .index;
                             let version = self.options.borrow().version.clone();
-                            if current == index {
-                                self.backend
-                                    .replace(entry(&nodes, index, version.as_deref()))?;
-                            }
+                            let writable = destination.writable();
+                            let replacement = entry(&nodes, index, version.as_deref());
+                            self.backend
+                                .replace_destination(&writable, replacement.clone())?;
+                            self.record_destination_write(&writable, &replacement);
                             if self.closed.get() {
                                 return Ok(());
                             }
@@ -913,30 +984,27 @@ impl Binding {
                                     self.bind_lifecycle(&lifecycle);
                                 }
                             });
-                            cleanup.run(|| {
-                                if !self.closed.get() && current != index {
-                                    self.move_host(
-                                        index as isize - current as isize,
-                                        Some(HostWrite {
-                                            histories: vec![nodes],
-                                            replace_first: true,
-                                        }),
-                                    );
-                                }
-                            });
                             cleanup.finish();
                             watched?;
                             Ok(())
                         });
                         if let Err(error) = result {
                             self.reconnect()?;
-                            self.return_to_committed()?;
+                            if self.backend.current_destination().as_ref()
+                                == Some(&destination.writable())
+                            {
+                                self.return_to_committed()?;
+                            }
                             return Err(error);
                         }
                     }
                     Err(error) => {
                         self.reconnect()?;
-                        self.return_to_committed()?;
+                        if self.backend.current_destination().as_ref()
+                            == Some(&destination.writable())
+                        {
+                            self.return_to_committed()?;
+                        }
                         return Err(error);
                     }
                 }

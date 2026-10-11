@@ -107,6 +107,11 @@ managed index, checks optional schema versions before route decoding, and suppor
 typed rejection or portable root recreation with observer/lifecycle replacement.
 Legacy entries map a missing version to None. `HistoryState` struct literals must
 specify the new version field; durable router state formats are unchanged.
+Follow-up correction: custom `HistoryBackend` implementations must supply stable
+host-entry identity and original destination snapshots to Pop observers, and
+implement safe destination-specific replacement. This source-breaking trait
+change prevents queued recreation URLs and late unmanaged-entry writes from
+depending on the current host entry; see the migration guide below.
 The legacy StackHistoryController keeps its distinct algorithm.
 See [migration and immutable upstream comparison](history-versioning.md) and
 [shared semantic scenarios](../tests/fixtures/history-versioning.tsv).

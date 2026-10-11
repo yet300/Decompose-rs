@@ -260,11 +260,18 @@ impl DeferredHost {
     }
 }
 impl HistoryBackend for DeferredHost {
-    fn current(&self) -> Option<HistoryEntry> {
-        self.memory.current()
+    fn current_destination(&self) -> Option<HistoryDestination> {
+        self.memory.current_destination()
     }
     fn replace(&self, entry: HistoryEntry) -> Result<(), HistoryError> {
         self.memory.replace(entry)
+    }
+    fn replace_destination(
+        &self,
+        destination: &HistoryDestination,
+        entry: HistoryEntry,
+    ) -> Result<(), HistoryError> {
+        self.memory.replace_destination(destination, entry)
     }
     fn push(&self, entry: HistoryEntry) -> Result<(), HistoryError> {
         self.memory.push(entry)
@@ -274,7 +281,7 @@ impl HistoryBackend for DeferredHost {
     }
     fn subscribe(
         &self,
-        observer: Rc<dyn Fn(Option<HistoryState>)>,
+        observer: Rc<dyn Fn(HistoryDestination)>,
     ) -> decompose_rs::value::Subscription {
         self.memory.subscribe(observer)
     }
