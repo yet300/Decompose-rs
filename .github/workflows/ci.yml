@@ -1,0 +1,40 @@
+name: Rust
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install declared MSRV and tools
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Strict Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Unit, integration, subprocess and performance regressions
+        run: cargo test --all-targets --locked
+      - name: Doctests
+        run: cargo test --doc --locked
+      - name: Strict rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+      - name: Execute every example
+        shell: bash
+        run: |
+          for example in examples/*.rs; do
+            cargo run --locked --example "$(basename "$example" .rs)"
+          done
+      - name: Representative portable targets
+        run: |
+          cargo check --lib --locked --target wasm32-unknown-unknown
+          cargo check --lib --locked --target aarch64-linux-android
+          cargo check --lib --locked --target aarch64-apple-ios
+      - name: Package and verify published dependencies
+        run: cargo package --locked

@@ -9,7 +9,7 @@ use crate::{
     ComponentContext,
     value::{Subscription, Value},
 };
-pub use map::ItemMap;
+pub use map::{ConfigurationIndex, ItemMap};
 pub use navigation::{ItemsEvent, ItemsNavigation, ItemsNavigator, NavigationResult};
 pub use state::ItemsCodec;
 use std::rc::Rc;
@@ -33,6 +33,8 @@ impl ActiveLifecycleState {
     }
 }
 /// Ordered membership and independently keyed active targets.
+/// Default routing revalidates duplicates on every update. Indexed routing
+/// explicitly requires stable equality identity while configurations are stored.
 pub struct Items<C> {
     /// Unique ordered configurations, including inactive entries.
     pub items: Vec<Rc<C>>,
@@ -65,6 +67,24 @@ impl<C: Eq> Items<C> {
         state.validate()?;
         Ok(state)
     }
+    /// Creates inactive configurations with indexed duplicate validation.
+    /// Use the same equality-compatible index when constructing the router.
+    pub fn new_indexed(
+        items: Vec<C>,
+        index: ConfigurationIndex<C>,
+    ) -> Result<Self, NavigationError> {
+        let items: Vec<_> = items.into_iter().map(Rc::new).collect();
+        let mut seen = ItemMap::with_index(index.clone());
+        for configuration in &items {
+            if seen.insert(configuration.clone(), ()).is_some() {
+                return Err(NavigationError::DuplicateConfiguration);
+            }
+        }
+        Ok(Self {
+            items,
+            active_items: ItemMap::with_index(index),
+        })
+    }
     fn validate(&self) -> Result<(), NavigationError> {
         if self
             .items
@@ -76,14 +96,6 @@ impl<C: Eq> Items<C> {
         } else {
             Ok(())
         }
-    }
-    fn normalize(mut self) -> Self {
-        self.active_items = self
-            .items
-            .iter()
-            .filter_map(|c| self.active_items.get(c).map(|s| (c.clone(), *s)))
-            .collect();
-        self
     }
 }
 /// A live component and its requested target.
@@ -139,7 +151,7 @@ impl<C> Default for ItemsOptions<C> {
         }
     }
 }
-struct ItemsModel<C>(ItemsOptions<C>);
+struct ItemsModel<C>(ItemsOptions<C>, Option<ConfigurationIndex<C>>);
 impl<C: Eq + 'static, T: 'static> Model<C, T> for ItemsModel<C> {
     type State = Items<C>;
     type Snapshot = ChildItems<C, T>;
@@ -155,11 +167,60 @@ impl<C: Eq + 'static, T: 'static> Model<C, T> for ItemsModel<C> {
     fn canonicalize_reused_configurations(&self) -> bool {
         true
     }
-    fn normalize(&self, s: Self::State) -> Self::State {
-        s.normalize()
+    fn normalize(&self, mut s: Self::State) -> Self::State {
+        s.active_items.use_index(self.1.clone());
+        let entries = s
+            .items
+            .iter()
+            .filter_map(|c| s.active_items.get(c).map(|target| (c.clone(), *target)))
+            .collect();
+        s.active_items = ItemMap::from_unique(entries, self.1.clone());
+        s
     }
     fn validate(&self, s: &Self::State) -> Result<(), NavigationError> {
-        s.validate()
+        if let Some(index) = &self.1 {
+            let mut seen = ItemMap::with_index(index.clone());
+            for configuration in &s.items {
+                if seen.insert(configuration.clone(), ()).is_some() {
+                    return Err(NavigationError::DuplicateConfiguration);
+                }
+            }
+            Ok(())
+        } else {
+            s.validate()
+        }
+    }
+    fn validate_transition(
+        &self,
+        state: &Self::State,
+        old: Option<&Self::State>,
+    ) -> Result<(), NavigationError> {
+        // Reuse the committed uniqueness invariant only after comparing values;
+        // freshly allocated equal configurations qualify as well as shared handles.
+        if self.1.is_some()
+            && old.is_some_and(|old| {
+                old.items.len() == state.items.len()
+                    && old
+                        .items
+                        .iter()
+                        .zip(&state.items)
+                        .all(|(old, new)| old.as_ref() == new.as_ref())
+            })
+        {
+            Ok(())
+        } else {
+            <Self as Model<C, T>>::validate(self, state)
+        }
+    }
+    fn unique_configurations(&self) -> bool {
+        // Positional matching may bypass an earlier equal candidate only when
+        // the caller explicitly promises stable identity via the index policy.
+        self.1.is_some()
+    }
+    fn configuration_fingerprint(&self, configuration: &C) -> Option<u64> {
+        self.1
+            .as_ref()
+            .map(|index| index.fingerprint(configuration))
     }
     fn statuses(&self, s: &Self::State) -> Vec<PageStatus> {
         s.items
@@ -191,7 +252,7 @@ impl<C: Eq + 'static, T: 'static> Model<C, T> for ItemsModel<C> {
             .collect();
         ChildItems {
             items: s.items.clone(),
-            active_items,
+            active_items: ItemMap::from_unique(active_items, self.1.clone()),
         }
     }
     fn back_enabled(&self, _: &Self::State) -> bool {
@@ -356,6 +417,46 @@ pub fn child_items_with_initial<Ctx: ComponentContext + 'static, C: Eq + 'static
     options: ItemsOptions<C>,
     factory: impl Fn(&C, Ctx) -> T + 'static,
 ) -> Result<LazyChildItems<C, T>, NavigationError> {
+    build_items(context, navigation, initial, options, None, factory)
+}
+
+/// Builds children with indexed duplicate validation, maps and engine matching.
+/// Equal configurations must share a stable fingerprint; collisions use `Eq`.
+pub fn child_items_indexed<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<ItemsEvent<C>> + ?Sized),
+    initial: Items<C>,
+    options: ItemsOptions<C>,
+    index: ConfigurationIndex<C>,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<LazyChildItems<C, T>, NavigationError> {
+    child_items_with_initial_indexed(context, navigation, || initial, options, index, factory)
+}
+
+/// Indexed counterpart of [`child_items_with_initial`], preserving lazy initialization.
+pub fn child_items_with_initial_indexed<
+    Ctx: ComponentContext + 'static,
+    C: Eq + 'static,
+    T: 'static,
+>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<ItemsEvent<C>> + ?Sized),
+    initial: impl FnOnce() -> Items<C>,
+    options: ItemsOptions<C>,
+    index: ConfigurationIndex<C>,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<LazyChildItems<C, T>, NavigationError> {
+    build_items(context, navigation, initial, options, Some(index), factory)
+}
+
+fn build_items<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static>(
+    context: &Ctx,
+    navigation: &(impl super::children::NavigationSource<ItemsEvent<C>> + ?Sized),
+    initial: impl FnOnce() -> Items<C>,
+    options: ItemsOptions<C>,
+    index: Option<ConfigurationIndex<C>>,
+    factory: impl Fn(&C, Ctx) -> T + 'static,
+) -> Result<LazyChildItems<C, T>, NavigationError> {
     let (value, control) = super::engine::build_with_subscriber(
         context,
         |receiver| {
@@ -372,7 +473,7 @@ pub fn child_items_with_initial<Ctx: ComponentContext + 'static, C: Eq + 'static
         },
         initial,
         options.key.clone(),
-        ItemsModel(options),
+        ItemsModel(options, index),
         factory,
     )?;
     Ok(LazyChildItems { value, control })

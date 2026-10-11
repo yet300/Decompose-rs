@@ -41,9 +41,11 @@
 //! `docs/COMPATIBILITY.md` records Rust adaptations and excluded integrations.
 
 mod child;
+mod cleanup;
 mod context;
 mod error;
 mod framing;
+mod instances;
 mod merged;
 mod retention;
 pub mod router;

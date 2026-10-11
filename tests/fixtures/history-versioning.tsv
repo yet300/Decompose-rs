@@ -1,0 +1,8 @@
+# name|model keys at attachment|saved schema|current schema|allow back|position after back|active model key|decoded keys
+matching|1,2|v1|v1|true|0|1|1
+legacy|1,2|-|-|true|0|1|1
+mismatch_reject|1,2|v1|v2|true|1|2|0
+legacy_mismatch|1,2|-|v2|true|1|2|0
+veto_same_size|1,9|v1|v2|false|1|9|0
+veto_longer_stack|1,2,9|v1|v2|false|1|9|0
+veto_shorter_stack|9|v1|v2|false|1|9|0

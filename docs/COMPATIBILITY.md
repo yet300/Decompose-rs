@@ -1,8 +1,9 @@
 # Decompose compatibility matrix
 
-Audit date: 2026-10-10. Reference: upstream Decompose
+Updated after audit remediation: 2026-10-11. Core reference: upstream Decompose
 [`00840bcfed6d55710c8fbb1a72503f2041eda490`](https://github.com/arkivanov/Decompose/tree/00840bcfed6d55710c8fbb1a72503f2041eda490).
-Rust baseline for this revision: `2c45df6` on `main`. Dependencies are the four published
+Portable history versioning reference: [`0824a183f7fe3862a1409553e66346c999de7084`](https://github.com/arkivanov/Decompose/tree/0824a183f7fe3862a1409553e66346c999de7084), verified as upstream HEAD on 2026-10-11.
+Audited Rust baseline: `ddd8f69`. Dependencies are the four published
 `essenty-* 0.1.0` crates and `thiserror 2`.
 
 This is a behavioral/API mapping for the independent Rust core, not a promise
@@ -31,6 +32,22 @@ recorded below and in the stage plan.
 | Manual destruction and callback failures | **Adapted:** typed construction errors, documented manual-child destruction panic, guarded rollback; successful user callback side effects remain. Essenty lifecycle dispatch may stop independent listeners after a panic. | [context errors](../src/error.rs), [engine](../src/router/engine.rs), [panic regressions](../tests/generic_navigation.rs), [ADR-0005](adr/0005-stack-and-retention-corrections.md) |
 
 ## Standard navigation families
+
+`pop_while` now evaluates predicates top-to-root, including singleton/root calls,
+and retains the root if every predicate returns true. A root predicate panic
+propagates without committing membership. [Shared traces](../tests/fixtures/pop_while.tsv)
+are consumed by [Rust regressions](../tests/pop_while_parity.rs); Kotlin's
+`dropLastWhile` source was inspected rather than executed as an oracle.
+
+Items default routing requires only Eq and revalidates duplicates on every update,
+including after interior mutation of identity fields. Indexed routing explicitly
+promises stable equality identity; unchanged validated membership then uses positional value comparisons.
+Optional `ConfigurationIndex` and indexed constructors reach validation, maps,
+normalization and engine matching, with Eq collision checks. Measured inactive
+unchanged work with the stable opt-in is n comparisons rather than n(n−1)/2.
+Default validation, changed constant-fingerprint membership, and complete
+fingerprint collisions retain quadratic worst cases.
+See [performance evidence and contracts](items-performance.md).
 
 | Upstream contract | Rust mapping and status | Evidence |
 |---|---|---|
@@ -78,6 +95,22 @@ recorded below and in the stage plan.
 
 ## Public-source audit and verification boundary
 
+The 2026-10-11 remediation adds per-registration ownership detachment and
+independent panic cleanup. Actual lifecycle-owned instance-release paths commit
+terminal state before destructors run. [ADR-0020](adr/0020-detached-ownership-and-panic-cleanup.md)
+states the precise raw Essenty import and listener-dispatch limits; adapter-managed
+paths are covered by [store](../tests/store_unregister.rs) and
+[subprocess/lifecycle](../tests/panic_cleanup.rs) regressions.
+
+Recursive history now rewrites the current entry on attachment, preserves its
+managed index, checks optional schema versions before route decoding, and supports
+typed rejection or portable root recreation with observer/lifecycle replacement.
+Legacy entries map a missing version to None. `HistoryState` struct literals must
+specify the new version field; durable router state formats are unchanged.
+The legacy StackHistoryController keeps its distinct algorithm.
+See [migration and immutable upstream comparison](history-versioning.md) and
+[shared semantic scenarios](../tests/fixtures/history-versioning.tsv).
+
 The final audit examined commonMain public contexts/Child, all five navigation
 factories/models/source/navigator helpers, Generic NavState/Saver, values and
 operators, settings, Cancellation, public test utilities and WebNavigation. It
@@ -98,16 +131,18 @@ serialize/deserialize roundtrips remain caller-codec work rather than Kotlin
 serializer syntax. Direct optional Rc WebNavigation replaces WebNavigationOwner;
 None covers a fake component without child navigation.
 
-No unresolved functional gap was found in the selected independent-core scope
-against pinned revision `00840bcfed6d55710c8fbb1a72503f2041eda490` after these fixes.
+The earlier blanket independent-core completion claim was contradicted by the
+2026-10-11 audit's ownership and predicate regressions. The remediation report
+maps each observed failure to its fix and executed regression.
 Confidence is high for the explicit tested contracts, moderate for exhaustive
 behavioral equivalence: the Kotlin suite was inspected but not run as a
 differential oracle. This is not a claim that every upstream module or source
 API spelling was ported.
 
-Final fresh checks passed: **519 unit/integration tests and 1 doctest**, format,
-strict Clippy/rustdoc, all 15 runnable examples and all 24 installed library
-compile targets. Full commands/results are recorded in the
+Current checks use the pinned MSRV, published dependencies, new subprocess and
+performance regressions. Actual results are recorded in the
+[remediation report](audits/2026-10-11-remediation-results.md).
+Historical 2026-10-10 commands/results are recorded in the
 [completion plan](superpowers/plans/2026-10-10-independent-core-completion.md) and the
 [explicit-API revision](adr/0019-explicit-rust-api-surface.md).
 Cross compilation confirms library type-checking, not runtime behavior on those

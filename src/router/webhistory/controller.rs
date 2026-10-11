@@ -102,9 +102,10 @@ fn snapshot(
     ancestors.pop();
     nodes
 }
-fn entry(nodes: &[Node], index: usize) -> HistoryEntry {
+fn entry(nodes: &[Node], index: usize, version: Option<&str>) -> HistoryEntry {
     HistoryEntry {
         state: Some(HistoryState {
+            version: version.map(str::to_owned),
             index,
             nodes: nodes.iter().map(Node::saved).collect(),
         }),
@@ -225,16 +226,25 @@ enum Event {
         result: Result<(), HistoryError>,
     },
     Moved(Result<(), HistoryError>, Option<HostWrite>),
+    Recreated {
+        id: u64,
+        index: usize,
+        result: Result<HistoryRoot, HistoryError>,
+    },
 }
 type ErrorHandler = dyn Fn(HistoryError);
 struct Binding {
     navigation: RefCell<Option<Rc<dyn WebNavigation>>>,
     legacy: bool,
+    options: RefCell<HistoryOptions>,
+    recreating: Cell<bool>,
     backend: Rc<dyn HistoryBackend>,
     previous: RefCell<Vec<Node>>,
     subscriptions: RefCell<Vec<Subscription>>,
     host: RefCell<Option<Subscription>>,
     lifecycle: RefCell<Option<essenty_lifecycle::Subscription>>,
+    lifecycle_registry: RefCell<Option<LifecycleRegistry>>,
+    suspended_lifecycle: RefCell<Option<LifecycleRegistry>>,
     queue: RefCell<VecDeque<Event>>,
     pending_pop: RefCell<VecDeque<Option<HistoryState>>>,
     restore_id: Cell<u64>,
@@ -258,9 +268,28 @@ pub struct HistoryController {
     binding: Rc<Binding>,
 }
 impl HistoryController {
+    /// Attaches recursive history with an explicit schema and recovery policy.
+    /// Startup always rewrites the current entry from the supplied fresh model;
+    /// incompatible Back/Forward entries invoke recovery before key decoding.
+    pub fn attach_with_options(
+        navigation: Rc<dyn WebNavigation>,
+        backend: Rc<dyn HistoryBackend>,
+        options: HistoryOptions,
+    ) -> Result<Self, HistoryError> {
+        Self::attach_with_options_and_error_handler(navigation, backend, options, |_| {})
+    }
+    /// Attaches with schema recovery and typed asynchronous error notifications.
+    pub fn attach_with_options_and_error_handler(
+        navigation: Rc<dyn WebNavigation>,
+        backend: Rc<dyn HistoryBackend>,
+        options: HistoryOptions,
+        on_error: impl Fn(HistoryError) + 'static,
+    ) -> Result<Self, HistoryError> {
+        Self::attach_impl(navigation, backend, on_error, false, options)
+    }
     /// Attaches without restoring an existing entry on startup, matching upstream.
-    /// With an unmanaged or absent entry, replaces it with the entire current
-    /// tree; an initial stack of several items still creates just one host entry.
+    /// Replaces the current entry with the entire current tree while preserving
+    /// its managed index. An initial stack still creates just one host entry.
     pub fn attach(
         navigation: Rc<dyn WebNavigation>,
         backend: Rc<dyn HistoryBackend>,
@@ -274,32 +303,42 @@ impl HistoryController {
         backend: Rc<dyn HistoryBackend>,
         on_error: impl Fn(HistoryError) + 'static,
     ) -> Result<Self, HistoryError> {
-        Self::attach_impl(navigation, backend, on_error, false)
+        Self::attach_impl(
+            navigation,
+            backend,
+            on_error,
+            false,
+            HistoryOptions::default(),
+        )
     }
     pub(super) fn attach_legacy(
         navigation: Rc<dyn WebNavigation>,
         backend: Rc<dyn HistoryBackend>,
     ) -> Result<Self, HistoryError> {
-        Self::attach_impl(navigation, backend, |_| {}, true)
+        Self::attach_impl(navigation, backend, |_| {}, true, HistoryOptions::default())
     }
     fn attach_impl(
         navigation: Rc<dyn WebNavigation>,
         backend: Rc<dyn HistoryBackend>,
         on_error: impl Fn(HistoryError) + 'static,
         legacy: bool,
+        options: HistoryOptions,
     ) -> Result<Self, HistoryError> {
         let previous = snapshot(&navigation, &mut Vec::new())?;
-        if backend.current().and_then(|entry| entry.state).is_none() {
-            if legacy {
-                for (index, nodes) in expanded(&previous).into_iter().enumerate() {
-                    if index == 0 {
-                        backend.replace(entry(&nodes, index))?;
-                    } else {
-                        backend.push(entry(&nodes, index))?;
-                    }
+        let initial_index = backend
+            .current()
+            .and_then(|entry| entry.state)
+            .map_or(0, |state| state.index);
+        validate_index(initial_index)?;
+        if !legacy {
+            backend.replace(entry(&previous, initial_index, options.version.as_deref()))?;
+        } else if backend.current().and_then(|entry| entry.state).is_none() {
+            for (index, nodes) in expanded(&previous).into_iter().enumerate() {
+                if index == 0 {
+                    backend.replace(entry(&nodes, index, None))?;
+                } else {
+                    backend.push(entry(&nodes, index, None))?;
                 }
-            } else {
-                backend.replace(entry(&previous, 0))?;
             }
         }
         let error_source = crate::value::MutableValue::new(None);
@@ -310,12 +349,16 @@ impl HistoryController {
         validate_index(committed_index)?;
         let binding = Rc::new(Binding {
             legacy,
+            options: RefCell::new(options),
+            recreating: Cell::new(false),
             navigation: RefCell::new(Some(navigation)),
             backend,
             previous: RefCell::new(previous),
             subscriptions: RefCell::new(Vec::new()),
             host: RefCell::new(None),
             lifecycle: RefCell::new(None),
+            lifecycle_registry: RefCell::new(None),
+            suspended_lifecycle: RefCell::new(None),
             queue: RefCell::new(VecDeque::new()),
             pending_pop: RefCell::new(VecDeque::new()),
             restore_id: Cell::new(0),
@@ -339,18 +382,13 @@ impl HistoryController {
             }
         }));
         *binding.host.borrow_mut() = Some(token);
-        binding.watch()?;
-        Ok(Self { binding })
+        let controller = Self { binding };
+        controller.binding.watch()?;
+        Ok(controller)
     }
     /// Cancels this binding when the lifecycle is destroyed.
     pub fn with_lifecycle(self, lifecycle: &LifecycleRegistry) -> Self {
-        let weak = Rc::downgrade(&self.binding);
-        let token = lifecycle.do_on_destroy(move || {
-            if let Some(binding) = weak.upgrade() {
-                binding.cancel();
-            }
-        });
-        *self.binding.lifecycle.borrow_mut() = Some(token);
+        self.binding.bind_lifecycle(lifecycle);
         self
     }
     /// Idempotently disconnects all model, host, and lifecycle subscriptions.
@@ -367,31 +405,134 @@ impl Drop for HistoryController {
         self.cancel();
     }
 }
-// Complete independent cleanup even when several custom cancellation callbacks
-// panic. Preserve the first panic, or the original unwind already in progress.
-type PanicPayload = Box<dyn std::any::Any + Send>;
-fn cleanup(first: &mut Option<PanicPayload>, action: impl FnOnce()) {
-    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
-        && first.is_none()
-    {
-        *first = Some(panic);
-    }
-}
-fn finish_cleanup(first: Option<PanicPayload>) {
-    if !std::thread::panicking()
-        && let Some(panic) = first
-    {
-        std::panic::resume_unwind(panic);
-    }
-}
 fn drop_tokens(tokens: Vec<Subscription>) {
-    let mut first = None;
+    let mut cleanup = crate::cleanup::Cleanup::new();
     for token in tokens {
-        cleanup(&mut first, || drop(token));
+        cleanup.run(|| drop(token));
     }
-    finish_cleanup(first);
+    cleanup.finish();
 }
 impl Binding {
+    fn reset_after_unwind(&self) {
+        self.processing.set(false);
+        self.restoring.set(false);
+        self.recreating.set(false);
+        self.active_restore.set(None);
+        self.moving.set(false);
+        let pending = self.pending_pop.take();
+        let queue = self.queue.take();
+        let mut cleanup = crate::cleanup::Cleanup::new();
+        cleanup.run(|| drop(pending));
+        for event in queue {
+            cleanup.run(|| drop(event));
+        }
+        cleanup.finish();
+    }
+    fn bind_lifecycle(self: &Rc<Self>, lifecycle: &LifecycleRegistry) {
+        let weak = Rc::downgrade(self);
+        let token = lifecycle.do_on_destroy(move || {
+            if let Some(binding) = weak.upgrade() {
+                binding.cancel();
+            }
+        });
+        if !self.closed.get() {
+            let old_registry = self.lifecycle_registry.replace(Some(lifecycle.clone()));
+            drop(old_registry);
+            let old = self.lifecycle.replace(Some(token));
+            drop(old);
+        }
+    }
+    fn reconnect(self: &Rc<Self>) -> Result<(), HistoryError> {
+        if self.closed.get() {
+            return Ok(());
+        }
+        self.watch()?;
+        let lifecycle = self.suspended_lifecycle.take();
+        if let Some(lifecycle) = lifecycle {
+            self.bind_lifecycle(&lifecycle);
+        }
+        Ok(())
+    }
+    fn return_to_committed(self: &Rc<Self>) -> Result<(), HistoryError> {
+        if self.closed.get() {
+            return Ok(());
+        }
+        let delta = self.committed_index.get() as isize - self.index()? as isize;
+        if delta != 0 {
+            self.move_host(delta, None);
+        }
+        Ok(())
+    }
+    fn recreate(self: &Rc<Self>, state: HistoryState) -> Result<(), HistoryError> {
+        if self.closed.get() {
+            return Ok(());
+        }
+        let options = self.options.borrow().clone();
+        let Err(mismatch) = options.validate_saved_version(state.version.as_deref()) else {
+            return Ok(());
+        };
+        match options.recovery {
+            HistoryRecoveryPolicy::Reject => {
+                self.return_to_committed()?;
+                Err(HistoryError::VersionMismatch(mismatch))
+            }
+            HistoryRecoveryPolicy::Recreate(recreate) => {
+                let id =
+                    self.restore_id.get().checked_add(1).ok_or_else(|| {
+                        HistoryError::Backend("restoration counter exhausted".into())
+                    })?;
+                self.restore_id.set(id);
+                self.active_restore.set(Some(id));
+                self.restoring.set(true);
+                self.recreating.set(true);
+                let request = HistoryRecreation {
+                    mismatch,
+                    url: self
+                        .backend
+                        .current()
+                        .map_or_else(String::new, |entry| entry.url),
+                };
+                let weak = Rc::downgrade(self);
+                let index = state.index;
+                let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let old_suspended = self
+                        .suspended_lifecycle
+                        .replace(self.lifecycle_registry.take());
+                    drop(old_suspended);
+                    let lifecycle = self.lifecycle.take();
+                    drop_tokens(self.subscriptions.take());
+                    drop(lifecycle);
+                    if self.closed.get() {
+                        return;
+                    }
+                    recreate(
+                        request,
+                        Box::new(move |result| {
+                            if let Some(binding) = weak.upgrade() {
+                                binding.enqueue(Event::Recreated { id, index, result });
+                            }
+                        }),
+                    );
+                }));
+                if let Err(panic) = attempt {
+                    self.active_restore.set(None);
+                    self.restoring.set(false);
+                    self.recreating.set(false);
+                    let mut cleanup = crate::cleanup::Cleanup::new();
+                    cleanup.run(|| std::panic::resume_unwind(panic));
+                    if !self.closed.get() {
+                        cleanup.run(|| {
+                            if let Err(error) = self.reconnect() {
+                                self.report(error);
+                            }
+                        });
+                    }
+                    cleanup.finish();
+                }
+                Ok(())
+            }
+        }
+    }
     fn cancel(&self) {
         if self.closed.replace(true) {
             return;
@@ -399,22 +540,32 @@ impl Binding {
         let tokens = self.subscriptions.take();
         let host = self.host.borrow_mut().take();
         let lifecycle = self.lifecycle.borrow_mut().take();
+        let lifecycle_registry = self.lifecycle_registry.take();
+        let suspended_lifecycle = self.suspended_lifecycle.take();
         let navigation = self.navigation.borrow_mut().take();
         let error_handler = self.on_error.borrow_mut().take();
+        let options = self.options.take();
         let previous = self.previous.take();
-        self.queue.borrow_mut().clear();
-        self.pending_pop.borrow_mut().clear();
+        let queue = self.queue.take();
+        let pending = self.pending_pop.take();
         self.active_restore.set(None);
-        let mut first = None;
+        let mut cleanup = crate::cleanup::Cleanup::new();
         for token in tokens {
-            cleanup(&mut first, || drop(token));
+            cleanup.run(|| drop(token));
         }
-        cleanup(&mut first, || drop(host));
-        cleanup(&mut first, || drop(lifecycle));
-        cleanup(&mut first, || drop(navigation));
-        cleanup(&mut first, || drop(error_handler));
-        cleanup(&mut first, || drop(previous));
-        finish_cleanup(first);
+        cleanup.run(|| drop(host));
+        cleanup.run(|| drop(lifecycle));
+        cleanup.run(|| drop(lifecycle_registry));
+        cleanup.run(|| drop(suspended_lifecycle));
+        cleanup.run(|| drop(navigation));
+        cleanup.run(|| drop(error_handler));
+        cleanup.run(|| drop(options));
+        cleanup.run(|| drop(previous));
+        for event in queue {
+            cleanup.run(|| drop(event));
+        }
+        cleanup.run(|| drop(pending));
+        cleanup.finish();
     }
     fn report(&self, error: HistoryError) {
         self.error_source.set(Some(error.clone()));
@@ -459,6 +610,10 @@ impl Binding {
                 }
             })));
         }
+        if self.closed.get() {
+            drop_tokens(tokens);
+            return Ok(());
+        }
         let previous = self.subscriptions.replace(tokens);
         drop_tokens(previous);
         Ok(())
@@ -476,11 +631,7 @@ impl Binding {
             fn drop(&mut self) {
                 self.0.processing.set(false);
                 if std::thread::panicking() {
-                    self.0.restoring.set(false);
-                    self.0.active_restore.set(None);
-                    self.0.pending_pop.borrow_mut().clear();
-                    self.0.moving.set(false);
-                    self.0.queue.borrow_mut().clear();
+                    self.0.reset_after_unwind();
                 }
             }
         }
@@ -514,19 +665,22 @@ impl Binding {
         Ok(index)
     }
     fn write(&self, histories: Vec<Vec<Node>>, replace_first: bool) -> Result<(), HistoryError> {
+        let version = self.options.borrow().version.clone();
         for (i, nodes) in histories.into_iter().enumerate() {
             if self.closed.get() {
                 return Ok(());
             }
             if replace_first && i == 0 {
-                self.backend.replace(entry(&nodes, self.index()?))?;
+                self.backend
+                    .replace(entry(&nodes, self.index()?, version.as_deref()))?;
             } else {
                 let index = self
                     .index()?
                     .checked_add(1)
                     .ok_or_else(|| HistoryError::Backend("history index exhausted".into()))?;
                 validate_index(index)?;
-                self.backend.push(entry(&nodes, index))?;
+                self.backend
+                    .push(entry(&nodes, index, version.as_deref()))?;
             }
             self.committed_index.set(self.index()?);
         }
@@ -545,6 +699,7 @@ impl Binding {
         );
     }
     fn process(self: &Rc<Self>, event: Event) -> Result<(), HistoryError> {
+        let version = self.options.borrow().version.clone();
         if self.restoring.get()
             && let Event::Pop(state) = event
         {
@@ -553,6 +708,9 @@ impl Binding {
         }
         match event {
             Event::Changed(emitter) => {
+                if self.recreating.get() {
+                    return Ok(());
+                }
                 let navigation = self.navigation()?;
                 let nodes = snapshot(&navigation, &mut Vec::new())?;
                 if self.moving.get() {
@@ -583,7 +741,11 @@ impl Binding {
                                 }),
                             );
                         } else {
-                            self.backend.replace(entry(&nodes, self.index()?))?;
+                            self.backend.replace(entry(
+                                &nodes,
+                                self.index()?,
+                                version.as_deref(),
+                            ))?;
                             self.committed_index.set(self.index()?);
                         }
                     }
@@ -615,13 +777,27 @@ impl Binding {
                         }
                     }
                     Change::Update(nodes) => {
-                        self.backend.replace(entry(&nodes, self.index()?))?;
+                        self.backend
+                            .replace(entry(&nodes, self.index()?, version.as_deref()))?;
                         self.committed_index.set(self.index()?);
                     }
                 }
             }
             Event::Pop(Some(state)) => {
                 validate_index(state.index)?;
+                if !self.legacy
+                    && self
+                        .options
+                        .borrow()
+                        .validate_saved_version(state.version.as_deref())
+                        .is_err()
+                {
+                    if !before_recursive_general(&self.navigation()?, &mut Vec::new())? {
+                        self.return_to_committed()?;
+                        return Ok(());
+                    }
+                    return self.recreate(state);
+                }
                 if state.nodes.is_empty() {
                     return Err(HistoryError::EmptyHistory);
                 }
@@ -680,7 +856,8 @@ impl Binding {
                 {
                     let current = self.index()?;
                     if current == index {
-                        self.backend.replace(entry(&nodes, current))?;
+                        self.backend
+                            .replace(entry(&nodes, current, version.as_deref()))?;
                         self.committed_index.set(current);
                     } else if result.is_ok() {
                         self.move_host(
@@ -693,6 +870,76 @@ impl Binding {
                     }
                 }
                 result?;
+            }
+            Event::Recreated { id, index, result } => {
+                if self.active_restore.get() != Some(id) {
+                    return Ok(());
+                }
+                self.active_restore.set(None);
+                self.restoring.set(false);
+                self.recreating.set(false);
+                match result {
+                    Ok(root) => {
+                        let navigation = root.navigation;
+                        let nodes = snapshot(&navigation, &mut Vec::new());
+                        let result = nodes.and_then(|nodes| {
+                            if self.closed.get() {
+                                return Ok(());
+                            }
+                            let current = self.index()?;
+                            let version = self.options.borrow().version.clone();
+                            if current == index {
+                                self.backend
+                                    .replace(entry(&nodes, index, version.as_deref()))?;
+                            }
+                            if self.closed.get() {
+                                return Ok(());
+                            }
+                            let old = self.navigation.replace(Some(navigation));
+                            *self.previous.borrow_mut() = nodes.clone();
+                            self.committed_index.set(index);
+                            // Root destruction is arbitrary user cleanup. Finish
+                            // independent binding steps even if it panics, then
+                            // propagate that panic with the new root usable.
+                            let mut cleanup = crate::cleanup::Cleanup::new();
+                            cleanup.run(|| drop(old));
+                            let mut watched = Ok(());
+                            cleanup.run(|| watched = self.watch());
+                            cleanup.run(|| drop(self.suspended_lifecycle.take()));
+                            cleanup.run(|| {
+                                if !self.closed.get()
+                                    && let Some(lifecycle) = root.lifecycle
+                                {
+                                    self.bind_lifecycle(&lifecycle);
+                                }
+                            });
+                            cleanup.run(|| {
+                                if !self.closed.get() && current != index {
+                                    self.move_host(
+                                        index as isize - current as isize,
+                                        Some(HostWrite {
+                                            histories: vec![nodes],
+                                            replace_first: true,
+                                        }),
+                                    );
+                                }
+                            });
+                            cleanup.finish();
+                            watched?;
+                            Ok(())
+                        });
+                        if let Err(error) = result {
+                            self.reconnect()?;
+                            self.return_to_committed()?;
+                            return Err(error);
+                        }
+                    }
+                    Err(error) => {
+                        self.reconnect()?;
+                        self.return_to_committed()?;
+                        return Err(error);
+                    }
+                }
             }
             Event::Moved(result, rewrite) => {
                 self.moving.set(false);
@@ -722,6 +969,28 @@ fn before_recursive(
     nodes: &[HistoryNode],
 ) -> Result<bool, HistoryError> {
     before_recursive_checked(navigation, nodes, &mut Vec::new())
+}
+fn before_recursive_general(
+    navigation: &Rc<dyn WebNavigation>,
+    ancestors: &mut Vec<*const ()>,
+) -> Result<bool, HistoryError> {
+    let pointer = Rc::as_ptr(navigation) as *const ();
+    if ancestors.contains(&pointer) {
+        return Err(HistoryError::CyclicNavigation);
+    }
+    ancestors.push(pointer);
+    let history = navigation.history()?;
+    if let Some(child) = history
+        .last()
+        .ok_or(HistoryError::EmptyHistory)?
+        .child
+        .as_ref()
+        && !before_recursive_general(child, ancestors)?
+    {
+        return Ok(false);
+    }
+    ancestors.pop();
+    Ok(navigation.before_navigate())
 }
 fn before_recursive_checked(
     navigation: &Rc<dyn WebNavigation>,
@@ -754,12 +1023,7 @@ struct RestoreUnwindGuard<'a>(&'a Binding);
 impl Drop for RestoreUnwindGuard<'_> {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            self.0.processing.set(false);
-            self.0.restoring.set(false);
-            self.0.active_restore.set(None);
-            self.0.pending_pop.borrow_mut().clear();
-            self.0.moving.set(false);
-            self.0.queue.borrow_mut().clear();
+            self.0.reset_after_unwind();
         }
     }
 }

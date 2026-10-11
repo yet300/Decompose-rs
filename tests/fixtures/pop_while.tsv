@@ -1,0 +1,5 @@
+# input\tpredicate\tvisited\tcommitted
+1	true	1	1
+1,2	true	2,1	1
+1,2,3	stop=2	3,2	1,2
+1,2	panic=1	2,1	1,2

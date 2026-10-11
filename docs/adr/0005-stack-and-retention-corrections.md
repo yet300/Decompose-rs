@@ -1,6 +1,8 @@
 # ADR-0005: ChildStack and retention lifetime corrections
 
 Date: 2026-10-09. Status: accepted and implemented.
+Ownership release and panic-cleanup details are superseded by
+[ADR-0020](0020-detached-ownership-and-panic-cleanup.md), including limits of imported raw Essenty values.
 Reference: Decompose `00840bcfed6d55710c8fbb1a72503f2041eda490` and Essenty 0.1.0 registry sources.
 Supersedes conflicting Phase 1 assumptions in earlier ADRs and research documents.
 

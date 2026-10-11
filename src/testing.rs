@@ -36,7 +36,7 @@ impl TestContext {
         Self {
             lifecycle,
             state: Rc::new(RefCell::new(crate::StateKeeper::new())),
-            instances: Rc::new(RefCell::new(essenty_instance_keeper::InstanceKeeper::new())),
+            instances: Rc::new(RefCell::new(crate::instances::InstanceScope::new())),
             back: SharedBack::new(),
         }
     }
@@ -46,7 +46,7 @@ impl TestContext {
         Self {
             lifecycle: LifecycleRegistry::new(),
             state: Rc::new(RefCell::new(crate::StateKeeper::new())),
-            instances: Rc::new(RefCell::new(essenty_instance_keeper::InstanceKeeper::new())),
+            instances: Rc::new(RefCell::new(crate::instances::InstanceScope::new())),
             back: SharedBack::new(),
         }
     }
@@ -83,7 +83,7 @@ impl TestContext {
         let instances = if config_change {
             Rc::clone(&self.instances)
         } else {
-            Rc::new(RefCell::new(essenty_instance_keeper::InstanceKeeper::new()))
+            Rc::new(RefCell::new(crate::instances::InstanceScope::new()))
         };
         Self {
             lifecycle,

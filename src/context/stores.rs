@@ -119,27 +119,18 @@ impl StateStore {
     /// Unregisters a provider, preserving any unconsumed restored state.
     /// A removed provider drops after the keeper borrow is released, so its
     /// Drop may reenter this store.
+    /// This guarantee applies to registrations made through Decompose's adapter.
+    /// Pre-existing imported Essenty providers retain primitive drop behavior.
     pub fn unregister(&self, key: &str) -> Result<bool, StateAccessError> {
-        // Move the keeper out so the removed provider drops with no RefCell
-        // borrow held. Reentrant Drops then observe a usable (empty) store.
-        let mut owned = {
+        let removed = {
             let mut guard = self
                 .inner
                 .try_borrow_mut()
                 .map_err(|_| StateAccessError::Borrowed)?;
-            std::mem::replace(&mut *guard, StateKeeper::new())
+            guard.take_registration(key)
         };
-        let existed = owned.unregister(key);
-        // `owned` still holds the real keeper minus the removed provider;
-        // the removed provider already dropped above with no borrow held.
-        {
-            let mut guard = self
-                .inner
-                .try_borrow_mut()
-                .map_err(|_| StateAccessError::Borrowed)?;
-            std::mem::swap(&mut *guard, &mut owned);
-        }
-        drop(owned);
+        let existed = removed.existed;
+        drop(removed);
         Ok(existed)
     }
     /// Saves the same durable bytes as the underlying keeper.
@@ -241,7 +232,7 @@ impl Default for InstanceStore {
 impl From<InstanceKeeper> for InstanceStore {
     fn from(keeper: InstanceKeeper) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(keeper)),
+            inner: Rc::new(RefCell::new(keeper.into())),
         }
     }
 }
@@ -365,13 +356,30 @@ impl InstanceStore {
                 .inner
                 .try_borrow_mut()
                 .map_err(|_| InstanceAccessError::Borrowed)?;
-            let mut empty = InstanceKeeper::new();
-            if destroy || keeper.is_destroyed() {
-                empty.destroy_all();
-            }
+            let mut empty = if destroy || keeper.is_destroyed() {
+                crate::instances::InstanceScope::terminal()
+            } else {
+                crate::instances::InstanceScope::new()
+            };
+            empty.lifecycle_owned = keeper.lifecycle_owned;
             std::mem::replace(&mut *keeper, empty)
         };
-        drop(previous);
+        let mut cleanup = crate::cleanup::Cleanup::new();
+        cleanup.run(|| drop(previous));
+        cleanup.finish();
         Ok(())
+    }
+    pub(crate) fn destroy_shared(instances: &SharedInstances) {
+        Self {
+            inner: instances.clone(),
+        }
+        .destroy_all()
+        .expect("internal instance borrow during cleanup");
+    }
+    pub(crate) fn release_key_shared(instances: &SharedInstances, key: &str) {
+        let released = instances.borrow_mut().detach(key);
+        let mut cleanup = crate::cleanup::Cleanup::new();
+        cleanup.run(|| drop(released));
+        cleanup.finish();
     }
 }

@@ -20,8 +20,9 @@ stack-only algorithm over an explicit host backend.
 The [compatibility matrix](docs/COMPATIBILITY.md) records verified behavior,
 Rust adaptations, evidence and excluded integrations.
 Platform/UI integrations are outside this delivery. Behavior is checked against pinned
-Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`, not an unspecified
-latest release. See `NOTICE` for attribution.
+Decompose revision `00840bcfed6d55710c8fbb1a72503f2041eda490`; portable history
+versioning and attachment follow `0824a183f7fe3862a1409553e66346c999de7084`,
+verified as upstream HEAD on 2026-10-11. See `NOTICE` for attribution.
 
 ## Start here
 
@@ -223,6 +224,9 @@ during synchronous replay and rolls back registrations when replay panics.
 pushing an already active
 configuration with `push_new_or_panic` are no-ops. `bring_to_front_by_or_panic` takes a kind
 selector so Rust enum variants can replace Kotlin runtime-class matching.
+`pop_while` evaluates from the active child through the root until the first false
+predicate. If every child matches, it retains the root after evaluating it. A
+predicate panic, including on the root, leaves committed membership unchanged.
 
 `child_stack` returns a typed construction error. Fallible `try_*` methods return
 `Result<NavigationOutcome<R>, NavigationError>`; `*_or_panic` variants panic with
@@ -236,6 +240,13 @@ incomplete construction and abandoned queued work. Successful user callback
 side effects are outside that rollback boundary. If a lifecycle callback panic
 ends a child before membership commits, subsequent navigation reconstructs that
 child instead of reusing its ended scope.
+
+Library rollback and teardown finish independent cleanup actions even after a
+callback panic. They preserve an existing unwind; otherwise the first cleanup
+panic propagates after cleanup. Store removal detaches only the removed ownership,
+and instance release commits the empty/destroyed store before user payloads drop.
+The [ownership decision](docs/adr/0020-detached-ownership-and-panic-cleanup.md)
+describes imported raw Essenty and lifecycle-listener boundaries.
 
 ## ChildSlot
 
@@ -619,10 +630,25 @@ Keep the returned binding alive while synchronization is needed.
 Run `cargo run --example web_history` without any browser.
 
 The host adapter must serialize managed Rust history entries and wire the actual
-browser API/pop events. DOM/wasm bindings are outside this crate. Startup keeps an
-existing managed entry without automatically restoring the model; applications
-choose their initial deep-link/history reconstruction. Neither Rust navigation
+browser API/pop events. DOM/wasm bindings are outside this crate. Recursive attachment
+rewrites the current entry with the supplied model while preserving its index;
+applications choose their initial deep-link/history reconstruction. Optional
+`HistoryOptions` versions detect incompatible entries before route decoding.
+Typed rejection or a portable recreation hook handles mismatches, including
+deferred completions and replacement lifecycle bindings. Hosts map absent legacy
+version fields to `None`. See [history versioning](docs/history-versioning.md).
+Neither Rust navigation
 frames nor history state decode Kotlin SerializableContainer or Kotlin JSON bytes.
+
+For large Items lists, `ConfigurationIndex` and indexed constructors accelerate
+validation, activity maps and engine matching without changing the default
+Eq-only API. Indexed routing explicitly promises stable equality identity;
+`ConfigurationIndex::equality_only()` offers that opt-in without Hash or a key
+callback. Its unchanged inactive updates perform n equality comparisons. The
+default path preserves duplicate revalidation, including interior-mutated identity,
+and retains quadratic validation. Fresh equal replacements retain child identity.
+[Performance evidence](docs/items-performance.md) records measured counts and
+collision behavior. DPI1 and the other durable persistence envelopes are unchanged.
 
 ## Structure
 
@@ -674,14 +700,14 @@ standard events, source adapters and reusable navigator traits.
 [ADR-0013](docs/adr/0013-lazy-initial-state-and-compatibility.md) describes lazy
 standard initialization and the [compatibility matrix](docs/COMPATIBILITY.md).
 
-## Verification (Rust 1.96.0)
+## Verification (pinned Rust 1.96.0 / MSRV)
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --locked
+cargo test --doc --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
 cargo run --example child_stack
 cargo run --example child_slot
 cargo run --example child_pages
@@ -699,10 +725,13 @@ cargo run --example web_history
 cargo run --example whole_state_persistence
 ```
 
-Verified on 2026-10-10: **519 unit/integration tests and 1 doctest passed**.
-Formatting, strict Clippy/rustdoc, all 15 examples and library compilation on all
-24 installed targets passed. The no-default-features run passed the same tests.
-Complete commands, target names and independent review evidence are recorded in the
+`rust-toolchain.toml` pins the declared MSRV and formatting/lint components.
+The [CI workflow](.github/workflows/ci.yml) runs strict checks, subprocess and
+comparison-count regressions, all 15 examples, wasm/Android/iOS library checks,
+and packaged-crate verification using published dependencies. Current executed
+results and remaining limits are recorded in the
+[audit remediation report](docs/audits/2026-10-11-remediation-results.md).
+Historical checks are recorded in the
 [independent-core completion plan](docs/superpowers/plans/2026-10-10-independent-core-completion.md).
 The stage adds regression coverage for selective/whole-state persistence,
 in-process memory ownership, explicit configuration with isolated diagnostics,

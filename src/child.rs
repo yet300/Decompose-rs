@@ -94,50 +94,49 @@ impl Drop for Rollback {
         if self.defused {
             return;
         }
-        // Best-effort and panic-resistant: keeper access via try_borrow
-        // (skipped on conflict), SharedBack methods (busy-aware, never
-        // borrowing across dispatch), idempotent Essenty removals.
-        if let Some((state, key)) = self.state.take()
-            && let Ok(mut keeper) = state.try_borrow_mut()
-        {
-            keeper.unregister(&key);
-        }
-        if let Some((state, key, bytes)) = self.restored.take()
-            && let Ok(mut keeper) = state.try_borrow_mut()
-        {
-            keeper.return_bytes(key, bytes);
-        }
-        if let Some((state, key, value)) = self.restored_memory.take()
-            && let Ok(mut keeper) = state.try_borrow_mut()
-        {
-            keeper.return_memory(key, value);
-        }
-        // Only entries created by this attempt are tracked here; a
-        // pre-existing retained scope is never destroyed by rollback.
-        if let Some((instances, key)) = self.instance.take()
-            && let Ok(mut scope) = instances.try_borrow_mut()
-        {
-            scope.destroy(&key);
-        }
+        let mut cleanup = crate::cleanup::Cleanup::new();
+        cleanup.run(|| {
+            if let Some((state, key)) = self.state.take() {
+                let removed = state.borrow_mut().take_registration(&key);
+                drop(removed);
+            }
+        });
+        cleanup.run(|| {
+            if let Some((state, key, bytes)) = self.restored.take() {
+                state.borrow_mut().return_bytes(key, bytes);
+            }
+        });
+        cleanup.run(|| {
+            if let Some((state, key, value)) = self.restored_memory.take() {
+                state.borrow_mut().return_memory(key, value);
+            }
+        });
+        cleanup.run(|| {
+            if let Some((instances, key)) = self.instance.take() {
+                crate::InstanceStore::release_key_shared(&instances, &key);
+            }
+        });
         if let Some(bridge) = self.back.take() {
-            bridge.parent.unregister(bridge.handle_id);
-            bridge
-                .child
-                .remove_enabled_changed_listener(bridge.listener_id);
+            cleanup.run(|| {
+                bridge.parent.unregister(bridge.handle_id);
+            });
+            cleanup.run(|| {
+                bridge
+                    .child
+                    .remove_enabled_changed_listener(bridge.listener_id);
+            });
         }
         if let Some(merged) = self.merged.take() {
-            // Releases parent/manual observers. Safe during unwind: Essenty
-            // holds no registry borrow across observer delivery, and no
-            // back-dispatch frame borrows a lifecycle registry.
-            merged.shutdown();
+            cleanup.run(|| merged.shutdown());
         }
-        // Provisional lifecycle hooks, if any. Unsubscribing is pure cleanup
-        // (no delivery); remove only observers installed by this attempt.
         if let Some((lifecycle, ids)) = self.manual_hooks.take() {
             for id in ids {
-                let _ = lifecycle.unsubscribe(id);
+                cleanup.run(|| {
+                    let _ = lifecycle.unsubscribe(id);
+                });
             }
         }
+        cleanup.finish();
     }
 }
 
@@ -408,21 +407,26 @@ pub(crate) fn build_child<C>(
             manual_hook_ids.push(
                 manual
                     .do_on_destroy(move || {
-                        if let Ok(mut keeper) = state.try_borrow_mut() {
-                            keeper.unregister(&key);
-                        }
-                        if let Ok(mut retained) = instances.try_borrow_mut() {
-                            retained.destroy(&key);
-                        }
-                        if let Ok(mut scope) = scope.try_borrow_mut() {
-                            scope.destroy_all();
-                        }
-                        bridge.unregister(handle_id);
-                        peer.remove_enabled_changed_listener(listener_id);
-                        if let Some(id) = parent_observer_id {
-                            let _ = parents.unsubscribe(id);
-                        }
-                        merged::drive(&merged_registry, LifecycleState::Destroyed);
+                        let mut cleanup = crate::cleanup::Cleanup::new();
+                        cleanup.run(|| {
+                            let removed = state.borrow_mut().take_registration(&key);
+                            drop(removed);
+                        });
+                        cleanup.run(|| crate::InstanceStore::release_key_shared(&instances, &key));
+                        cleanup.run(|| crate::InstanceStore::destroy_shared(&scope));
+                        cleanup.run(|| {
+                            bridge.unregister(handle_id);
+                        });
+                        cleanup.run(|| {
+                            peer.remove_enabled_changed_listener(listener_id);
+                        });
+                        cleanup.run(|| {
+                            if let Some(id) = parent_observer_id {
+                                let _ = parents.unsubscribe(id);
+                            }
+                        });
+                        cleanup.run(|| merged::drive(&merged_registry, LifecycleState::Destroyed));
+                        cleanup.finish();
                     })
                     .detach(),
             );

@@ -2,6 +2,9 @@
 
 > Historical Phase 1 research. Implemented state-adapter and retention-lifetime
 > corrections in [ADR-0005](0005-stack-and-retention-corrections.md) supersede conflicting statements here.
+> [ADR-0020](0020-detached-ownership-and-panic-cleanup.md) additionally supersedes
+> the historical cleanup/borrow claims: shared removal detaches ownership and
+> independent cleanup preserves an existing unwind.
 
 Date: 2026-10-04. Rewritten: 2026-10-04 (Phase 0.5).
 Amended: 2026-10-04 (Phase 0.6: `SharedBack` replaces raw `Rc<RefCell<BackDispatcher>>`;

@@ -41,6 +41,20 @@ fn navigation(source: &MutableValue<Vec<Route<u8>>>) -> Rc<dyn WebNavigation> {
 }
 
 #[test]
+fn recursive_attachment_rewrites_existing_entry_and_preserves_index() {
+    let source = MutableValue::new(vec![route(1)]);
+    let backend = Rc::new(MemoryHistoryBackend::new());
+    let first = HistoryController::attach(navigation(&source), backend.clone()).unwrap();
+    source.set(vec![route(1), route(2)]);
+    drop(first);
+    let replacement = MutableValue::new(vec![route(8), route(9), route(10)]);
+    let _binding = HistoryController::attach(navigation(&replacement), backend.clone()).unwrap();
+    assert_eq!(backend.current().unwrap().url, "/10");
+    assert_eq!(backend.current().unwrap().state.unwrap().index, 1);
+    assert_eq!(backend.entries().len(), 2);
+}
+
+#[test]
 fn push_pop_forward_and_rewrite_keep_browser_and_navigation_in_sync() {
     let source = MutableValue::new(vec![route(1)]);
     let backend = Rc::new(MemoryHistoryBackend::new());
@@ -344,6 +358,7 @@ fn construction_failure_releases_resources_and_bad_codec_restore_reports_error()
     backend
         .replace(HistoryEntry {
             state: Some(HistoryState {
+                version: None,
                 index: 0,
                 nodes: vec![HistoryNode {
                     path: String::new(),
@@ -510,7 +525,7 @@ fn panels_adapter_restores_membership_preserving_current_mode() {
 }
 
 #[test]
-fn startup_keeps_existing_managed_state_and_history_disabled_stack_uses_active_only() {
+fn startup_rewrites_existing_managed_state_and_history_disabled_stack_uses_active_only() {
     use decompose_rs::router::stack::*;
     let context = decompose_rs::TestComponentContext::new();
     let nav = StackNavigation::new();
@@ -532,6 +547,7 @@ fn startup_keeps_existing_managed_state_and_history_disabled_stack_uses_active_o
     assert_eq!(web.history().unwrap().len(), 1);
     let original = HistoryEntry {
         state: Some(HistoryState {
+            version: None,
             index: 0,
             nodes: vec![HistoryNode {
                 path: String::new(),
@@ -543,7 +559,7 @@ fn startup_keeps_existing_managed_state_and_history_disabled_stack_uses_active_o
     };
     let backend = Rc::new(MemoryHistoryBackend::with_entries(vec![original.clone()], 0).unwrap());
     let _binding = HistoryController::attach(web, backend.clone()).unwrap();
-    assert_eq!(backend.entries()[0], original); // upstream does not restore startup entry
+    assert_eq!(backend.entries()[0].url, "/2"); // current upstream rewrites without restoring
     assert_eq!(*stack.get().active.configuration, 2);
     nav.push_or_panic(3);
     assert_eq!(backend.entries().len(), 1);
@@ -653,6 +669,7 @@ fn malformed_managed_index_is_typed_error_and_does_not_wrap_host_movement() {
     backend
         .replace(HistoryEntry {
             state: Some(HistoryState {
+                version: None,
                 index: usize::MAX,
                 nodes: vec![HistoryNode {
                     path: String::new(),
@@ -835,6 +852,7 @@ fn legacy_rewrite_first_keeps_forward_and_restore_active_match_ignores_lower_sta
     backend
         .replace(HistoryEntry {
             state: Some(HistoryState {
+                version: None,
                 index: 2,
                 nodes: vec![HistoryNode {
                     key: vec![3],

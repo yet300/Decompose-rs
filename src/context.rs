@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::StateKeeper;
-use essenty_instance_keeper::InstanceKeeper;
+use crate::instances::InstanceScope;
 use essenty_lifecycle::LifecycleRegistry;
 
 use crate::child::build_child;
@@ -30,7 +30,7 @@ pub use stores::{InstanceAccessError, InstanceStore, StateAccessError, StateStor
 pub(crate) type SharedKeeper = Rc<RefCell<StateKeeper>>;
 
 /// Shared parent-side instance-keeper handle (crate-internal).
-pub(crate) type SharedInstances = Rc<RefCell<InstanceKeeper>>;
+pub(crate) type SharedInstances = Rc<RefCell<InstanceScope>>;
 
 /// Detached context factory: builds a context of type `C` from prepared
 /// child-scope parts, closing over any extra services.
@@ -349,10 +349,13 @@ impl DefaultComponentContext {
                 // ownership stays with the caller. The hook captures only
                 // the keeper (never the lifecycle it is subscribed to), so
                 // no reference cycle is possible.
-                let fresh: SharedInstances = Rc::new(RefCell::new(InstanceKeeper::new()));
+                let fresh: SharedInstances = Rc::new(RefCell::new(InstanceScope::new()));
+                fresh.borrow_mut().lifecycle_owned = true;
                 let owned = Rc::clone(&fresh);
                 let _attach_id = lifecycle
-                    .do_on_destroy(move || owned.borrow_mut().destroy_all())
+                    .do_on_destroy(move || {
+                        InstanceStore::destroy_shared(&owned);
+                    })
                     .detach();
                 fresh
             }
@@ -482,6 +485,7 @@ impl ComponentContext for DefaultComponentContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InstanceKeeper;
     use essenty_lifecycle::LifecycleState;
 
     fn resumed_lifecycle() -> LifecycleRegistry {

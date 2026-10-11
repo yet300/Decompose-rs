@@ -1,4 +1,4 @@
-use crate::{InstanceKeeper, SharedInstances};
+use crate::{InstanceStore, SharedInstances, instances::InstanceScope};
 use std::{cell::RefCell, rc::Rc};
 
 /// Owned only by its parent keeper. Public child handles reference the nested
@@ -10,14 +10,14 @@ pub(crate) struct RetainedScope {
 impl RetainedScope {
     pub(crate) fn new() -> Self {
         Self {
-            instances: Rc::new(RefCell::new(InstanceKeeper::new())),
+            instances: Rc::new(RefCell::new(InstanceScope::new())),
         }
     }
 }
 impl Drop for RetainedScope {
     fn drop(&mut self) {
-        if let Ok(mut instances) = self.instances.try_borrow_mut() {
-            instances.destroy_all();
-        }
+        let mut cleanup = crate::cleanup::Cleanup::new();
+        cleanup.run(|| InstanceStore::destroy_shared(&self.instances));
+        cleanup.finish();
     }
 }

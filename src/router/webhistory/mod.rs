@@ -21,6 +21,9 @@ use std::rc::Rc;
 /// Failure in history conversion, model restoration, or host operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HistoryError {
+    /// Saved route bytes belong to an incompatible navigation schema.
+    #[error("history schema mismatch: saved {0:?}")]
+    VersionMismatch(HistoryVersionMismatch),
     /// Each observed navigation must have at least one history item.
     #[error("web navigation history must not be empty")]
     EmptyHistory,
@@ -125,15 +128,102 @@ pub struct HistoryNode {
 
 /// State stored in a backend history entry.
 ///
-/// `index` is relative to the entry where this binding began. Host adapters must
+/// `index` is relative to the managed-history boundary. Attachment preserves an
+/// existing entry's index, even when the model has a different stack length. Hosts must
 /// distinguish this state from unrelated entries. The format is Rust-defined;
 /// it does not decode Kotlin SerializableContainer or Kotlin JSON saves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryState {
+    /// Navigation schema, independent of the host's serialization format.
+    /// Host adapters must map a missing field in legacy entries to `None`.
+    pub version: Option<String>,
     /// Relative index of this managed entry.
     pub index: usize,
     /// Nonempty root navigation history.
     pub nodes: Vec<HistoryNode>,
+}
+
+/// Incompatible saved navigation schema, detected before route decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryVersionMismatch {
+    /// Schema of the saved entry; `None` denotes unversioned history.
+    pub saved: Option<String>,
+    /// Schema requested by the current application.
+    pub current: Option<String>,
+}
+
+/// Host-independent input to a root recreation hook. Saved route bytes are
+/// intentionally excluded: recreation must use fresh state and the current URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRecreation {
+    /// The incompatible schemas.
+    pub mismatch: HistoryVersionMismatch,
+    /// URL of the host entry requesting recreation.
+    pub url: String,
+}
+
+/// Completes a root recreation, synchronously or later without an async runtime.
+/// A canceled controller ignores late completion and releases its returned root.
+pub type HistoryRecreationCompletion = Box<dyn FnOnce(Result<HistoryRoot, HistoryError>)>;
+
+/// Fresh model binding returned by the host's recreation hook. The host keeps
+/// ownership of its actual root component and creates a fresh context/state store.
+pub struct HistoryRoot {
+    pub(super) navigation: Rc<dyn WebNavigation>,
+    pub(super) lifecycle: Option<essenty_lifecycle::LifecycleRegistry>,
+}
+impl HistoryRoot {
+    /// Creates a fresh root binding with explicit host-managed lifetime.
+    pub fn new(navigation: Rc<dyn WebNavigation>) -> Self {
+        Self {
+            navigation,
+            lifecycle: None,
+        }
+    }
+    /// Automatically cancels history when the replacement lifecycle is destroyed.
+    pub fn with_lifecycle(mut self, lifecycle: &essenty_lifecycle::LifecycleRegistry) -> Self {
+        self.lifecycle = Some(lifecycle.clone());
+        self
+    }
+}
+
+/// Policy for incompatible Back/Forward entries.
+#[derive(Clone, Default)]
+pub enum HistoryRecoveryPolicy {
+    /// Report a typed mismatch and return to the committed host entry.
+    #[default]
+    Reject,
+    /// Detach old model observers, then request a fresh navigation root.
+    /// The host owns lifecycle destruction and fresh context/state creation.
+    /// Call completion exactly once. Failed recreation reattaches the old model.
+    Recreate(Rc<dyn Fn(HistoryRecreation, HistoryRecreationCompletion)>),
+}
+
+/// Optional navigation version and portable root recovery policy.
+#[derive(Clone, Default)]
+pub struct HistoryOptions {
+    /// `None` accepts only unversioned entries; versions compare exactly.
+    pub version: Option<String>,
+    /// Behavior after an allowed navigation reaches incompatible saved history.
+    pub recovery: HistoryRecoveryPolicy,
+}
+impl HistoryOptions {
+    /// Validates a host-owned saved-root envelope before its payload decoder or
+    /// root factory runs. Missing legacy versions are represented by `None`.
+    /// On mismatch the host must use fresh state, optionally with the saved URL.
+    pub fn validate_saved_version(
+        &self,
+        saved: Option<&str>,
+    ) -> Result<(), HistoryVersionMismatch> {
+        if saved == self.version.as_deref() {
+            Ok(())
+        } else {
+            Err(HistoryVersionMismatch {
+                saved: saved.map(str::to_owned),
+                current: self.version.clone(),
+            })
+        }
+    }
 }
 
 /// One encoded item with its URL contribution and optional nested navigation.

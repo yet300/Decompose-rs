@@ -9,6 +9,21 @@ struct QueuedEvent<S> {
     operation: DiagnosticOperation,
     diagnose: bool,
 }
+fn release_events<S>(events: VecDeque<QueuedEvent<S>>, report_failure: bool) {
+    let mut cleanup = crate::cleanup::Cleanup::new();
+    for queued in events {
+        let Event {
+            transformer,
+            completion,
+        } = queued.event;
+        if report_failure {
+            cleanup.run(|| completion(Err(NavigationError::ChildUnavailable)));
+        }
+        cleanup.run(|| drop(transformer));
+        cleanup.run(|| drop(completion));
+    }
+    cleanup.finish();
+}
 
 pub(crate) struct SavedState<S> {
     pub(crate) configurations: S,
@@ -38,6 +53,19 @@ pub(crate) trait Model<C, T>: 'static {
         state
     }
     fn validate(&self, state: &Self::State) -> Result<(), NavigationError>;
+    fn validate_transition(
+        &self,
+        state: &Self::State,
+        _old: Option<&Self::State>,
+    ) -> Result<(), NavigationError> {
+        self.validate(state)
+    }
+    fn unique_configurations(&self) -> bool {
+        false
+    }
+    fn configuration_fingerprint(&self, _configuration: &C) -> Option<u64> {
+        None
+    }
     fn should_restore(&self, _state: &Self::State) -> bool {
         true
     }
@@ -94,8 +122,25 @@ impl RetainedNavigation {
                 .collect::<Vec<_>>()
         };
         // InstanceKeeper destruction may invoke user callbacks; release the map first.
-        drop(removed);
+        let mut cleanup = crate::cleanup::Cleanup::new();
+        for scope in removed {
+            cleanup.run(|| drop(scope));
+        }
+        cleanup.finish();
     }
+}
+
+impl Drop for RetainedNavigation {
+    fn drop(&mut self) {
+        release_scopes(std::mem::take(self.scopes.get_mut()));
+    }
+}
+fn release_scopes(scopes: BTreeMap<String, Rc<RetainedScope>>) {
+    let mut cleanup = crate::cleanup::Cleanup::new();
+    for (_, scope) in scopes {
+        cleanup.run(|| drop(scope));
+    }
+    cleanup.finish();
 }
 
 struct ScopeParts {
@@ -113,29 +158,33 @@ struct ScopeParts {
 impl ScopeParts {
     fn end(&self, end_retention: bool) {
         self.gate.set(false);
-        self.parent_back.unregister(self.handle);
-        self.back.remove_enabled_changed_listener(self.listener);
-        let _ = self.merged.lifecycle().unsubscribe(self.lifecycle_listener);
-        // Cleanup still runs when a lifecycle observer panics during destroy.
-        struct Cleanup<'a> {
-            parts: &'a ScopeParts,
-            retention: bool,
+        let mut cleanup = crate::cleanup::Cleanup::new();
+        cleanup.run(|| {
+            self.parent_back.unregister(self.handle);
+        });
+        cleanup.run(|| {
+            self.back.remove_enabled_changed_listener(self.listener);
+        });
+        cleanup.run(|| {
+            let _ = self.merged.lifecycle().unsubscribe(self.lifecycle_listener);
+        });
+        // Essenty commits a lifecycle step before observer delivery. If pause
+        // or stop delivery panics, resume terminal destruction from that step
+        // so cleanup cannot leave a partly ended scope behind.
+        while !self.local.state().is_destroyed() {
+            cleanup.run(|| {
+                let _ = self.local.destroy();
+            });
         }
-        impl Drop for Cleanup<'_> {
-            fn drop(&mut self) {
-                self.parts.merged.shutdown();
-                if self.retention {
-                    self.parts.instances.borrow_mut().destroy_all();
-                }
-            }
+        while !self.merged.state().is_destroyed() {
+            cleanup
+                .run(|| crate::merged::drive(&self.merged.lifecycle(), LifecycleState::Destroyed));
         }
-        let _cleanup = Cleanup {
-            parts: self,
-            retention: end_retention,
-        };
-        if !self.local.state().is_destroyed() {
-            let _ = self.local.destroy();
+        cleanup.run(|| self.merged.shutdown());
+        if end_retention {
+            cleanup.run(|| crate::InstanceStore::destroy_shared(&self.instances));
         }
+        cleanup.finish();
     }
     fn activate(&self, status: ChildStatus) {
         let active = matches!(status, ChildStatus::Started | ChildStatus::Resumed);
@@ -161,8 +210,23 @@ impl Drop for ScopeParts {
     }
 }
 struct Scope<C, T> {
-    child: Child<C, T>,
+    child: Option<Child<C, T>>,
     parts: ScopeParts,
+}
+
+impl<C, T> Scope<C, T> {
+    fn child(&self) -> &Child<C, T> {
+        self.child.as_ref().expect("live child scope")
+    }
+}
+impl<C, T> Drop for Scope<C, T> {
+    fn drop(&mut self) {
+        let mut cleanup = crate::cleanup::Cleanup::new();
+        cleanup.run(|| self.parts.end(false));
+        let child = self.child.take();
+        cleanup.run(|| drop(child));
+        cleanup.finish();
+    }
 }
 
 struct Managed<C, T> {
@@ -188,7 +252,7 @@ impl<C, T> Managed<C, T> {
                 configuration: self.configuration.clone(),
                 key: self.key.clone(),
             },
-            |s| ChildItem::Created(s.child.clone()),
+            |s| ChildItem::Created(s.child().clone()),
         )
     }
     fn reusable(&self) -> bool {
@@ -236,12 +300,14 @@ impl<C, T> Drop for Prepared<C, T> {
         if self.committed {
             return;
         }
+        let mut cleanup = crate::cleanup::Cleanup::new();
         for (scope, fresh_retention) in self.scopes.iter().rev() {
-            scope.parts.end(*fresh_retention);
+            cleanup.run(|| scope.parts.end(*fresh_retention));
             if *fresh_retention {
-                self.retained.remove(&scope.child.key);
+                cleanup.run(|| self.retained.remove(&scope.child().key));
             }
         }
+        cleanup.finish();
     }
 }
 
@@ -263,58 +329,46 @@ impl Drop for Construction {
         if self.committed {
             return;
         }
-        // Rollback must finish even when source cancellation or a retained
-        // instance's destruction panics. Preserve an existing unwind; otherwise
-        // propagate the first cleanup panic only after returning consumed input.
-        let already_unwinding = std::thread::panicking();
-        let mut first_panic = None;
-        let mut rollback = |action: &mut dyn FnMut()| {
-            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
-                && first_panic.is_none()
-            {
-                first_panic = Some(panic);
-            }
-        };
-        rollback(&mut || {
+        let mut rollback = crate::cleanup::Cleanup::new();
+        rollback.run(|| {
             if let Some(cleanup) = self.cleanup.take() {
                 cleanup();
             }
         });
-        rollback(&mut || {
+        rollback.run(|| {
             if let Some(value) = self.restored_memory.take() {
                 self.state
                     .borrow_mut()
                     .return_memory(self.key.clone(), value);
             }
         });
-        rollback(&mut || {
+        rollback.run(|| {
             if self.registered {
-                self.state.borrow_mut().unregister(&self.key);
+                let removed = self.state.borrow_mut().take_registration(&self.key);
+                drop(removed);
             }
         });
-        rollback(&mut || {
+        rollback.run(|| {
             if let Some(retained) = &self.retained {
                 let replaced = retained
                     .scopes
                     .replace(std::mem::take(&mut self.previous_scopes));
-                drop(replaced);
+                release_scopes(replaced);
             }
         });
-        rollback(&mut || {
+        rollback.run(|| {
             if self.new_retention {
-                self.instances.borrow_mut().destroy(&self.key);
+                crate::InstanceStore::release_key_shared(&self.instances, &self.key);
             }
         });
-        rollback(&mut || {
+        rollback.run(|| {
             if let Some(bytes) = self.restored.take() {
                 self.state
                     .borrow_mut()
                     .return_bytes(self.key.clone(), bytes);
             }
         });
-        if !already_unwinding && let Some(panic) = first_panic {
-            std::panic::resume_unwind(panic);
-        }
+        rollback.finish();
     }
 }
 
@@ -322,6 +376,7 @@ struct Engine<Ctx, C, T, M: Model<C, T>> {
     parent: LifecycleRegistry,
     config: Option<crate::DecomposeConfig>,
     parent_state: Weak<RefCell<StateKeeper>>,
+    parent_instances: Weak<RefCell<crate::instances::InstanceScope>>,
     back: SharedBack,
     retained: Rc<RetainedNavigation>,
     context_factory: ContextFactory<Ctx>,
@@ -486,11 +541,11 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
             return Err(NavigationError::Destroyed);
         }
         let scope = Rc::new(Scope {
-            child: Child {
+            child: Some(Child {
                 configuration: config,
                 instance,
                 key: key.clone(),
-            },
+            }),
             parts,
         });
         let replaced = self.retained.scopes.borrow_mut().insert(key, owner);
@@ -503,22 +558,44 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         restored: Option<SnapshotChildren>,
     ) -> Result<(), NavigationError> {
         let state = self.model.normalize(state);
-        self.model.validate(&state)?;
+        let previous = self.navigation_snapshot();
+        self.model.validate_transition(
+            &state,
+            (!self.initializing.get()).then_some(previous.as_ref()),
+        )?;
         self.ensure_alive()?;
         // Policy callbacks precede preparation, so a policy panic owns no fresh scopes.
         let statuses = self.model.statuses(&state);
         self.ensure_alive()?;
         let configs = self.model.configurations(&state);
-        let old_state = self.clone_navigation_state();
+        let old_state = previous.as_ref().clone();
+        // Validation must not retain the displaced state through publication.
+        drop(previous);
         let old = self.items.borrow().clone();
         let mut matched = vec![false; old.len()];
+        let mut candidates = std::collections::HashMap::<u64, Vec<usize>>::new();
+        for (position, item) in old.iter().enumerate() {
+            if let Some(fingerprint) = self.model.configuration_fingerprint(&item.configuration) {
+                candidates.entry(fingerprint).or_default().push(position);
+            }
+        }
         let mut next = Vec::with_capacity(configs.len());
         let mut counter = self.next_key.get();
         for (index, config) in configs.iter().enumerate() {
-            let existing = old
-                .iter()
-                .enumerate()
-                .find(|(i, item)| !matched[*i] && item.reusable() && item.configuration == *config);
+            let is_match =
+                |i: usize| !matched[i] && old[i].reusable() && old[i].configuration == *config;
+            // Same-position equality avoids scanning already-matched prefixes.
+            let existing_index =
+                if self.model.unique_configurations() && index < old.len() && is_match(index) {
+                    Some(index)
+                } else if let Some(fingerprint) = self.model.configuration_fingerprint(config) {
+                    candidates
+                        .get(&fingerprint)
+                        .and_then(|positions| positions.iter().copied().find(|&i| is_match(i)))
+                } else {
+                    (0..old.len()).find(|&i| is_match(i))
+                };
+            let existing = existing_index.map(|i| (i, &old[i]));
             let mut item = if let Some((i, item)) = existing {
                 matched[i] = true;
                 let mut item = item.clone();
@@ -573,18 +650,21 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                 item.scope = Some(scope);
             }
         }
+        let live_targets: BTreeMap<_, _> = next
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                item.scope
+                    .as_ref()
+                    .map(|scope| (Rc::as_ptr(scope), statuses[index]))
+            })
+            .collect();
         // Stop outgoing or demoted scopes before any incoming scope advances.
         for item in &old {
             if let Some(scope) = &item.scope {
-                let target = next
-                    .iter()
-                    .enumerate()
-                    .find(|(_, item)| {
-                        item.scope
-                            .as_ref()
-                            .is_some_and(|other| Rc::ptr_eq(other, scope))
-                    })
-                    .map(|(i, _)| statuses[i])
+                let target = live_targets
+                    .get(&Rc::as_ptr(scope))
+                    .copied()
                     .unwrap_or(ChildStatus::Created);
                 let rank = |s| match s {
                     ChildStatus::Created => 1,
@@ -603,24 +683,24 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                 self.ensure_alive()?;
             }
         }
+        let mut cleanup = crate::cleanup::Cleanup::new();
         for item in old.iter().rev() {
             if let Some(scope) = &item.scope
-                && !next.iter().any(|item| {
-                    item.scope
-                        .as_ref()
-                        .is_some_and(|other| Rc::ptr_eq(other, scope))
-                })
+                && !live_targets.contains_key(&Rc::as_ptr(scope))
             {
-                scope.parts.end(true);
-                self.ensure_alive()?;
-                self.retained.remove(&item.key);
+                cleanup.run(|| scope.parts.end(true));
+                cleanup.run(|| self.retained.remove(&item.key));
             }
         }
         // Retention only belongs to desired live entries, including restoration tombstones.
-        self.retained.retain(|key| {
-            next.iter()
-                .any(|item| item.key == key && item.scope.is_some())
-        });
+        let retained_keys: std::collections::BTreeSet<_> = next
+            .iter()
+            .filter(|item| item.scope.is_some())
+            .map(|item| item.key.as_str())
+            .collect();
+        cleanup.run(|| self.retained.retain(|key| retained_keys.contains(key)));
+        cleanup.finish();
+        self.ensure_alive()?;
         for (index, item) in next.iter().enumerate() {
             if let Some(scope) = &item.scope {
                 scope.parts.activate(statuses[index]);
@@ -687,7 +767,9 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                 impl<F: Fn()> Drop for Deferred<F> {
                     fn drop(&mut self) {
                         if self.armed {
-                            (self.cancel)();
+                            let mut cleanup = crate::cleanup::Cleanup::new();
+                            cleanup.run(|| (self.cancel)());
+                            cleanup.finish();
                         }
                     }
                 }
@@ -697,7 +779,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                         if let Some(engine) = cancel_weak.upgrade() {
                             engine.deferred.set(false);
                             let abandoned = std::mem::take(&mut *engine.queue.borrow_mut());
-                            drop(abandoned);
+                            release_events(abandoned, false);
                         }
                     },
                     armed: true,
@@ -722,11 +804,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                     // Abandoned FIFO work must report failure so pending
                     // receipts observe Err instead of an empty Ok. User
                     // completions may panic; never abort an active unwind.
-                    for queued in abandoned {
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            (queued.event.completion)(Err(NavigationError::ChildUnavailable));
-                        }));
-                    }
+                    release_events(abandoned, true);
                 }
             }
         }
@@ -817,20 +895,10 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         if self.destroyed.replace(true) {
             return;
         }
-        // Complete teardown before propagating any user cleanup panic. In
-        // particular, custom source cancellation must not strand live scopes.
-        let already_unwinding = std::thread::panicking();
-        let mut first_panic = None;
-        let mut cleanup = |action: &mut dyn FnMut()| {
-            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
-                && first_panic.is_none()
-            {
-                first_panic = Some(panic);
-            }
-        };
+        let mut cleanup = crate::cleanup::Cleanup::new();
         let abandoned = std::mem::take(&mut *self.queue.borrow_mut());
         let subscription = self.source_subscription.borrow_mut().take();
-        cleanup(&mut || {
+        cleanup.run(|| {
             if let Some(handle) = self.pop_handle.take() {
                 self.back.unregister(handle);
             }
@@ -838,27 +906,37 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         let items = self.items.borrow().clone();
         for item in items.iter().rev() {
             if let Some(scope) = &item.scope {
-                cleanup(&mut || scope.parts.end(false));
+                cleanup.run(|| scope.parts.end(false));
             }
         }
-        cleanup(&mut || {
+        cleanup.run(|| {
             if let Some(state) = self.parent_state.upgrade() {
-                state.borrow_mut().unregister(&self.key);
+                let removed = state.borrow_mut().take_registration(&self.key);
+                drop(removed);
             }
         });
-        cleanup(&mut || {
+        cleanup.run(|| {
             if let Some(id) = self.destroy_subscription.take() {
                 let _ = self.parent.unsubscribe(id);
             }
         });
+        // Essenty stops lifecycle notification after a callback panic. Finish
+        // the default root's owned retention even when its earlier attach hook
+        // cannot be reached; external keepers continue to belong to their host.
+        if self.parent.state().is_destroyed() {
+            cleanup.run(|| {
+                if let Some(instances) = self.parent_instances.upgrade()
+                    && instances.borrow().lifecycle_owned
+                {
+                    crate::InstanceStore::destroy_shared(&instances);
+                }
+            });
+        }
         // Both the token and abandoned events can own arbitrary user captures.
         let mut subscription = subscription;
-        cleanup(&mut || drop(subscription.take()));
-        let mut abandoned = Some(abandoned);
-        cleanup(&mut || drop(abandoned.take()));
-        if !already_unwinding && let Some(panic) = first_panic {
-            std::panic::resume_unwind(panic);
-        }
+        cleanup.run(|| drop(subscription.take()));
+        cleanup.run(|| release_events(abandoned, false));
+        cleanup.finish();
     }
 }
 
@@ -871,12 +949,10 @@ type EventReceiver<S> = Rc<dyn Fn(Event<S>)>;
 struct SetupSubscription(Option<Subscription>);
 impl Drop for SetupSubscription {
     fn drop(&mut self) {
-        let already_unwinding = std::thread::panicking();
+        let mut cleanup = crate::cleanup::Cleanup::new();
         let subscription = self.0.take();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(subscription)));
-        if !already_unwinding && let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
+        cleanup.run(|| drop(subscription));
+        cleanup.finish();
     }
 }
 
@@ -1079,6 +1155,7 @@ where
     let engine = Rc::new(Engine {
         parent: context.lifecycle(),
         parent_state: Rc::downgrade(&parent_state),
+        parent_instances: Rc::downgrade(&instances),
         back: context.back_handler(),
         retained,
         config: context.configuration(),

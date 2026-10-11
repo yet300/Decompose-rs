@@ -65,14 +65,20 @@ pub trait StackNavigator<C: 'static> {
             stack
         })
     }
-    /// Fallible counterpart of `pop_while`; accepted nested work returns a pending receipt.
+    /// Pops from the top while the predicate is true, evaluating the root too.
+    /// The root remains when every configuration matches. A predicate panic
+    /// leaves the previously committed stack intact and propagates.
+    /// Accepted nested work returns a pending receipt.
     /// Stored transformations own their captures because FIFO delivery may outlive this call.
     fn try_pop_while(
         &self,
         predicate: impl Fn(&C) -> bool + 'static,
     ) -> Result<crate::router::NavigationOutcome<NavigationResult<C>>, NavigationError> {
         self.try_navigate(move |mut stack| {
-            while stack.len() > 1 && stack.last().is_some_and(|top| predicate(top)) {
+            while stack.last().is_some_and(|top| predicate(top)) {
+                if stack.len() == 1 {
+                    break;
+                }
                 stack.pop();
             }
             stack
@@ -205,7 +211,10 @@ pub trait StackNavigator<C: 'static> {
     #[track_caller]
     fn pop_while_or_panic(&self, predicate: impl Fn(&C) -> bool + 'static) {
         self.navigate_or_panic(move |mut stack| {
-            while stack.len() > 1 && stack.last().is_some_and(|top| predicate(top)) {
+            while stack.last().is_some_and(|top| predicate(top)) {
+                if stack.len() == 1 {
+                    break;
+                }
                 stack.pop();
             }
             stack
