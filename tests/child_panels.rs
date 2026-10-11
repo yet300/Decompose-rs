@@ -1506,9 +1506,18 @@ fn initial_hook_parent_destroy_returns_destroyed_without_pumping_queued_events()
     let nav = PanelsNavigation::new();
     let source = nav.clone();
     let life = parent.lifecycle();
+    let completions = Rc::new(RefCell::new(Vec::new()));
+    let output = completions.clone();
     let options = PanelsOptions {
         on_state_changed: Some(Rc::new(move |_: &Panels<u32, u32, u32>, _| {
-            source.activate_main_or_panic(2);
+            let output = output.clone();
+            source.navigate_with(
+                |mut state| {
+                    state.main = Rc::new(2);
+                    state
+                },
+                move |result| output.borrow_mut().push(result.map(|_| ())),
+            );
             life.destroy().unwrap();
         })),
         ..Default::default()
@@ -1527,6 +1536,10 @@ fn initial_hook_parent_destroy_returns_destroyed_without_pumping_queued_events()
     ));
     assert_eq!(parent.back_handler().handler_count(), 0);
     assert!(parent.state_store().save().unwrap().is_empty());
+    assert_eq!(
+        *completions.borrow(),
+        [Err(NavigationError::ChildUnavailable)]
+    );
 }
 
 #[test]

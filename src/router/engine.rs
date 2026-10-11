@@ -9,16 +9,14 @@ struct QueuedEvent<S> {
     operation: DiagnosticOperation,
     diagnose: bool,
 }
-fn release_events<S>(events: VecDeque<QueuedEvent<S>>, report_failure: bool) {
+fn release_events<S>(events: VecDeque<QueuedEvent<S>>) {
     let mut cleanup = crate::cleanup::Cleanup::new();
     for queued in events {
         let Event {
             transformer,
             completion,
         } = queued.event;
-        if report_failure {
-            cleanup.run(|| completion(Err(NavigationError::ChildUnavailable)));
-        }
+        cleanup.run(|| completion(Err(NavigationError::ChildUnavailable)));
         cleanup.run(|| drop(transformer));
         cleanup.run(|| drop(completion));
     }
@@ -779,7 +777,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                         if let Some(engine) = cancel_weak.upgrade() {
                             engine.deferred.set(false);
                             let abandoned = std::mem::take(&mut *engine.queue.borrow_mut());
-                            release_events(abandoned, false);
+                            release_events(abandoned);
                         }
                     },
                     armed: true,
@@ -804,7 +802,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
                     // Abandoned FIFO work must report failure so pending
                     // receipts observe Err instead of an empty Ok. User
                     // completions may panic; never abort an active unwind.
-                    release_events(abandoned, true);
+                    release_events(abandoned);
                 }
             }
         }
@@ -935,7 +933,7 @@ impl<Ctx: ComponentContext + 'static, C: Eq + 'static, T: 'static, M: Model<C, T
         // Both the token and abandoned events can own arbitrary user captures.
         let mut subscription = subscription;
         cleanup.run(|| drop(subscription.take()));
-        cleanup.run(|| release_events(abandoned, false));
+        cleanup.run(|| release_events(abandoned));
         cleanup.finish();
     }
 }
