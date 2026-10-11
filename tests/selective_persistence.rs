@@ -526,7 +526,7 @@ fn restore_codec_error_is_not_a_decline() {
         |_: &u8, ctx| ctx,
     );
     assert!(
-        matches!(result, Err(decompose_rs::router::NavigationError::State(message)) if message == "decode failed")
+        matches!(result, Err(decompose_rs::router::NavigationError::StateSource(message)) if message.to_string() == "decode failed")
     );
     assert_eq!(calls.get(), 0);
     assert_eq!(p.state_store().save().unwrap(), saved);

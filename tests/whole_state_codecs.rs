@@ -440,7 +440,7 @@ fn whole_state_decode_errors_and_factory_panics_preserve_retryable_saved_bytes()
         let policy = Policy::default();
         policy.decode_error.set(true);
         assert!(
-            matches!(build(family, &p, &policy, || panic!("codec failure initialized")), Err(NavigationError::State(message)) if message == "decode error")
+            matches!(build(family, &p, &policy, || panic!("codec failure initialized")), Err(NavigationError::StateSource(message)) if message.to_string() == "decode error")
         );
         assert_eq!(policy.factories.get(), 0);
         assert_eq!(p.state_store().save().unwrap(), saved);
@@ -484,7 +484,7 @@ fn whole_state_decoders_cannot_change_page_count_or_introduce_duplicates() {
             policy.wrong_count.set(true);
             assert!(matches!(
                 build(family, &p, &policy, || panic!("wrong count initialized")),
-                Err(NavigationError::State(_))
+                Err(NavigationError::StateSource(_))
             ));
             assert_eq!(policy.factories.get(), 0);
             assert_eq!(p.state_store().save().unwrap(), saved);
@@ -733,7 +733,7 @@ fn nullable_slot_decoder_errors_and_factory_panics_preserve_saved_data_for_retry
         |_, ctx| ctx,
     );
     assert!(
-        matches!(error, Err(NavigationError::State(message)) if message == "slot decode error")
+        matches!(error, Err(NavigationError::StateSource(message)) if message.to_string() == "slot decode error")
     );
     assert_eq!(p.state_store().save().unwrap(), saved);
     assert!(

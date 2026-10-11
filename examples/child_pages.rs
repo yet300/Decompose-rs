@@ -1,4 +1,6 @@
-use decompose_rs::router::pages::{Pages, PagesCodec, PagesNavigation, PagesOptions, child_pages};
+use decompose_rs::router::pages::{
+    Pages, PagesCodec, PagesNavigation, PagesNavigator, PagesOptions, child_pages,
+};
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
     StateStore,

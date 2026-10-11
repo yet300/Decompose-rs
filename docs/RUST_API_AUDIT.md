@@ -13,6 +13,11 @@ No commits are part of this work. Dependency set and persistent formats are fixe
 
 Locations below refer to the baseline, before additive methods shift line numbers.
 
+Audit correction (2026-10-11): the manual `Clone` implementation for `Child<C, T>`
+is required to preserve cloning without `C: Clone` or `T: Clone` bounds. It clones
+the `Rc<C>` and `Rc<T>` handles and the key; standard `#[derive(Clone)]` would add
+both generic bounds. This is a Rust API requirement, not a Kotlin porting marker.
+
 | Location | Kotlin pattern / example | Rust problem | Proposal |
 |---|---|---|---|
 | `src/value.rs:54,74,124,189` | `get() -> Rc<T>`, `subscribe(Fn(Rc<T>) + 'static)`, cached `map` | Rc dereference/clone ceremony even for Copy values; immediate reads cannot accept local captures | Add `get_cloned`, `with`, `subscribe_ref`, `subscribe_cloned`, `modify(&mut T)`; retain snapshots and retained observers |

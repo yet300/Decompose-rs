@@ -20,6 +20,7 @@ pub struct Child<C, T> {
     /// Stable identity preserved while this child survives navigation.
     pub key: String,
 }
+// Deriving Clone would require C: Clone and T: Clone even though only Rc handles are cloned.
 impl<C, T> Clone for Child<C, T> {
     fn clone(&self) -> Self {
         Self {
@@ -57,11 +58,8 @@ pub enum NavigationError {
     /// Queued work removed or deactivated the requested child.
     #[error("requested child is unavailable")]
     ChildUnavailable,
-    /// Saved bytes or user codec could not be processed.
-    #[error("navigation state: {0}")]
-    State(String),
-    /// Application codec failure with the original typed cause preserved.
-    /// Legacy string codecs continue producing `State`.
+    /// Saved state or application codec failure with its cause preserved.
+    /// String codecs preserve their original message as an error source.
     #[error("navigation state: {0}")]
     StateSource(#[source] crate::ErrorSource),
     /// Context primitive could not be constructed.
@@ -69,7 +67,15 @@ pub enum NavigationError {
     Context(#[from] DecomposeError),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct StateMessage(String);
+
 impl NavigationError {
+    pub(crate) fn state_message(message: String) -> Self {
+        Self::state_source(StateMessage(message))
+    }
+
     /// Preserves an owned codec error for Result delivery and diagnostics.
     pub fn state_source(error: impl std::error::Error + 'static) -> Self {
         Self::StateSource(crate::ErrorSource::new(error))

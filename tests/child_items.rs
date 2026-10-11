@@ -1046,7 +1046,10 @@ fn exhausted_counter_returns_error_without_factory_and_preserves_empty_state() {
     let error = Rc::new(RefCell::new(None));
     let out = error.clone();
     lazy.set_items_with(|_| vec![Rc::new(0)], move |r| *out.borrow_mut() = r.err());
-    assert!(matches!(*error.borrow(), Some(NavigationError::State(_))));
+    assert!(matches!(
+        *error.borrow(),
+        Some(NavigationError::StateSource(_))
+    ));
     assert!(lazy.get().items.is_empty());
 }
 #[test]

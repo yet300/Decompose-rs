@@ -5,7 +5,7 @@ use decompose_rs::{
     ComponentContext, TestComponentContext,
     router::{
         NavigationError, NavigationOutcome,
-        stack::{StackNavigation, StackOptions, child_stack},
+        stack::{StackNavigation, StackNavigator, StackOptions, child_stack},
     },
 };
 

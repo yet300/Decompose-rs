@@ -1,5 +1,5 @@
 use decompose_rs::router::stack::{
-    StackCodec, StackNavigation, StackOptions, child_stack_with_initial,
+    StackCodec, StackNavigation, StackNavigator, StackOptions, child_stack_with_initial,
 };
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,

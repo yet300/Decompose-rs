@@ -1,3 +1,4 @@
+use decompose_rs::router::stack::StackNavigator;
 use decompose_rs::{ComponentContext, LifecycleState, TestComponentContext};
 use std::{cell::Cell, rc::Rc};
 

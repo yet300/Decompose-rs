@@ -1,5 +1,5 @@
 use decompose_rs::router::stack::{
-    StackNavigation, StackOptions, child_stack, child_stack_with_initial,
+    StackNavigation, StackNavigator, StackOptions, child_stack, child_stack_with_initial,
 };
 use decompose_rs::{ComponentContext, TestComponentContext};
 use std::rc::Rc;

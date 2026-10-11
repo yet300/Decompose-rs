@@ -447,7 +447,7 @@ fn type_mismatch_is_typed_and_returns_consumed_snapshot() {
         },
         |_, _| (),
     );
-    assert!(matches!(failed, Err(NavigationError::State(_))));
+    assert!(matches!(failed, Err(NavigationError::StateSource(_))));
     assert!(next.state_store().has_consumable("router").unwrap());
     let restored = child_stack_with_initial(
         &next,

@@ -84,9 +84,9 @@ impl<MC, DC, EC> PanelsCodec<MC, DC, EC> {
         Self {
             callbacks: Callbacks::Configurations {
                 encode: Rc::new(move |main, details, extra| {
-                    encode(main, details, extra).map_err(NavigationError::State)
+                    encode(main, details, extra).map_err(NavigationError::state_message)
                 }),
-                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::state_message)),
             },
             should_save: None,
             should_restore: None,
@@ -104,8 +104,8 @@ impl<MC, DC, EC> PanelsCodec<MC, DC, EC> {
     ) -> Self {
         Self {
             callbacks: Callbacks::State {
-                encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
-                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+                encode: Rc::new(move |value| encode(value).map_err(NavigationError::state_message)),
+                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::state_message)),
             },
             should_save: None,
             should_restore: None,
@@ -186,7 +186,7 @@ impl<MC, DC, EC> Clone for PanelsCodec<MC, DC, EC> {
 }
 const MAGIC: &[u8; 4] = b"DPN1";
 fn error(s: impl Into<String>) -> NavigationError {
-    NavigationError::State(s.into())
+    NavigationError::state_message(s.into())
 }
 fn field(out: &mut Vec<u8>, b: &[u8]) -> Result<(), NavigationError> {
     let n = u32::try_from(b.len()).map_err(|_| error("DPN1 field exceeds u32 length"))?;

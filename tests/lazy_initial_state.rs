@@ -583,7 +583,7 @@ fn malformed_and_decoder_error_restore_never_initialize_and_keep_retry_bytes() {
         let saved = parent.state_store().save().unwrap();
         let parent = restored(saved.clone());
         assert!(
-            matches!(construct(family, &parent, || panic!("decoder failure initialized"), true, true), Err(NavigationError::State(message)) if message == "decoder rejected membership")
+            matches!(construct(family, &parent, || panic!("decoder failure initialized"), true, true), Err(NavigationError::StateSource(message)) if message.to_string() == "decoder rejected membership")
         );
         assert_eq!(parent.state_store().save().unwrap(), saved);
         assert_eq!(
@@ -604,7 +604,7 @@ fn malformed_and_decoder_error_restore_never_initialize_and_keep_retry_bytes() {
                     true,
                     false
                 ),
-                Err(NavigationError::State(_))
+                Err(NavigationError::StateSource(_))
             ));
             assert_eq!(parent.state_store().save().unwrap(), bad);
         }

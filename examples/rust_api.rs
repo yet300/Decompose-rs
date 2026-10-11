@@ -3,7 +3,7 @@ use decompose_rs::{
     ComponentContext, DecomposeConfig, DefaultComponentContext, LifecycleRegistry, LifecycleState,
     router::{
         NavigationOutcome,
-        stack::{StackCodec, StackNavigation, StackOptions, child_stack},
+        stack::{StackCodec, StackNavigation, StackNavigator, StackOptions, child_stack},
     },
     value::MutableValue,
 };

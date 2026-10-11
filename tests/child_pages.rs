@@ -883,7 +883,7 @@ fn invalid_empty_restored_selection_count_and_codec_errors_remain_retryable() {
                 options,
                 |_, _| panic!("codec failure factory")
             ),
-            Err(NavigationError::State(_))
+            Err(NavigationError::StateSource(_))
         ));
         assert_eq!(parent.state_store().save().unwrap(), saved);
     }
@@ -1113,7 +1113,10 @@ fn failed_child_state_save_leaves_selection_all_old_lifecycles_and_factories_unt
     let error = Rc::new(RefCell::new(None));
     let out = error.clone();
     nav.select_with(3, move |r| *out.borrow_mut() = r.err());
-    assert!(matches!(*error.borrow(), Some(NavigationError::State(_))));
+    assert!(matches!(
+        *error.borrow(),
+        Some(NavigationError::StateSource(_))
+    ));
     assert_eq!(calls.get(), 2);
     assert_eq!(value.get().selected_index, Some(0));
     assert_eq!(old.lifecycle().state(), LifecycleState::Resumed);
@@ -1381,7 +1384,10 @@ fn exhausted_key_counter_reports_error_without_running_factory() {
         |_| vec![Rc::new(1u32)],
         move |r| *out.borrow_mut() = r.err(),
     );
-    assert!(matches!(*error.borrow(), Some(NavigationError::State(_))));
+    assert!(matches!(
+        *error.borrow(),
+        Some(NavigationError::StateSource(_))
+    ));
     assert!(value.get().items.is_empty());
 }
 #[test]

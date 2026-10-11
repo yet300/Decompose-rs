@@ -1,4 +1,5 @@
 use decompose_rs::router::slot::*;
+use decompose_rs::router::stack::StackNavigator;
 use decompose_rs::*;
 use std::{
     cell::{Cell, RefCell},
@@ -1050,7 +1051,7 @@ fn malformed_frames_reject_before_codec_and_remain_retryable() {
             let result = child_slot(&parent, &SlotNavigation::new(), None, options, |_, _| {
                 panic!("malformed factory")
             });
-            assert!(matches!(result, Err(NavigationError::State(_))));
+            assert!(matches!(result, Err(NavigationError::StateSource(_))));
             assert_eq!(parent.state_store().provider_count().unwrap(), 0);
             assert_eq!(parent.state_store().save().unwrap(), saved);
             assert_eq!(parent.back_handler().handler_count(), 0);
@@ -1073,7 +1074,7 @@ fn codec_failures_and_initial_factory_panic_allow_restoration_retry() {
         ..Default::default()
     };
     assert!(
-        matches!(child_slot(&restored,&nav,None,options,|_,ctx|ctx),Err(NavigationError::State(s)) if s=="decode failed")
+        matches!(child_slot(&restored,&nav,None,options,|_,ctx|ctx),Err(NavigationError::StateSource(s)) if s.to_string() == "decode failed")
     );
     assert_eq!(restored.state_store().save().unwrap(), saved);
     assert!(
@@ -1173,7 +1174,10 @@ fn exhausted_restored_counter_reports_typed_transition_error_without_factory() {
     nav.activate_with(1, move |result| {
         peer.borrow_mut().push(result.err().unwrap())
     });
-    assert!(matches!(&errors.borrow()[0], NavigationError::State(_)));
+    assert!(matches!(
+        &errors.borrow()[0],
+        NavigationError::StateSource(_)
+    ));
     assert!(slot.get().child.is_none());
 }
 

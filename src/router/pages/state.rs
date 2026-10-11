@@ -76,8 +76,8 @@ impl<C> PagesCodec<C> {
     ) -> Self {
         Self {
             callbacks: Callbacks::Configurations {
-                encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
-                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+                encode: Rc::new(move |value| encode(value).map_err(NavigationError::state_message)),
+                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::state_message)),
             },
             should_save: None,
             should_restore: None,
@@ -95,8 +95,8 @@ impl<C> PagesCodec<C> {
     ) -> Self {
         Self {
             callbacks: Callbacks::State {
-                encode: Rc::new(move |value| encode(value).map_err(NavigationError::State)),
-                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::State)),
+                encode: Rc::new(move |value| encode(value).map_err(NavigationError::state_message)),
+                decode: Rc::new(move |bytes| decode(bytes).map_err(NavigationError::state_message)),
             },
             should_save: None,
             should_restore: None,
@@ -145,7 +145,7 @@ impl<C> Clone for PagesCodec<C> {
 use crate::router::engine::SavedState as SavedPages;
 const MAGIC: &[u8; 4] = b"DPG1";
 fn state_error(message: impl Into<String>) -> NavigationError {
-    NavigationError::State(message.into())
+    NavigationError::state_message(message.into())
 }
 fn append_field(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), NavigationError> {
     let length =

@@ -1,4 +1,6 @@
-use decompose_rs::router::stack::{StackCodec, StackNavigation, StackOptions, child_stack};
+use decompose_rs::router::stack::{
+    StackCodec, StackNavigation, StackNavigator, StackOptions, child_stack,
+};
 use decompose_rs::{
     ComponentContext, DefaultComponentContext, LifecycleRegistry, LifecycleState, StateKeeper,
     StateStore,

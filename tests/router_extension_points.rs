@@ -1661,7 +1661,7 @@ fn typed_decoder_error_returns_saved_input_and_cancels_custom_source_before_retr
         |_, _| -> Component { panic!("factory must not run") },
     );
     assert!(
-        matches!(result, Err(router::NavigationError::State(message)) if message == "typed decoder error")
+        matches!(result, Err(router::NavigationError::StateSource(message)) if message.to_string() == "typed decoder error")
     );
     assert_eq!(source.connections.get(), 0);
     assert_clean(&parent, "DefaultChildStack");
